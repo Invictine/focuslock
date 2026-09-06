@@ -1,0 +1,12 @@
+<resources>
+    <string name="app_name">FocusLock</string>
+    <string name="accessibility_service_desc">FocusLock uses accessibility features solely to detect when designated doomscrolling apps (like Instagram and YouTube) are launched, intercepting them when your earned screen time is depleted, and ensuring you log productive work in TickTick first.</string>
+    <string name="lockout_title">Doomscroll Blocked</string>
+    <string name="lockout_message">You have used up all your earned doomscroll time. Complete and log productive tasks in TickTick to unlock this app.</string>
+    <string name="open_ticktick">Open TickTick to Log Work</string>
+    <string name="verify_ticktick">Sync &amp; Verify Work</string>
+    <string name="go_home">Back to Home</string>
+    <string name="earned_balance_label">Available Screen Time</string>
+    <string name="work_logged_today_label">TickTick Work Today</string>
+    <string name="doomscroll_time_today_label">Doomscroll Used Today</string>
+</resources>

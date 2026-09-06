@@ -1,0 +1,28 @@
+# Local SDK + secrets — NEVER commit
+local.properties
+.env
+*.jks
+*.keystore
+
+# Gradle / build outputs
+.gradle/
+build/
+app/build/
+.kotlin/
+captures/
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+
+# Node / Convex / Tauri
+node_modules/
+desktop/node_modules/
+desktop/dist/
+desktop/.env
+convex/_generated/
+convex/.env.local
+src-tauri/target/
+*.node
+desktop/vite*.log
