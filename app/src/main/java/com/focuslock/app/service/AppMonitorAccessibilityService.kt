@@ -87,6 +87,15 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             val settings = FocusLockApplication.instance.settingsRepository
             val bank = FocusLockApplication.instance.creditBankRepository
 
+            // 0. NUKE MODE — block everything except the Nuke lock screen itself.
+            // Phone + PC stay locked until 10-min reset + coach approval.
+            try {
+                if (settings.nukeActiveFlow.first()) {
+                    triggerNuke()
+                    return@launch
+                }
+            } catch (_: Exception) { }
+
             // 1. TickTick active time tracking
             if (packageName == "com.ticktick.task") {
                 startTickTickActiveTracking()
@@ -255,6 +264,20 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             }
         }
         startActivity(intent)
+    }
+
+    private fun triggerNuke() {
+        Log.w(TAG, "NUKE active — forcing reset screen")
+        try {
+            val intent = Intent(this, com.focuslock.app.ui.nuke.NukeActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+            }
+            startActivity(intent)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to launch NukeActivity", e)
+        }
     }
 
     override fun onInterrupt() {

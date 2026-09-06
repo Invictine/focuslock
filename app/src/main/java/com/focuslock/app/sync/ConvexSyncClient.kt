@@ -97,6 +97,48 @@ class ConvexSyncClient(
         return post("/api/mutation", "focus:addWorkRecord", args) != null
     }
 
+    // --- Nuke mode (phone+PC sync) ---
+    suspend fun getNuke(): JSONObject? {
+        return post("/api/query", "nuke:getNuke", JSONObject())
+    }
+
+    suspend fun activateNuke(): Boolean {
+        return post("/api/mutation", "nuke:activate", JSONObject()) != null
+    }
+
+    suspend fun completeNukeMeditation(): Boolean {
+        return post("/api/mutation", "nuke:completeMeditation", JSONObject()) != null
+    }
+
+    /** Returns Pair(approved, reply). Uses /api/action for the LLM check-in. */
+    suspend fun checkinNuke(message: String, history: List<Pair<String, String>> = emptyList()): Pair<Boolean, String>? = withContext(Dispatchers.IO) {
+        val token = tokenProvider() ?: return@withContext null
+        val histArr = JSONArray()
+        history.takeLast(6).forEach { (role, text) ->
+            histArr.put(JSONObject().put("role", role).put("text", text))
+        }
+        val body = JSONObject().put("path", "nuke:checkin")
+            .put("args", JSONObject().put("message", message).put("history", histArr)).toString()
+            .toRequestBody(jsonMedia)
+        val req = Request.Builder()
+            .url(convexUrl.trimEnd('/') + "/api/action")
+            .addHeader("Authorization", "Bearer $token")
+            .post(body)
+            .build()
+        try {
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext null
+                val text = resp.body?.string() ?: return@withContext null
+                val root = JSONObject(text)
+                if (root.optString("status") != "success") return@withContext null
+                val value = if (root.has("value")) root.optJSONObject("value") ?: JSONObject() else root
+                val approved = value.optBoolean("approved", false)
+                val reply = value.optString("reply", "Stay with it — tell me your plan.")
+                Pair(approved, reply)
+            }
+        } catch (_: Exception) { null }
+    }
+
     data class Snapshot(
         val state: JSONObject?,
         val apps: List<RemoteApp>,

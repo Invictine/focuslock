@@ -29,7 +29,11 @@ export const getSnapshot = query({
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .order("desc")
       .take(200);
-    return { state, apps, sites, records };
+    const nuke = await ctx.db
+      .query("nukeState")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .first();
+    return { state, apps, sites, records, nuke };
   },
 });
 

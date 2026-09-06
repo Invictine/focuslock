@@ -3,6 +3,7 @@ import { SignInButton, SignUpButton, UserButton } from "@clerk/clerk-react";
 import { useEffect, useMemo, useState } from "react";
 import { api as convexApi } from "../../convex/_generated/api";
 import "./styles.css";
+import NukeOverlay, { NukeButton } from "./NukeOverlay";
 
 const api: any = convexApi;
 
@@ -171,7 +172,7 @@ export default function App() {
               </div>
             </div>
           </Unauthenticated>
-          <Authenticated><LiveDashboard /></Authenticated>
+          <Authenticated><LiveDashboard /><NukeOverlay /></Authenticated>
         </>
       )}
       <footer>
@@ -766,6 +767,7 @@ function LimitsTab({ limits, schedules, prefs, apps, sites, persistAll, setBusy 
   }
   return (
     <div className="grid2">
+      <div style={{ gridColumn: "1 / -1" }}><NukeButton /></div>
       <div className="card">
         <h3 style={{ marginTop: 0 }}>⛔ Block now</h3>
         <p className="muted">Instantly lock everything (like StayFree's Block Now). {prefs.strictMode ? "Strict mode is ON — toggles are locked." : ""}</p>

@@ -28,6 +28,9 @@ class SettingsRepository(private val context: Context) {
         val WORK_RATIO = intPreferencesKey("work_ratio") // e.g. 4 => 4 min work = 1 min scroll
         val TASK_COMPLETION_BONUS = intPreferencesKey("task_completion_bonus")
         val STRICT_MODE = booleanPreferencesKey("strict_mode")
+        val NUKE_ACTIVE = booleanPreferencesKey("nuke_active")
+        val NUKE_STARTED_AT = longPreferencesKey("nuke_started_at")
+        val NUKE_MEDITATION_DONE_AT = longPreferencesKey("nuke_meditation_done_at")
 
         val OAUTH_STATE = stringPreferencesKey("oauth_state")
         val OAUTH_STARTED_AT = longPreferencesKey("oauth_started_at")
@@ -109,6 +112,18 @@ class SettingsRepository(private val context: Context) {
 
     val strictModeFlow: Flow<Boolean> = context.dataStore.data.map { preferences ->
         preferences[PreferencesKeys.STRICT_MODE] ?: false
+    }
+
+    val nukeActiveFlow: Flow<Boolean> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.NUKE_ACTIVE] ?: false
+    }
+
+    val nukeStartedAtFlow: Flow<Long> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.NUKE_STARTED_AT] ?: 0L
+    }
+
+    val nukeMeditationDoneAtFlow: Flow<Long> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.NUKE_MEDITATION_DONE_AT] ?: 0L
     }
 
     // App Operations
@@ -309,6 +324,29 @@ class SettingsRepository(private val context: Context) {
     suspend fun setStrictMode(enabled: Boolean) {
         context.dataStore.edit { preferences ->
             preferences[PreferencesKeys.STRICT_MODE] = enabled
+        }
+    }
+
+    suspend fun setNukeActive(active: Boolean, startedAt: Long = System.currentTimeMillis()) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.NUKE_ACTIVE] = active
+            if (active) {
+                preferences[PreferencesKeys.NUKE_STARTED_AT] = startedAt
+                preferences.remove(PreferencesKeys.NUKE_MEDITATION_DONE_AT)
+            }
+        }
+    }
+
+    suspend fun setNukeMeditationDone(doneAt: Long = System.currentTimeMillis()) {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.NUKE_MEDITATION_DONE_AT] = doneAt
+        }
+    }
+
+    suspend fun clearNuke() {
+        context.dataStore.edit { preferences ->
+            preferences[PreferencesKeys.NUKE_ACTIVE] = false
+            preferences.remove(PreferencesKeys.NUKE_MEDITATION_DONE_AT)
         }
     }
 

@@ -263,6 +263,87 @@ fun DashboardScreen(
             }
         }
 
+        // 3b. NUKE — total lock on phone+PC until 10-min reset + coach check-in.
+        item {
+            val nukeActive by settings.nukeActiveFlow.collectAsState(initial = false)
+            var nuking by remember { mutableStateOf(false) }
+            var showNukeConfirm by remember { mutableStateOf(false) }
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = if (nukeActive) MaterialTheme.colorScheme.errorContainer
+                    else MaterialTheme.colorScheme.surfaceContainer
+                ),
+                shape = MaterialTheme.shapes.large,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        if (nukeActive) "☢ NUKE ACTIVE — phone + PC locked"
+                        else "☢ Nuke it",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        color = if (nukeActive) MaterialTheme.colorScheme.onErrorContainer
+                        else MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        if (nukeActive) "Finish the 10-minute reset + coach check-in to lift it on both devices."
+                        else "Completely blocks phone + PC until you finish a 10-minute breathing reset and talk through your plan with the coach.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (nukeActive) MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.85f)
+                        else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Button(
+                        onClick = {
+                            if (nukeActive) {
+                                context.startActivity(android.content.Intent(context, com.focuslock.app.ui.nuke.NukeActivity::class.java).apply {
+                                    addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                })
+                            } else showNukeConfirm = true
+                        },
+                        enabled = !nuking,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.error,
+                            contentColor = MaterialTheme.colorScheme.onError
+                        ),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                        shape = MaterialTheme.shapes.large
+                    ) {
+                        Text(if (nuking) "Arming…" else if (nukeActive) "Return to reset" else "NUKE everything")
+                    }
+                }
+            }
+            if (showNukeConfirm) {
+                AlertDialog(
+                    onDismissRequest = { showNukeConfirm = false },
+                    title = { Text("Nuke phone + PC?") },
+                    text = { Text("This locks EVERYTHING on both devices. The only way out is the 10-minute breathing reset + an honest check-in with the coach about what you will do next. No bypass.") },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            showNukeConfirm = false
+                            nuking = true
+                            scope.launch {
+                                try {
+                                    settings.setNukeActive(true)
+                                    // Push to Convex so PC locks too (~30s sync + instant on open).
+                                    try {
+                                        val authVm = com.focuslock.app.auth.AuthViewModel()
+                                        val url = try { com.focuslock.app.BuildConfig.CONVEX_URL.trim() } catch (_: Exception) { "" }
+                                        if (url.startsWith("http")) {
+                                            val client = com.focuslock.app.sync.ConvexSyncClient(url, authVm::getConvexToken)
+                                            client.activateNuke()
+                                        }
+                                    } catch (_: Exception) { }
+                                    context.startActivity(android.content.Intent(context, com.focuslock.app.ui.nuke.NukeActivity::class.java).apply {
+                                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    })
+                                } finally { nuking = false }
+                            }
+                        }) { Text("NUKE it", color = MaterialTheme.colorScheme.error) }
+                    },
+                    dismissButton = { TextButton(onClick = { showNukeConfirm = false }) { Text("Cancel") } }
+                )
+            }
+        }
+
         // 4. Digital Wellbeing / StayFree: Screen Time Today
         item {
             Card(
