@@ -2,6 +2,7 @@ import { Authenticated, Unauthenticated, useConvexAuth, useMutation, useQuery } 
 import { SignInButton, SignUpButton, UserButton } from "@clerk/clerk-react";
 import { api } from "../../convex/_generated/api";
 import { useState } from "react";
+import NukeOverlay, { NukeButton } from "./NukeOverlay";
 
 function fmtDate(d = new Date()) {
   return d.toISOString().slice(0, 10);
@@ -48,6 +49,7 @@ export default function App() {
 
           <Authenticated>
             <Dashboard />
+            <NukeOverlay />
           </Authenticated>
         </>
       )}
@@ -121,6 +123,7 @@ function Dashboard() {
   return (
     <div style={{ display: "grid", gap: 16 }}>
       {busy && <p style={{ opacity: 0.7 }}>{busy}</p>}
+      <NukeButton />
       <div style={styles.grid}>
         <div style={styles.card}>
           <h3>Credit balance</h3>

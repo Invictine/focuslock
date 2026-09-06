@@ -90,10 +90,30 @@ class FocusSyncManager(
             for (h in history) {
                 if (convex.pushRecord(RemoteRecord(h.id, h.title, h.durationMinutes, h.timestamp, h.source.name, h.earnedMinutesCredited, h.projectName))) pushed++
             }
+            // --- PUSH nuke (local activation must reach PC even if snapshot is stale) ---
+            try {
+                if (settings.nukeActiveFlow.first()) convex.activateNuke()
+            } catch (_: Exception) { }
             // --- PULL remote ---
             val snap = convex.getSnapshot()
             var pulled = 0
             if (snap != null) {
+                // Nuke mode wins over everything — if remote says active, go full lock.
+                try {
+                    val nuke = convex.getNuke()
+                    if (nuke != null && nuke.optBoolean("isActive", false)) {
+                        val startedAt = nuke.optLong("startedAt", System.currentTimeMillis())
+                        val medDone = nuke.optLong("meditationCompletedAt", 0L)
+                        val localActive = settings.nukeActiveFlow.first()
+                        if (!localActive) settings.setNukeActive(true, startedAt)
+                        if (medDone > 0 && settings.nukeMeditationDoneAtFlow.first() == 0L) {
+                            settings.setNukeMeditationDone(medDone)
+                        }
+                    } else if (nuke != null && !nuke.optBoolean("isActive", true)) {
+                        // Remote unlocked via coach approval — clear local lock.
+                        if (settings.nukeActiveFlow.first()) settings.clearNuke()
+                    }
+                } catch (_: Exception) { }
                 if (snap.apps.isNotEmpty()) {
                     val remote = snap.apps.map { BlockedApp(it.packageName, it.appName, it.isBlocked, it.category, it.specificShortsOnly) }
                     if (remote != apps) settings.updateBlockedApps(remote)

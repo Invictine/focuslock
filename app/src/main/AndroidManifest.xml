@@ -50,6 +50,18 @@
             android:showOnLockScreen="true"
             android:turnScreenOn="true" />
 
+        <!-- NUKE: total lock + 10-min reset + coach check-in. No escape. -->
+        <activity
+            android:name=".ui.nuke.NukeActivity"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:lockTaskMode="if_whitelisted"
+            android:theme="@style/Theme.FocusLock.Blocker"
+            android:showOnLockScreen="true"
+            android:turnScreenOn="true"
+            android:windowSoftInputMode="adjustResize" />
+
         <!-- TickTick OAuth 2.0 Redirect Activity.
              TickTick only registers http(s) URLs, so the active redirect is the loopback
              http://127.0.0.1:8080/ (auto-intercept when the system dispatches it, manual

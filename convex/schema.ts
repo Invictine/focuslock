@@ -48,4 +48,14 @@ export default defineSchema({
   })
     .index("by_user", ["userId"])
     .index("by_user_record", ["userId", "recordId"]),
+
+  nukeState: defineTable({
+    userId: v.string(),
+    isActive: v.boolean(),
+    startedAt: v.number(),
+    meditationCompletedAt: v.optional(v.number()),
+    planText: v.optional(v.string()),
+    unlockedAt: v.optional(v.number()),
+    updatedAt: v.number(),
+  }).index("by_user", ["userId"]),
 });
