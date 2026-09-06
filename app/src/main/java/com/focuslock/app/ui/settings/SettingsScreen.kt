@@ -3,7 +3,14 @@ package com.focuslock.app.ui.settings
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -32,6 +39,7 @@ import com.focuslock.app.FocusLockApplication
 import com.focuslock.app.service.TickTickApiClient
 import com.focuslock.app.service.TickTickAuthConfig
 import com.focuslock.app.ui.permissions.PermissionHelper
+import com.focuslock.app.ui.permissions.PermissionKind
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
@@ -39,7 +47,7 @@ import java.util.Date
 import java.util.Locale
 
 @Composable
-fun SettingsScreen() {
+fun SettingsScreen(highlightKind: PermissionKind? = null) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
@@ -160,6 +168,17 @@ fun SettingsScreen() {
     val isOverlayOn = remember(context, refreshTick) { PermissionHelper.isOverlayGranted(context) }
     val isNotifOn = remember(context, refreshTick) { PermissionHelper.isNotificationListenerGranted(context) }
     val isBatteryIgnored = remember(context, refreshTick) { PermissionHelper.isBatteryOptimizationIgnored(context) }
+    val isDeviceAdminOn = remember(context, refreshTick) { PermissionHelper.isDeviceAdminActive(context) }
+
+    // Auto-scroll to the highlighted (next missing) permission row.
+    val scrollState = rememberScrollState()
+    val effectiveHighlight = highlightKind
+        ?: remember(context, refreshTick) { PermissionHelper.getNextMissingPermission(context) }
+    LaunchedEffect(effectiveHighlight) {
+        if (effectiveHighlight == PermissionKind.BATTERY || effectiveHighlight == PermissionKind.DEVICE_ADMIN) {
+            scrollState.animateScrollTo(scrollState.maxValue)
+        }
+    }
 
     var lastSyncText by remember(refreshTick) { mutableStateOf("") }
     LaunchedEffect(refreshTick) {
@@ -217,7 +236,7 @@ fun SettingsScreen() {
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(scrollState)
             .padding(horizontal = 20.dp)
             .padding(top = 16.dp, bottom = 32.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -670,6 +689,7 @@ fun SettingsScreen() {
                     title = "Accessibility Service",
                     subtitle = "Intercepts blocked apps & websites",
                     isGranted = isAccessibilityOn,
+                    highlighted = effectiveHighlight == PermissionKind.ACCESSIBILITY,
                     onClick = { PermissionHelper.openAccessibilitySettings(context) }
                 )
 
@@ -679,6 +699,7 @@ fun SettingsScreen() {
                     title = "Usage Access",
                     subtitle = "Powers screen-time dashboard accuracy",
                     isGranted = isUsageOn,
+                    highlighted = effectiveHighlight == PermissionKind.USAGE,
                     onClick = { PermissionHelper.openUsageAccessSettings(context) }
                 )
 
@@ -688,6 +709,7 @@ fun SettingsScreen() {
                     title = "Notification Listener",
                     subtitle = "Captures TickTick Pomodoros automatically",
                     isGranted = isNotifOn,
+                    highlighted = effectiveHighlight == PermissionKind.NOTIFICATION_LISTENER,
                     onClick = { PermissionHelper.openNotificationListenerSettings(context) }
                 )
 
@@ -697,6 +719,7 @@ fun SettingsScreen() {
                     title = "Display Over Other Apps",
                     subtitle = "Shows fullscreen lockout over target apps",
                     isGranted = isOverlayOn,
+                    highlighted = effectiveHighlight == PermissionKind.OVERLAY,
                     onClick = { PermissionHelper.openOverlaySettings(context) }
                 )
 
@@ -706,8 +729,29 @@ fun SettingsScreen() {
                     title = "Ignore Battery Optimizations",
                     subtitle = "Keeps protection alive in background",
                     isGranted = isBatteryIgnored,
+                    highlighted = effectiveHighlight == PermissionKind.BATTERY,
                     onClick = { PermissionHelper.openBatteryOptimizationSettings(context) }
                 )
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceContainerHighest)
+
+                PixelPermissionItem(
+                    title = "Prevent Uninstall (Device Admin)",
+                    subtitle = "Blocks impulsive uninstalls during a binge",
+                    isGranted = isDeviceAdminOn,
+                    highlighted = effectiveHighlight == PermissionKind.DEVICE_ADMIN,
+                    onClick = { PermissionHelper.openDeviceAdminSettings(context) }
+                )
+                if (isDeviceAdminOn) {
+                    TextButton(
+                        onClick = {
+                            PermissionHelper.disableDeviceAdmin(context)
+                            refreshTick++
+                            Toast.makeText(context, "Uninstall protection disabled", Toast.LENGTH_SHORT).show()
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("Disable admin (allow uninstall)") }
+                }
             }
         }
     }
@@ -813,10 +857,31 @@ fun PixelPermissionItem(
     title: String,
     subtitle: String,
     isGranted: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    highlighted: Boolean = false
 ) {
+    var rowModifier: Modifier = Modifier.fillMaxWidth()
+    if (highlighted) {
+        val pulse = rememberInfiniteTransition(label = "perm-highlight")
+        val alpha by pulse.animateFloat(
+            initialValue = 0.45f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(900),
+                repeatMode = RepeatMode.Reverse
+            ),
+            label = "perm-pulse"
+        )
+        rowModifier = Modifier
+            .fillMaxWidth()
+            .border(
+                BorderStroke(2.dp, MaterialTheme.colorScheme.primary.copy(alpha = alpha)),
+                RoundedCornerShape(16.dp)
+            )
+            .padding(10.dp)
+    }
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = rowModifier,
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {

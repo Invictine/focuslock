@@ -40,6 +40,7 @@ import com.focuslock.app.service.AppMonitorForegroundService
 import com.focuslock.app.sync.SyncStatus
 import com.focuslock.app.ui.apps.AppSelectorScreen
 import com.focuslock.app.ui.dashboard.DashboardScreen
+import com.focuslock.app.ui.permissions.PermissionHelper
 import com.focuslock.app.ui.settings.SettingsScreen
 import com.focuslock.app.ui.theme.FocusLockTheme
 
@@ -152,7 +153,9 @@ class MainActivity : ComponentActivity() {
                                 onNavigatePermissions = { currentTab = NavigationItem.SETTINGS }
                             )
                             NavigationItem.APPS -> AppSelectorScreen()
-                            NavigationItem.SETTINGS -> SettingsScreen()
+                            NavigationItem.SETTINGS -> SettingsScreen(
+                                highlightKind = PermissionHelper.getNextMissingPermission(applicationContext)
+                            )
                             NavigationItem.ACCOUNT -> AccountScreen(
                                 syncStatus = syncText,
                                 onSyncNow = { app.syncManager.syncNowAsync(authViewModel) },

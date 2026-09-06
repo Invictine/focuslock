@@ -2,9 +2,15 @@ package com.focuslock.app.ui.dashboard
 
 import android.widget.Toast
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -18,6 +24,7 @@ import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -37,6 +44,8 @@ import com.focuslock.app.data.model.WorkRecordSource
 import com.focuslock.app.service.DailyUsageSummary
 import com.focuslock.app.service.UsageStatsRepository
 import com.focuslock.app.ui.permissions.PermissionHelper
+import com.focuslock.app.ui.permissions.PermissionKind
+import com.focuslock.app.ui.permissions.PermissionOnboardingDialog
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -74,6 +83,21 @@ fun DashboardScreen(
     val isUsageAccessOn = remember(context, permissionTick) { PermissionHelper.isUsageAccessGranted(context) }
     val isNotificationOn = remember(context, permissionTick) { PermissionHelper.isNotificationListenerGranted(context) }
     val hasAllPermissions = isAccessibilityOn && isUsageAccessOn && isNotificationOn
+
+    // Step-through onboarding: auto-show once per session on foreground while anything is missing.
+    val missing = remember(context, permissionTick) { PermissionHelper.getMissingPermissions(context) }
+    var shownThisSession by rememberSaveable { mutableStateOf(false) }
+    var dialogIndex by rememberSaveable { mutableIntStateOf(0) }
+    var showOnboarding by remember { mutableStateOf(false) }
+    LaunchedEffect(permissionTick) {
+        val current = PermissionHelper.getMissingPermissions(context)
+        if (current.isNotEmpty() && !shownThisSession) {
+            dialogIndex = dialogIndex.coerceIn(0, current.size - 1)
+            showOnboarding = true
+        } else if (current.isEmpty()) {
+            showOnboarding = false
+        }
+    }
 
     // StayFree-style screen-time summary
     var usageSummary by remember { mutableStateOf(DailyUsageSummary(0L, emptyList(), 0)) }
@@ -152,12 +176,27 @@ fun DashboardScreen(
         // 2. Missing Permissions Warning Card
         if (!hasAllPermissions) {
             item {
+                val setupPulse = rememberInfiniteTransition(label = "setup-pulse")
+                val setupAlpha by setupPulse.animateFloat(
+                    initialValue = 0.45f,
+                    targetValue = 1f,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(900),
+                        repeatMode = RepeatMode.Reverse
+                    ),
+                    label = "setup-pulse-alpha"
+                )
                 Card(
                     colors = CardDefaults.cardColors(
                         containerColor = MaterialTheme.colorScheme.errorContainer
                     ),
                     shape = MaterialTheme.shapes.large,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .border(
+                            BorderStroke(2.dp, MaterialTheme.colorScheme.error.copy(alpha = setupAlpha)),
+                            MaterialTheme.shapes.large
+                        )
                 ) {
                     Row(
                         modifier = Modifier.padding(18.dp),
@@ -491,6 +530,31 @@ fun DashboardScreen(
                     permissionTick++
                     Toast.makeText(context, "Focus done! +$earned min leisure earned", Toast.LENGTH_LONG).show()
                 }
+            }
+        )
+    }
+
+    // Step-through permission onboarding dialogs (one per missing permission)
+    if (showOnboarding && missing.isNotEmpty()) {
+        PermissionOnboardingDialog(
+            missing = missing,
+            currentIndex = dialogIndex.coerceIn(0, missing.size - 1),
+            onGrant = { kind ->
+                PermissionHelper.openPermissionWithHighlight(context, kind)
+                if (dialogIndex < missing.size - 1) dialogIndex++ else {
+                    showOnboarding = false
+                    shownThisSession = true
+                }
+            },
+            onDismiss = {
+                if (dialogIndex < missing.size - 1) dialogIndex++ else {
+                    showOnboarding = false
+                    shownThisSession = true
+                }
+            },
+            onSkipAll = {
+                showOnboarding = false
+                shownThisSession = true
             }
         )
     }
