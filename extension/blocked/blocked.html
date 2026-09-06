@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Stay Focused — FocusLock</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: radial-gradient(1200px 600px at 50% -10%, #1e293b, #020617); color: #e2e8f0; font-family: Inter, system-ui, Segoe UI, Roboto, sans-serif; }
+  .card { width: min(560px, 92vw); background: rgba(15,23,42,.9); border: 1px solid #1e293b; border-radius: 20px; padding: 36px 32px; text-align: center; box-shadow: 0 30px 80px rgba(0,0,0,.5); }
+  .lock { font-size: 52px; }
+  h1 { margin: 12px 0 6px; font-size: 28px; letter-spacing: -.02em; }
+  p.sub { color: #94a3b8; margin: 0 0 18px; }
+  .pill { display: inline-block; background: #7f1d1d; color: #fecaca; border: 1px solid #991b1b; padding: 6px 14px; border-radius: 999px; font-size: 13px; margin-bottom: 14px; }
+  .url { font-size: 13px; color: #64748b; word-break: break-all; background: #020617; border: 1px solid #1e293b; border-radius: 10px; padding: 10px 12px; margin: 0 0 18px; }
+  .quote { font-style: italic; color: #cbd5e1; background: #0f172a; border-left: 3px solid #22c55e; padding: 12px 14px; border-radius: 0 12px 12px 0; margin: 0 0 20px; text-align: left; }
+  .row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+  button { cursor: pointer; border-radius: 12px; border: 1px solid #334155; background: #1e293b; color: #e2e8f0; padding: 11px 18px; font-size: 14px; font-weight: 600; }
+  button.primary { background: #16a34a; border-color: #15803d; }
+  button.danger { background: #7f1d1d; border-color: #991b1b; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  #snoozeBox { display: none; margin-top: 16px; background: #020617; border: 1px dashed #334155; border-radius: 12px; padding: 14px; }
+  input { width: 100%; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 10px; padding: 10px 12px; font-size: 14px; margin: 8px 0; }
+  .hint { font-size: 12px; color: #64748b; margin-top: 14px; }
+  a { color: #4ade80; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="lock">🔒</div>
+    <div class="pill" id="listPill">Blocked</div>
+    <h1>Stay focused.</h1>
+    <p class="sub">FocusLock blocked this page so future-you says thanks.</p>
+    <div class="url" id="blockedUrl"></div>
+    <div class="quote" id="quote"></div>
+    <div class="row">
+      <button class="primary" id="goBack">← Go back</button>
+      <button id="dashboard">Open dashboard</button>
+      <button id="snoozeBtn">Need 5 min?</button>
+    </div>
+    <div id="snoozeBox">
+      <div style="font-size:13px;color:#94a3b8">Emergency break: type <b id="phrase" style="color:#fbbf24"></b> then wait <b id="count">60</b>s. Frozen Turkey blocks cannot be bypassed.</div>
+      <input id="phraseInput" placeholder="type the phrase…" autocomplete="off" />
+      <button id="snoozeGo" class="danger" disabled>Unlock 5 minutes</button>
+    </div>
+    <div class="hint">Cold Turkey rule: locked sessions can't be undone. <a href="#" id="closeTab">Close tab</a></div>
+  </div>
+<script src="blocked.js"></script>
+</body>
+</html>

@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "FocusLock — Website Blocker & Usage Tracker",
+  "short_name": "FocusLock",
+  "version": "1.0.0",
+  "description": "Cold Turkey-style focus blocker for Chrome: block lists, schedules, Pomodoro, Frozen Turkey lock, daily limits, password protection, and per-site usage stats.",
+  "minimum_chrome_version": "109",
+  "icons": {
+    "16": "icons/lock.svg",
+    "32": "icons/lock.svg",
+    "48": "icons/lock.svg",
+    "128": "icons/lock.svg"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "FocusLock",
+    "default_icon": {
+      "16": "icons/lock.svg",
+      "32": "icons/lock.svg"
+    }
+  },
+  "options_page": "options/options.html",
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content/content-guard.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js"
+  },
+  "permissions": [
+    "storage",
+    "tabs",
+    "alarms",
+    "idle",
+    "webNavigation",
+    "notifications"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}
