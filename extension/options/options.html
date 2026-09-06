@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>FocusLock Dashboard</title>
+<style>
+  :root { color-scheme: dark; --bg:#020617; --panel:#0f172a; --line:#1e293b; --txt:#e2e8f0; --mut:#94a3b8; --acc:#22c55e; --red:#ef4444; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--txt); font-family: Inter, system-ui, Segoe UI, Roboto, sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; background: rgba(2,6,23,.9); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
+  .hwrap { max-width: 1080px; margin: 0 auto; padding: 14px 20px; display: flex; align-items: center; gap: 12px; }
+  .logo { font-size: 22px; } .title { font-weight: 800; font-size: 18px; } .title small { color: var(--mut); font-weight: 500; }
+  nav { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+  nav button { background: transparent; border: 1px solid transparent; color: var(--mut); padding: 8px 14px; border-radius: 10px; cursor: pointer; font-weight: 600; }
+  nav button.on { background: var(--panel); color: var(--txt); border-color: var(--line); }
+  main { max-width: 1080px; margin: 0 auto; padding: 22px 20px 60px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 18px; margin-bottom: 14px; }
+  .card h2 { margin: 0 0 4px; font-size: 16px; } .card p.d { margin: 0 0 12px; color: var(--mut); font-size: 13px; }
+  .listhead { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .badge { font-size: 11px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--mut); }
+  .badge.on { background: #052e16; color: #4ade80; border-color: #14532d; }
+  .badge.lock { background: #450a0a; color: #fca5a5; border-color: #7f1d1d; }
+  textarea, input, select { width: 100%; background: #020617; color: var(--txt); border: 1px solid var(--line); border-radius: 10px; padding: 9px 11px; font-size: 13px; font-family: inherit; }
+  textarea { min-height: 90px; font-family: ui-monospace, Consolas, monospace; }
+  label { font-size: 12px; color: var(--mut); display: block; margin: 10px 0 4px; }
+  .btnrow { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  button { cursor: pointer; border-radius: 10px; border: 1px solid #334155; background: #1e293b; color: var(--txt); padding: 9px 14px; font-size: 13px; font-weight: 600; }
+  button.go { background: #15803d; border-color: #16a34a; } button.red { background: #7f1d1d; border-color: #991b1b; }
+  button.ghost { background: transparent; } button:disabled { opacity: .45; cursor: not-allowed; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  th { color: var(--mut); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+  .bar { height: 8px; background: #1e293b; border-radius: 99px; overflow: hidden; min-width: 80px; }
+  .bar i { display: block; height: 100%; background: linear-gradient(90deg, #22c55e, #4ade80); }
+  .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: #052e16; border: 1px solid #14532d; color: #bbf7d0; padding: 10px 18px; border-radius: 12px; display: none; }
+  .sched { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; margin: 8px 0; font-size: 13px; background: #020617; }
+  .mut { color: var(--mut); font-size: 12px; }
+  .days { display: flex; gap: 4px; margin-top: 6px; }
+  .days button { padding: 6px 9px; font-size: 12px; }
+  .days button.on { background: #15803d; border-color: #16a34a; }
+  section.tab { display: none; } section.tab.on { display: block; }
+  code { background: #020617; padding: 2px 6px; border-radius: 6px; border: 1px solid var(--line); font-size: 12px; }
+</style>
+</head>
+<body>
+<header><div class="hwrap">
+  <div class="logo">🔒</div>
+  <div class="title">FocusLock <small>Cold Turkey for Chrome</small></div>
+  <nav>
+    <button data-tab="blocks" class="on">Block Lists</button>
+    <button data-tab="sched">Schedules</button>
+    <button data-tab="stats">Statistics</button>
+    <button data-tab="settings">Settings</button>
+  </nav>
+</div></header>
+<main>
+  <section class="tab on" id="tab-blocks">
+    <div class="card">
+      <h2>Block lists</h2>
+      <p class="d">Blacklist = block these sites. Allow-only = block <i>everything</i> except these (whitelist mode). Patterns: <code>youtube.com</code>, <code>*.youtube.com</code>, <code>reddit.com/r/*</code>, <code>*keyword*</code>. One per line.</p>
+      <div class="btnrow">
+        <button id="newList" class="go">+ New list</button>
+        <button id="addPreset" class="ghost">+ Add category preset</button>
+        <button id="exportBtn" class="ghost">Export</button>
+        <button id="importBtn" class="ghost">Import</button>
+        <input type="file" id="importFile" accept=".json" style="display:none" />
+      </div>
+    </div>
+    <div id="lists"></div>
+  </section>
+
+  <section class="tab" id="tab-sched">
+    <div class="grid2">
+      <div class="card">
+        <h2>⏱ Quick timer</h2>
+        <p class="d">Lock a list for N minutes right now.</p>
+        <label>List</label><select id="qList"></select>
+        <label>Minutes</label><input id="qMin" type="number" value="25" min="1" max="1440" />
+        <div class="btnrow"><button id="qStart" class="go">Start timer</button>
+        <button id="qFrozen" class="red">❄ Frozen lock (no undo)</button></div>
+      </div>
+      <div class="card">
+        <h2>🍅 Pomodoro</h2>
+        <p class="d">Focus / break cycles. Breaks auto-allow the list.</p>
+        <label>List</label><select id="pList"></select>
+        <div class="grid2">
+          <div><label>Focus min</label><input id="pFocus" type="number" value="25" /></div>
+          <div><label>Break min</label><input id="pBreak" type="number" value="5" /></div>
+        </div>
+        <label>Rounds</label><input id="pRounds" type="number" value="4" />
+        <div class="btnrow"><button id="pStart" class="go">Start Pomodoro</button></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>🗓 Recurring schedule</h2>
+      <p class="d">e.g. work hours Mon–Fri 9:00–17:00.</p>
+      <div class="grid2">
+        <div><label>List</label><select id="rList"></select></div>
+        <div><label>Name</label><input id="rName" value="Work hours" /></div>
+      </div>
+      <div class="grid2">
+        <div><label>Start (HH:MM)</label><input id="rStart" value="09:00" /></div>
+        <div><label>End (HH:MM)</label><input id="rEnd" value="17:00" /></div>
+      </div>
+      <label>Days</label><div class="days" id="rDays"></div>
+      <div class="btnrow"><button id="rAdd" class="go">Add schedule</button></div>
+    </div>
+    <div class="card"><h2>Active schedules</h2><p class="d">Frozen entries can't be deleted until they expire — that's the point. 🧊</p><div id="schedList"></div></div>
+  </section>
+
+  <section class="tab" id="tab-stats">
+    <div class="grid2">
+      <div class="card"><h2>Today</h2><p class="d" id="statSum">…</p><div id="statTable"></div></div>
+      <div class="card"><h2>Blocked attempts</h2><p class="d" id="blockSum">…</p><div id="blockLog"></div>
+        <div class="btnrow"><button id="clearStats" class="ghost">Clear stats</button></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="tab" id="tab-settings">
+    <div class="grid2">
+      <div class="card">
+        <h2>🔐 Password lock</h2>
+        <p class="d">Require a password to disable protection, edit frozen lists, or lift Nuclear early.</p>
+        <label>New password</label><input id="pw1" type="password" />
+        <label>Confirm</label><input id="pw2" type="password" />
+        <div class="btnrow"><button id="pwSet" class="go">Set password</button><button id="pwClear" class="ghost">Remove</button></div>
+        <p class="mut" id="pwState"></p>
+      </div>
+      <div class="card">
+        <h2>☢ Nuclear allow-list</h2>
+        <p class="d">When Nuclear is on, everything is blocked except these.</p>
+        <textarea id="nucAllow"></textarea>
+        <div class="btnrow"><button id="nucSave" class="go">Save</button><button id="nucStart" class="red">Start Nuclear 30m</button><button id="nucStop" class="ghost">Stop</button></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Tracking</h2>
+      <p class="d">Time counts only when Chrome is focused, the tab is visible, and you're not idle.</p>
+      <label>Idle timeout (seconds)</label><input id="idleSec" type="number" min="15" max="600" />
+      <div class="btnrow"><button id="saveTrack" class="go">Save</button><button id="resetAll" class="red">Reset everything</button></div>
+    </div>
+  </section>
+</main>
+<div class="toast" id="toast"></div>
+<script src="../src/matcher.js"></script>
+<script src="../src/store.js"></script>
+<script src="options.js"></script>
+</body>
+</html>
