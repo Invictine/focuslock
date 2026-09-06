@@ -9,4 +9,6 @@
     <string name="earned_balance_label">Available Screen Time</string>
     <string name="work_logged_today_label">TickTick Work Today</string>
     <string name="doomscroll_time_today_label">Doomscroll Used Today</string>
+    <string name="device_admin_label">FocusLock uninstall protection</string>
+    <string name="device_admin_description">Prevents accidental or impulsive uninstalls during a binge. Uses only the force-lock policy. Remove anytime via Settings → Disable admin.</string>
 </resources>

@@ -115,6 +115,19 @@
             </intent-filter>
         </service>
 
+        <!-- Device Admin for anti-uninstall friction (force-lock policy only) -->
+        <receiver
+            android:name=".service.FocusLockDeviceAdminReceiver"
+            android:permission="android.permission.BIND_DEVICE_ADMIN"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+        </receiver>
+
         <!-- Ongoing Monitor Foreground Service -->
         <service
             android:name=".service.AppMonitorForegroundService"
