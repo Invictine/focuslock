@@ -1,6 +1,7 @@
 # Local SDK + secrets — NEVER commit
 local.properties
 .env
+.env.local
 *.jks
 *.keystore
 
