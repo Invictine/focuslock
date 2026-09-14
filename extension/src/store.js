@@ -53,6 +53,7 @@
 
   async function load() {
     const got = await chrome.storage.local.get(KEY);
+    lastSavedJson = null; // force the next save to write (migrate() may fill defaults)
     if (got && got[KEY]) return migrate(got[KEY]);
     const fresh = defaultState();
     await save(fresh);
@@ -64,7 +65,16 @@
     return Object.assign(d, s, { settings: Object.assign(d.settings, s.settings || {}) });
   }
 
+  // Skip the storage write when the state is byte-identical to the last write
+  // in this context. The whole state lives under one key, so every save is a
+  // full rewrite — this guard keeps no-op saves (e.g. update() calls that
+  // changed nothing) from hitting chrome.storage at all.
+  let lastSavedJson = null;
+
   async function save(state) {
+    const json = JSON.stringify(state);
+    if (json === lastSavedJson) return state;
+    lastSavedJson = json;
     await chrome.storage.local.set({ [KEY]: state });
     return state;
   }

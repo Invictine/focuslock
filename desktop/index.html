@@ -3,8 +3,39 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="FocusLock — StayFree-style screen-time dashboard (date ranges, limits, schedules, shorts filter) plus earn-by-work credits. Android + desktop sync." />
-    <title>FocusLock — Own your time, everywhere</title>
+    <meta name="description" content="FocusLock tracks focused work and screen time across Android and Windows." />
+    <meta name="theme-color" content="#0d0d0f" />
+    <title>FocusLock</title>
+    <script>
+      // Crash visibility shim: release builds have no devtools, so surface
+      // any fatal error on-screen and in the window title instead of a black window.
+      (function () {
+        function trap(kind, detail) {
+          try {
+            document.title = "FocusLock ERROR: " + String(detail).slice(0, 180);
+            var banner = document.getElementById("crash-banner");
+            if (!banner) {
+              banner = document.createElement("pre");
+              banner.id = "crash-banner";
+              banner.style.cssText = "position:fixed;inset:0;z-index:99999;margin:0;padding:16px;background:#2a0a0a;color:#ff9c9c;font:12px/1.5 monospace;white-space:pre-wrap;overflow:auto;";
+              (document.body || document.documentElement).appendChild(banner);
+            }
+            banner.textContent += "[" + kind + "] " + String(detail) + "\n\n";
+          } catch (_) { /* nothing else we can do */ }
+        }
+        window.addEventListener("error", function (e) {
+          var detail = e.error && e.error.stack ? e.error.stack : (e.message || "unknown error");
+          if (e.target && e.target !== window && (e.target.src || e.target.href)) {
+            detail = "failed to load resource: " + (e.target.src || e.target.href);
+          }
+          trap("error", detail);
+        }, true);
+        window.addEventListener("unhandledrejection", function (e) {
+          var reason = e.reason;
+          trap("unhandledrejection", reason && reason.stack ? reason.stack : reason);
+        });
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

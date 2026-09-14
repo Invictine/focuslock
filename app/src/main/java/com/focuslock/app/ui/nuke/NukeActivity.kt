@@ -4,8 +4,11 @@ import android.content.Intent
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.SystemBarStyle
+import androidx.activity.viewModels
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -21,7 +24,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -36,13 +39,26 @@ import kotlinx.coroutines.launch
 
 const val NUKE_MEDITATION_MS = 10 * 60 * 1000L
 
-data class NukeChatMsg(val role: String, val text: String)
+data class NukeChatMsg(val role: String, val text: String, val id: Long = System.nanoTime())
 
 class NukeActivity : ComponentActivity() {
 
+    // One activity-scoped instance (same pattern as MainActivity's `by viewModels()`):
+    // its viewModelScope is cancelled by the framework. The old code built a fresh
+    // AuthViewModel() per coach message / unlock — each one leaked its scope.
+    private val authViewModel: AuthViewModel by viewModels()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+        )
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                // Back stays disabled until the reset completes.
+            }
+        })
         // Pin to screen: user asked for complete phone block until reset is done.
         try {
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
@@ -53,6 +69,7 @@ class NukeActivity : ComponentActivity() {
         setContent {
             FocusLockTheme {
                 NukeLockScreen(
+                    authViewModel = authViewModel,
                     onUnlocked = { plan ->
                         lifecycleScope.launch {
                             try { stopLockTask() } catch (_: Exception) { }
@@ -65,12 +82,6 @@ class NukeActivity : ComponentActivity() {
         }
     }
 
-    @Deprecated("Back is disabled during nuke")
-    @Suppress("MissingSuperCall")
-    override fun onBackPressed() {
-        // No escape — finish the reset first.
-    }
-
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         // Re-pin if system tries to drop us.
@@ -79,24 +90,55 @@ class NukeActivity : ComponentActivity() {
 }
 
 @Composable
-fun NukeLockScreen(onUnlocked: (String) -> Unit) {
+fun NukeLockScreen(authViewModel: AuthViewModel, onUnlocked: (String) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val settings = FocusLockApplication.instance.settingsRepository
     val app = FocusLockApplication.instance
 
-    val startedAt by settings.nukeStartedAtFlow.collectAsState(initial = System.currentTimeMillis())
+    // 0 until DataStore emits; a missing/zero NUKE_STARTED_AT is repaired below instead
+    // of showing a frozen 10:00 countdown that never completes.
+    val startedAtRaw by settings.nukeStartedAtFlow.collectAsState(initial = 0L)
     val meditationDoneAt by settings.nukeMeditationDoneAtFlow.collectAsState(initial = 0L)
 
-    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) {
-        while (true) { delay(1000L); nowMs = System.currentTimeMillis() }
+    // One shared 1s ticker drives both the wall clock and the 4-7-8 breathing cycle. The
+    // state objects are passed down (never read in this root), so a tick only redraws the
+    // phase subtree instead of recomposing the pinned lock screen, and only one coroutine runs.
+    val nowMsState = remember { mutableLongStateOf(System.currentTimeMillis()) }
+    val cycleTickState = remember { mutableLongStateOf(0L) }
+
+    // Missing/zero start time: treat as "start the 10-min window NOW" and persist
+    // immediately (only when nuke mode is actually active — never activate nuke from
+    // here). Persisting makes the countdown real, process-death-safe, and reachable
+    // completion; the UI falls back to the live clock until DataStore lands.
+    LaunchedEffect(startedAtRaw) {
+        if (startedAtRaw <= 0L && settings.isNukeActive()) {
+            try { settings.setNukeActive(true, System.currentTimeMillis()) } catch (_: Exception) { }
+        }
+    }
+    // One-shot "now" fallback for the brief window before DataStore lands (keeps the
+    // root from subscribing to the 1s ticker).
+    val fallbackStartedAt = remember { System.currentTimeMillis() }
+    val startedAt = if (startedAtRaw > 0L) startedAtRaw else fallbackStartedAt
+
+    // The root observes only the completion flag (which flips at most once per session).
+    val meditationComplete by remember(startedAt, meditationDoneAt) {
+        derivedStateOf {
+            meditationDoneAt > 0L ||
+                (startedAt > 0L && nowMsState.longValue - startedAt >= NUKE_MEDITATION_MS)
+        }
     }
 
-    val effectiveStart = if (startedAt > 0L) startedAt else nowMs
-    val elapsed = (nowMs - effectiveStart).coerceAtLeast(0L)
-    val remaining = (NUKE_MEDITATION_MS - elapsed).coerceAtLeast(0L)
-    val meditationComplete = meditationDoneAt > 0L || remaining <= 0L
+    // Stop the ticker as soon as the countdown completes: otherwise the whole screen
+    // (including CheckinPhase) ticked every second while checking in.
+    LaunchedEffect(meditationComplete) {
+        if (meditationComplete) return@LaunchedEffect
+        while (true) {
+            delay(1000L)
+            nowMsState.longValue = System.currentTimeMillis()
+            cycleTickState.longValue++
+        }
+    }
 
     // Mark meditation done once timer hits zero (server also enforces 10 min).
     LaunchedEffect(meditationComplete) {
@@ -104,10 +146,9 @@ fun NukeLockScreen(onUnlocked: (String) -> Unit) {
             settings.setNukeMeditationDone()
             try {
                 // Best-effort: tell backend (needs auth; failure is fine, checkin re-validates).
-                val authVm = AuthViewModel()
-                val url = try { com.focuslock.app.BuildConfig.CONVEX_URL.trim() } catch (_: Exception) { "" }
-                if (url.startsWith("http") && authVm.isConfigured()) {
-                    val client = com.focuslock.app.sync.ConvexSyncClient(url, authVm::getConvexToken)
+                val url = runCatching { com.focuslock.app.BuildConfig.CONVEX_URL.trim() }.getOrDefault("")
+                if (url.startsWith("http") && authViewModel.isConfigured()) {
+                    val client = com.focuslock.app.sync.ConvexSyncClient(url, authViewModel::getConvexToken)
                     client.completeNukeMeditation()
                 }
             } catch (_: Exception) { }
@@ -120,21 +161,25 @@ fun NukeLockScreen(onUnlocked: (String) -> Unit) {
             contentAlignment = Alignment.Center
         ) {
             if (!meditationComplete) {
-                MeditationPhase(remainingMs = remaining, elapsedMs = elapsed)
+                MeditationPhase(
+                    nowMsState = nowMsState,
+                    cycleTickState = cycleTickState,
+                    startedAt = startedAt
+                )
             } else {
                 CheckinPhase(
+                    authViewModel = authViewModel,
                     onUnlocked = { plan ->
                         scope.launch {
                             settings.clearNuke()
                             // Sync unlock to PC via Convex (best-effort offline-safe).
                             try {
-                                val authVm = AuthViewModel()
-                                val url = try { com.focuslock.app.BuildConfig.CONVEX_URL.trim() } catch (_: Exception) { "" }
-                                if (url.startsWith("http") && authVm.isConfigured()) {
-                                    val client = com.focuslock.app.sync.ConvexSyncClient(url, authVm::getConvexToken)
+                                val url = runCatching { com.focuslock.app.BuildConfig.CONVEX_URL.trim() }.getOrDefault("")
+                                if (url.startsWith("http") && authViewModel.isConfigured()) {
+                                    val client = com.focuslock.app.sync.ConvexSyncClient(url, authViewModel::getConvexToken)
                                     // Unlock already happened server-side via checkin approval.
                                     // Push a fresh sync so PC sees it within ~30s.
-                                    app.syncManager.syncNow(authVm)
+                                    app.syncManager.syncNow(authViewModel)
                                 }
                             } catch (_: Exception) { }
                             onUnlocked(plan.take(80))
@@ -147,28 +192,14 @@ fun NukeLockScreen(onUnlocked: (String) -> Unit) {
 }
 
 @Composable
-private fun MeditationPhase(remainingMs: Long, elapsedMs: Long) {
-    val mins = remainingMs / 60000
-    val secs = (remainingMs % 60000) / 1000
-    val progress = (elapsedMs.toFloat() / NUKE_MEDITATION_MS.toFloat()).coerceIn(0f, 1f)
-
-    // 4-7-8 breathing cycle: 19s loop
-    var cycleSec by remember { mutableIntStateOf(0) }
-    LaunchedEffect(Unit) {
-        while (true) { delay(1000L); cycleSec = (cycleSec + 1) % 19 }
-    }
-    val phase = when (cycleSec) {
-        in 0..3 -> "Breathe in…" to 4
-        in 4..10 -> "Hold…" to 7
-        else -> "Breathe out…" to 8
-    }
-    val targetScale = when {
-        cycleSec <= 3 -> 1.25f
-        cycleSec <= 10 -> 1.25f
-        else -> 1.0f
-    }
-    val scale by animateFloatAsState(targetValue = targetScale, animationSpec = tween(1000), label = "breath")
-
+private fun MeditationPhase(
+    nowMsState: LongState,
+    cycleTickState: LongState,
+    startedAt: Long
+) {
+    // No clock/tick state is read in this scope: CountdownText reads the wall clock, the
+    // progress lambda reads it in the draw phase, and BreathCycle owns the breath cycle. A 1s
+    // tick therefore only recomposes those leaves, never the whole pinned lock screen.
     Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
         Box(
             Modifier.size(88.dp).background(MaterialTheme.colorScheme.errorContainer, CircleShape),
@@ -185,15 +216,60 @@ private fun MeditationPhase(remainingMs: Long, elapsedMs: Long) {
             textAlign = TextAlign.Center
         )
         Spacer(Modifier.height(20.dp))
-        Text(
-            "%02d:%02d".format(mins, secs),
-            style = MaterialTheme.typography.displayLarge.copy(fontWeight = FontWeight.Bold),
-            color = MaterialTheme.colorScheme.onSurface
+        CountdownText(nowMsState = nowMsState, startedAt = startedAt)
+        LinearProgressIndicator(
+            progress = {
+                val now = nowMsState.longValue
+                val start = if (startedAt > 0L) startedAt else now
+                val elapsed = (now - start).coerceAtLeast(0L)
+                (elapsed.toFloat() / NUKE_MEDITATION_MS.toFloat()).coerceIn(0f, 1f)
+            },
+            modifier = Modifier.fillMaxWidth().height(8.dp)
         )
-        LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().height(8.dp))
         Spacer(Modifier.height(28.dp))
+        BreathCycle(cycleTickState = cycleTickState)
+        Spacer(Modifier.height(12.dp))
+        Text("Leaving this screen does not pause the timer.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+    }
+}
+
+/** Leaf countdown: reads the shared clock state and formats it without invalidating the root. */
+@Composable
+private fun CountdownText(nowMsState: LongState, startedAt: Long) {
+    val now = nowMsState.longValue
+    val start = if (startedAt > 0L) startedAt else now
+    val remainingMs = (NUKE_MEDITATION_MS - (now - start).coerceAtLeast(0L)).coerceAtLeast(0L)
+    val mins = remainingMs / 60000
+    val secs = (remainingMs % 60000) / 1000
+    Text(
+        "%02d:%02d".format(mins, secs),
+        style = MaterialTheme.typography.displayLarge.copy(fontWeight = FontWeight.Bold),
+        color = MaterialTheme.colorScheme.onSurface
+    )
+}
+
+/** Leaf breathing indicator: owns the breath animation for the shared 19s cycle tick. */
+@Composable
+private fun BreathCycle(cycleTickState: LongState) {
+    val cycleSec = (cycleTickState.longValue % 19L).toInt()
+    val phase = when (cycleSec) {
+        in 0..3 -> "Breathe in…" to 4
+        in 4..10 -> "Hold…" to 7
+        else -> "Breathe out…" to 8
+    }
+    val targetScale = when {
+        cycleSec <= 3 -> 1.25f
+        cycleSec <= 10 -> 1.25f
+        else -> 1.0f
+    }
+    val scale by animateFloatAsState(targetValue = targetScale, animationSpec = tween(1000), label = "breath")
+
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Box(
-            Modifier.size(140.dp).scale(scale).background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
+            Modifier.size(140.dp).graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }.background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
             contentAlignment = Alignment.Center
         ) {
             Icon(Icons.Default.SelfImprovement, null, tint = MaterialTheme.colorScheme.onPrimaryContainer, modifier = Modifier.size(56.dp))
@@ -201,13 +277,11 @@ private fun MeditationPhase(remainingMs: Long, elapsedMs: Long) {
         Spacer(Modifier.height(16.dp))
         Text(phase.first, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
         Text("4 in · 7 hold · 8 out — eyes soft, shoulders down.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, textAlign = TextAlign.Center)
-        Spacer(Modifier.height(12.dp))
-        Text("Leaving this screen does not pause the timer.", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
     }
 }
 
 @Composable
-private fun CheckinPhase(onUnlocked: (String) -> Unit) {
+private fun CheckinPhase(authViewModel: AuthViewModel, onUnlocked: (String) -> Unit) {
     val scope = rememberCoroutineScope()
     var input by remember { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
@@ -227,12 +301,11 @@ private fun CheckinPhase(onUnlocked: (String) -> Unit) {
         scope.launch {
             try {
                 val app = FocusLockApplication.instance
-                val authVm = AuthViewModel()
-                val url = try { com.focuslock.app.BuildConfig.CONVEX_URL.trim() } catch (_: Exception) { "" }
+                val url = runCatching { com.focuslock.app.BuildConfig.CONVEX_URL.trim() }.getOrDefault("")
                 var approved = false
                 var reply = ""
-                if (url.startsWith("http") && authVm.isConfigured()) {
-                    val client = com.focuslock.app.sync.ConvexSyncClient(url, authVm::getConvexToken)
+                if (url.startsWith("http") && authViewModel.isConfigured()) {
+                    val client = com.focuslock.app.sync.ConvexSyncClient(url, authViewModel::getConvexToken)
                     val hist = messages.takeLast(6).map { it.role to it.text }
                     val res = client.checkinNuke(text, hist)
                     if (res != null) { approved = res.first; reply = res.second }
@@ -269,9 +342,12 @@ private fun CheckinPhase(onUnlocked: (String) -> Unit) {
         Text("Talk it through. The coach unlocks both devices only when the plan is concrete.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Spacer(Modifier.height(12.dp))
         LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(messages) { m ->
+            items(messages, key = { it.id }) { m ->
                 val isUser = m.role == "user"
-                Box(Modifier.fillMaxWidth(), contentAlignment = if (isUser) Alignment.CenterEnd else Alignment.CenterStart) {
+                Box(
+                    Modifier.fillMaxWidth().animateItem(),
+                    contentAlignment = if (isUser) Alignment.CenterEnd else Alignment.CenterStart
+                ) {
                     Surface(
                         color = if (isUser) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
                         shape = RoundedCornerShape(16.dp)

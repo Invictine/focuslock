@@ -1,0 +1,2 @@
+.app-loading { min-height: 100dvh; display: grid; place-content: center; justify-items: center; gap: 13px; background: var(--fl-background, #0d0d0f); color: var(--fl-on-surface-variant, #bbb4b1); }
+.app-loading p { margin: 0; font-size: 13px; font-weight: 600; }

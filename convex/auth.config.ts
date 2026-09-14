@@ -9,5 +9,10 @@ export default {
       domain: process.env.CLERK_JWT_ISSUER_DOMAIN!,
       applicationID: "convex",
     },
+    {
+      // Public PKCE client used by the Windows app's system-browser sign-in.
+      domain: process.env.CLERK_JWT_ISSUER_DOMAIN!,
+      applicationID: "3GpOIScXKeOnsuNd",
+    },
   ],
 } satisfies AuthConfig;

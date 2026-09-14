@@ -1,0 +1,17 @@
+{
+  "name": "focuslock-extension",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "prebuild": "node ../scripts/generate-theme.mjs --check",
+    "build": "node build.mjs",
+    "check": "node --check background/service-worker.js && node --check popup/popup.js && node --check options/options-auth.js && node --check src/cloud-sync.js"
+  },
+  "dependencies": {
+    "@clerk/chrome-extension": "^3.1.81"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.9"
+  }
+}

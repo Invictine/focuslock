@@ -24,6 +24,16 @@ desktop/dist/
 desktop/.env
 convex/_generated/
 convex/.env.local
-src-tauri/target/
+**/target/
+desktop/src-tauri/target/
+desktop/src-tauri/gen/
+desktop/desktop.log
+desktop/tracking-store.json
 *.node
 desktop/vite*.log
+
+# Chrome extension local build/auth files
+extension/node_modules/
+extension/dist/
+extension/.env
+extension/*.pem

@@ -8,7 +8,8 @@ data class BlockedWebsite(
     val displayName: String,
     val isBlocked: Boolean = true,
     val category: String = "Social Media",
-    val isCustom: Boolean = false
+    val isCustom: Boolean = false,
+    val isPermanent: Boolean = false
 ) {
     companion object {
         val DEFAULT_BLOCKED_WEBSITES = listOf(

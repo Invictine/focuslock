@@ -41,7 +41,12 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8 shrinking (perf/build fix, item 12): shrinks the Compose
+            // material-icons-extended dependency down to the icons actually used and
+            // strips dead code. Required keep rules live in proguard-rules.pro
+            // (kotlinx-serialization, Clerk SDK, WorkManager workers).
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

@@ -3,20 +3,21 @@
   "name": "FocusLock — Website Blocker & Usage Tracker",
   "short_name": "FocusLock",
   "version": "1.0.0",
-  "description": "Cold Turkey-style focus blocker for Chrome: block lists, schedules, Pomodoro, Frozen Turkey lock, daily limits, password protection, and per-site usage stats.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmtyVJlbINZfZgUXi2cBEfua7RlQFo++TJECvudX+hPWs7OBRTHie0FR+ZeGXHskqPdi1UcrIwEDnYLn7QKBjqke7/D5y2wP9IYJFadlVFwn6xhXGRZXiczTgR0FHgtAkuZjpIui2IB16IgCjPrfyjgbA9n8MDeQ4C4+wD6/Clbjh78F71nbumzs4UltUrI+WoMoEthVTLxUEUZ5J9EUybneSkTfVuAW7swnpAJ3yd+nahi6ta6xMe0LrGN9LYoSbDj0Rpn42ksmY1W8G3gEPnjvROduTKPIcvtcnLcwdHTtURChGZ6OCcSHLYqqxW9ytuT+h9D/a0HlNm1tv0zqQmQIDAQAB",
+  "description": "Track website time, keep FocusLock boundaries, and sync usage with Android and Windows.",
   "minimum_chrome_version": "109",
   "icons": {
-    "16": "icons/lock.svg",
-    "32": "icons/lock.svg",
-    "48": "icons/lock.svg",
-    "128": "icons/lock.svg"
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
   },
   "action": {
     "default_popup": "popup/popup.html",
     "default_title": "FocusLock",
     "default_icon": {
-      "16": "icons/lock.svg",
-      "32": "icons/lock.svg"
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
     }
   },
   "options_page": "options/options.html",

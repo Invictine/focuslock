@@ -23,6 +23,9 @@ credit balance, block lists, work history. See **[SYNC_SETUP.md](SYNC_SETUP.md)*
   Sign in → **Account** tab → Sync now; auto-sync runs every ~30s while signed in.
 - Desktop: [`desktop/`](desktop/README.md) (Tauri + React). `cp .env.example .env`,
   `npm install`, `npm run dev` (web, no Rust) or `npm run tauri:dev` (native).
+- Chrome: [`extension/`](extension/README.md). Its popup tracks the active
+  website, shows Android/extension connection health, and uploads account-scoped
+  absolute usage buckets to the same Convex deployment.
 - Backend: [`convex/`](convex/schema.ts) — `focusState`, `blockedApps`,
   `blockedWebsites`, `workRecords`, all scoped by Clerk user. Scripted setup:
   `powershell -ExecutionPolicy Bypass -File scripts/setup-clerk-convex.ps1`
@@ -42,7 +45,9 @@ Official reference: https://developer.ticktick.com/docs/openapi.md
 
 ## UI
 
-The dashboard prioritizes the available time balance, followed by TickTick, optional local focus tools, screen usage, and work history. Daily totals use quiet list rows instead of competing colored cards. Boundaries groups apps and websites under one destination. Shared shapes, native typography, system light/dark mode, and wallpaper-derived dynamic colors keep the screens consistent. Content width is bounded in large windows.
+Android is the reference for Focus, Boundaries, Settings, and Account across the Android app, Windows app, Chrome popup, and Chrome dashboard. All four use a fixed charcoal theme with a muted rose accent, native sans-serif typography, and matching control states. The palette stays dark regardless of OS appearance or Android wallpaper. Wide windows use a compact sidebar; compact screens adapt the navigation.
+
+The palette lives in [`design/theme.json`](design/theme.json). Run `npm run theme:generate` after editing it and `npm run theme:check` to verify the generated CSS and Android colors, including text contrast. Desktop and extension builds run the consistency check automatically. See [`design/README.md`](design/README.md) for the visual system.
 
 ## Verification (2026-09-05)
 

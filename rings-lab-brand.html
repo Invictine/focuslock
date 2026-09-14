@@ -1,0 +1,1061 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FocusLock · Rings Lab — Brand Rings</title>
+<style>
+/* ============================================================================
+   0. WORKBENCH
+   ========================================================================== */
+:root{
+  --dbg:#E08A7A; --dbg2:#8FB79A; --line:#1b1b21; --line2:#242430;
+  --mono:ui-monospace,SFMono-Regular,"JetBrains Mono","Cascadia Mono",Consolas,monospace;
+  --s:.78;
+  /* FocusLock brand */
+  --surface:#0D0D0F; --card:#1B1B1E; --card2:#232326; --track:#303035;
+  --ink:#EEE9E7; --ink2:#BBB4B1; --ink3:#817977;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:#08080a;color:#c9c9d4;font-family:var(--mono);-webkit-font-smoothing:antialiased;
+  background-image:
+    linear-gradient(rgba(255,255,255,.022) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(255,255,255,.022) 1px,transparent 1px),
+    radial-gradient(ellipse at 40% -10%,rgba(223,189,182,.05),transparent 60%),
+    radial-gradient(ellipse at 90% 110%,rgba(183,203,187,.045),transparent 55%);
+  background-size:26px 26px,26px 26px,100% 100%,100% 100%;
+}
+body.no-grid{background-image:radial-gradient(ellipse at 40% -10%,rgba(223,189,182,.05),transparent 60%),radial-gradient(ellipse at 90% 110%,rgba(183,203,187,.045),transparent 55%)}
+
+.bar{position:sticky;top:0;z-index:60;display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px;
+  padding:11px 16px;background:rgba(8,8,10,.9);backdrop-filter:blur(14px);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:baseline;gap:9px;padding-right:14px;border-right:1px solid var(--line)}
+.brand b{font-size:13px;letter-spacing:.16em;color:#fff}
+.brand span{font-size:10px;letter-spacing:.18em;color:#5c5c68}
+.ctl{display:flex;align-items:center;gap:8px;font-size:10px;letter-spacing:.13em;color:#71717f;text-transform:uppercase}
+.ctl input[type=range]{width:122px;accent-color:var(--dbg);height:14px}
+.ctl .v{color:#fff;font-variant-numeric:tabular-nums;min-width:44px;font-size:11px}
+.grp{display:flex;gap:6px;padding-left:14px;border-left:1px solid var(--line)}
+.pill{font:inherit;font-size:10px;letter-spacing:.12em;text-transform:uppercase;background:#101014;
+  border:1px solid var(--line2);color:#7b7b8a;padding:5px 9px;border-radius:5px;cursor:pointer;transition:.15s}
+.pill:hover{color:#d8d8e2;border-color:#3a3a46}
+.pill.on{color:#fff;border-color:var(--dbg);box-shadow:0 0 0 1px rgba(224,138,122,.3),0 0 18px -6px var(--dbg);background:rgba(224,138,122,.1)}
+.readout{margin-left:auto;font-size:10px;letter-spacing:.1em;color:#8d8d9c;display:flex;gap:14px;align-items:center}
+.readout b{color:#fff;font-weight:600}
+.pass{color:#8FB79A}.fail{color:#E0715F}
+.ruler{height:22px;border-bottom:1px solid var(--line);
+  background-image:repeating-linear-gradient(90deg,#22222a 0 1px,transparent 1px 26px),repeating-linear-gradient(90deg,#33333d 0 1px,transparent 1px 130px);
+  background-size:100% 8px,100% 14px;background-position:0 100%,0 100%;background-repeat:no-repeat}
+
+.bench{display:grid;gap:22px;padding:22px 18px 70px;max-width:2600px;margin:0 auto;
+  grid-template-columns:repeat(auto-fill,minmax(calc(408px * var(--s) + 22px),1fr))}
+.slot{position:relative;border:1px solid var(--line);border-radius:10px;background:linear-gradient(180deg,#0c0c0f,#09090b);padding:9px 9px 11px}
+.slot:before,.slot:after{content:'';position:absolute;width:9px;height:9px;border:1px solid #33333d;pointer-events:none}
+.slot:before{top:-1px;left:-1px;border-right:0;border-bottom:0}
+.slot:after{bottom:-1px;right:-1px;border-left:0;border-top:0}
+.slot-head{display:flex;align-items:baseline;gap:8px;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#5c5c68;padding:1px 2px 8px}
+.slot-head b{color:#e9e9f0;letter-spacing:.08em;font-size:11px}
+.slot-head .num{color:var(--dbg);font-weight:700}
+.slot-head .ok{margin-left:auto;color:#3f3f4a}
+.slot-body{position:relative;height:calc(862px * var(--s));overflow:hidden}
+.slot-foot{display:flex;align-items:center;gap:9px;padding:8px 2px 0;font-size:10px;color:#5c5c68;letter-spacing:.05em;border-top:1px solid #14141a;margin-top:9px;flex-wrap:wrap}
+.slot-foot b{color:#a5a5b4;font-weight:500}
+
+/* ============================================================================
+   1. DEVICE FRAME
+   ========================================================================== */
+/* transform:scale + will-change:transform — promoting the device to its own layer
+   makes Chromium rasterise it at the composited scale instead of rasterising at 1x
+   and resampling, which is what put stair steps on every circular edge.
+   (Layout `zoom` also works but broke the slot centring.) */
+.device{position:absolute;top:0;left:50%;margin-left:-204px;width:408px;height:862px;
+  transform:scale(var(--s));transform-origin:top center;will-change:transform;cursor:zoom-in}
+.bezel{position:relative;width:408px;height:862px;border-radius:58px;padding:11px;
+  background:linear-gradient(150deg,#5d5d67,#22222a 16%,#131317 48%,#3a3a44 84%,#0f0f12);
+  box-shadow:0 0 0 1.5px #000,0 26px 55px -18px rgba(0,0,0,.95),0 2px 0 rgba(255,255,255,.05) inset}
+.bezel:after{content:'';position:absolute;inset:11px;border-radius:47px;box-shadow:0 0 0 1px rgba(255,255,255,.07) inset;pointer-events:none;z-index:9}
+.side{position:absolute;width:3px;border-radius:2px;background:linear-gradient(180deg,#55555f,#232329)}
+.side.a{left:-3px;top:172px;height:32px}.side.b{left:-3px;top:224px;height:64px}
+.side.c{left:-3px;top:300px;height:64px}.side.d{right:-3px;top:246px;height:96px}
+.screen{position:relative;width:100%;height:100%;border-radius:47px;overflow:hidden;background:var(--surface);
+  font-family:"Segoe UI",Roboto,system-ui,-apple-system,sans-serif;color:var(--ink);font-weight:400;--sb:54px}
+.screen:after{content:'';position:absolute;inset:0;pointer-events:none;z-index:8;
+  background:linear-gradient(118deg,rgba(255,255,255,.055),rgba(255,255,255,0) 34%,rgba(255,255,255,0) 70%,rgba(255,255,255,.03))}
+.island{position:absolute;top:13px;left:50%;transform:translateX(-50%);width:124px;height:36px;border-radius:20px;background:#000;box-shadow:0 0 0 1px #17171c;z-index:7}
+.sb{position:relative;z-index:5;height:var(--sb);display:flex;align-items:flex-end;justify-content:space-between;padding:0 28px 7px;font-size:15px;font-weight:600;font-variant-numeric:tabular-nums}
+.sb .ic{display:flex;align-items:center;gap:6px}
+.home{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);width:140px;height:5px;border-radius:3px;background:rgba(255,255,255,.3);z-index:7}
+.ios{position:absolute;inset:var(--sb) 0 0;padding:0 18px 34px;overflow:hidden}
+
+/* ============================================================================
+   2. SCREEN PRIMITIVES
+   ========================================================================== */
+.h1{font-size:31px;font-weight:700;letter-spacing:-.022em;line-height:1.08}
+.h2{font-size:14px;font-weight:400;color:var(--ink2)}
+.card{background:var(--card);border-radius:22px;padding:18px}
+.card2{background:var(--card2);border-radius:22px;padding:18px}
+.card-t{font-size:16px;font-weight:600;letter-spacing:-.01em}
+.lab{font-size:13.5px;font-weight:400;color:var(--ink2)}
+.num{font-weight:700;letter-spacing:-.035em;font-variant-numeric:tabular-nums;line-height:1}
+.duo{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.mono{font-family:var(--mono);font-size:9px;letter-spacing:.09em;color:var(--ink3)}
+.swatch{display:inline-block;width:9px;height:9px;border-radius:2px;vertical-align:-1px}
+.badge{display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:9px;letter-spacing:.08em;
+  padding:2px 5px;border-radius:4px;border:1px solid}
+.badge.ok{color:#A9CDB3;border-color:rgba(143,183,154,.4);background:rgba(143,183,154,.1)}
+.badge.bad{color:#E9A091;border-color:rgba(224,138,122,.4);background:rgba(224,138,122,.1)}
+
+/* ---- ring primitives ------------------------------------------------------ */
+.ringset{position:relative;isolation:isolate}
+.lane{position:absolute;border-radius:50%}
+.cap{position:absolute;border-radius:50%}
+/* dithering layer: kills 8-bit gradient banding, reads as film grain */
+.grain{position:absolute;inset:0;pointer-events:none;mix-blend-mode:overlay}
+.tipglyph{position:absolute;display:grid;place-items:center;color:#fff;opacity:.92}
+.tipglyph svg{display:block}
+.trackseam{position:absolute;border-radius:1px}
+.overlay{position:absolute;inset:0;pointer-events:none;font:8.5px/1 var(--mono);letter-spacing:.06em}
+.ann{position:absolute;color:#E9A091;background:rgba(224,138,122,.12);border:1px solid rgba(224,138,122,.4);padding:2px 4px;border-radius:3px;white-space:nowrap}
+.ann.c{color:#A9CDB3;background:rgba(143,183,154,.12);border-color:rgba(143,183,154,.4)}
+@keyframes spin{to{transform:rotate(360deg)}}
+.motion .motionspin{animation:spin 8s linear infinite}
+#modal[hidden]{display:none!important}
+</style>
+</head>
+<body>
+
+<header class="bar">
+  <div class="brand"><b>FOCUSLOCK</b><span>RINGS LAB / BRAND</span></div>
+
+  <label class="ctl">Focus <input id="sf" type="range" min="0" max="200" value="132"><span class="v" id="vf">132%</span></label>
+  <label class="ctl">Tasks <input id="st" type="range" min="0" max="200" value="114"><span class="v" id="vt">114%</span></label>
+
+  <div class="grp">
+    <button class="pill" data-preset="0.42,0.57">start</button>
+    <button class="pill" data-preset="0.86,0.43">mid</button>
+    <button class="pill" data-preset="1,1">goal</button>
+    <button class="pill on" data-preset="1.32,1.14">over</button>
+    <button class="pill" data-preset="2,1.85">200%</button>
+  </div>
+
+  <div class="grp">
+    <button class="pill on" data-tg="rim">edge</button>
+    <button class="pill on" data-tg="bevel">contiguous</button>
+    <button class="pill on" data-tg="grain">grain</button>
+    <button class="pill on" data-tg="guard">guard 3:1</button>
+    <button class="pill" data-tg="xray">xray</button>
+    <button class="pill on" data-tg="lapLift">lap 2</button>
+    <button class="pill on" data-tg="wash">wash</button>
+    <button class="pill on" data-tg="grid">grid</button>
+  </div>
+
+  <div class="grp">
+    <label class="ctl">Band <input id="sb" type="range" min="14" max="40" value="32"><span class="v" id="vb">0.32</span></label>
+  </div>
+
+  <div class="grp">
+    <label class="ctl">Slice N <input id="ss" type="range" min="6" max="72" step="2" value="24"><span class="v" id="vs">24</span></label>
+  </div>
+
+  <div class="grp"><label class="ctl">Zoom <input id="sz" type="range" min="50" max="100" value="78"><span class="v" id="vz">78%</span></label></div>
+
+  <div class="readout">
+    <span>RING 1 <b id="r1">—</b></span>
+    <span>RING 2 <b id="r2">—</b></span>
+    <span id="rg">CONTRAST —</span>
+    <span style="color:#4d4d59">J / K jump · click to inspect</span>
+  </div>
+</header>
+<div class="ruler"></div>
+
+<main class="bench" id="bench"></main>
+
+<div class="modal" id="modal" hidden style="position:fixed;inset:0;z-index:200;background:rgba(4,4,6,.94);backdrop-filter:blur(10px);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px">
+  <div style="display:flex;align-items:baseline;gap:12px;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#6a6a78">
+    <span style="color:var(--dbg);font-weight:700" id="mnum">01</span><b style="color:#fff;font-size:14px;letter-spacing:.08em" id="mname">—</b>
+    <button id="mclose" style="margin-left:18px;font:inherit;font-size:10px;background:#141419;border:1px solid var(--line2);color:#9a9aa8;padding:6px 10px;border-radius:5px;cursor:pointer;letter-spacing:.12em">ESC / CLOSE</button>
+  </div>
+  <div id="mbody" style="position:relative;width:408px;transform-origin:top center"></div>
+  <div style="font-size:10px;letter-spacing:.1em;color:#4f4f5b" id="mspec"></div>
+</div>
+
+<script>
+window.__err=null;
+window.addEventListener('error',function(e){window.__err=(e.message||'')+' @line '+e.lineno;});
+/* ============================================================================
+   A. COLOUR SCIENCE — OKLab/OKLCH ramps + WCAG contrast
+   ----------------------------------------------------------------------------
+   Rationale (research): SVG has no conic gradient, and "muting" a brand hue by
+   picking a pale flat colour destroys legibility on near-black. So we keep the
+   hue, interpolate perceptually (OKLab), boost chroma toward the tip, and
+   verify the dimmest stop against the track for WCAG 2.2 SC 1.4.11 (>= 3:1).
+   ========================================================================== */
+const s2l=c=>c<=0.04045?c/12.92:Math.pow((c+0.055)/1.055,2.4);
+const l2s=c=>c<=0.0031308?c*12.92:1.055*Math.pow(c,1/2.4)-0.055;
+const hex2rgb=h=>{h=h.replace('#','');if(h.length===3)h=h.split('').map(c=>c+c).join('');
+  return [parseInt(h.slice(0,2),16)/255,parseInt(h.slice(2,4),16)/255,parseInt(h.slice(4,6),16)/255];};
+const rgb2hex=a=>'#'+a.map(v=>Math.max(0,Math.min(255,Math.round(v*255))).toString(16).padStart(2,'0')).join('');
+const rgbaOf=(h,a)=>{const c=hex2rgb(h);return `rgba(${Math.round(c[0]*255)},${Math.round(c[1]*255)},${Math.round(c[2]*255)},${a})`;};
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+
+function lin2oklab(r,g,b){
+  const l=Math.cbrt(0.4122214708*r+0.5363325363*g+0.0514459929*b);
+  const m=Math.cbrt(0.2119034982*r+0.6806995451*g+0.1073969566*b);
+  const s=Math.cbrt(0.0883024619*r+0.2817188376*g+0.6299787005*b);
+  return [0.2104542553*l+0.7936177850*m-0.0040720468*s,
+          1.9779984951*l-2.4285922050*m+0.4505937099*s,
+          0.0259040371*l+0.7827717662*m-0.8086757660*s];
+}
+function oklab2lin(L,a,b){
+  const l=(L+0.3963377774*a+0.2158037573*b)**3;
+  const m=(L-0.1055613458*a-0.0638541728*b)**3;
+  const s=(L-0.0894841775*a-1.2914855480*b)**3;
+  return [ 4.0767416621*l-3.3077115913*m+0.2309699292*s,
+          -1.2684380046*l+2.6097574011*m-0.3413193965*s,
+          -0.0041960863*l-0.7034186147*m+1.7076147010*s];
+}
+function hex2oklab(h){const [r,g,b]=hex2rgb(h).map(s2l);return lin2oklab(r,g,b);}
+function oklab2hex(L,a,b){const t=oklab2lin(L,a,b);return rgb2hex([l2s(clamp(t[0],0,1)),l2s(clamp(t[1],0,1)),l2s(clamp(t[2],0,1))]);}
+function oklch(L,C,h){const r=h*Math.PI/180;return oklab2hex(L,C*Math.cos(r),C*Math.sin(r));}
+function luminance(h){const [r,g,b]=hex2rgb(h).map(s2l);return 0.2126*r+0.7152*g+0.0722*b;}
+function contrast(a,b){const A=luminance(a),B=luminance(b);return (Math.max(A,B)+0.05)/(Math.min(A,B)+0.05);}
+
+/* A brand ramp: ordered OKLCH stops, lerped in OKLab, with optional chroma push */
+function ramp(stops){
+  const labs=stops.map(s=>[s.t,...(()=>{const r=s.h*Math.PI/180;return [s.L,s.C*Math.cos(r),s.C*Math.sin(r)];})()]);
+  return {
+    stops,
+    at(f){
+      f=clamp(f,0,1);
+      let i=0;while(i<labs.length-2&&f>labs[i+1][0])i++;
+      const a=labs[i],b=labs[i+1];
+      const t=(f-a[0])/Math.max(1e-6,b[0]-a[0]);
+      return oklab2hex(a[1]+(b[1]-a[1])*t,a[2]+(b[2]-a[2])*t,a[3]+(b[3]-a[3])*t);
+    },
+    lift(dL,dC){return ramp(stops.map(s=>({t:s.t,L:clamp(s.L+dL,0,1),C:Math.max(0,s.C+dC),h:s.h})));},
+    /* WCAG guard: raise L until the dimmest stop clears the track at `target`:1 */
+    guarded(track,target){
+      let d=0;
+      while(d<0.4){
+        const p=ramp(stops.map(s=>({t:s.t,L:clamp(s.L+d,0,1),C:s.C,h:s.h})));
+        if(contrast(p.at(0),track)>=target) return p;
+        d+=0.01;
+      }
+      return this;
+    }
+  };
+}
+/* brand hues lifted from design/theme.json: primary #DFBDB6 (rose), tertiary #B7CBBB (sage)
+   Chroma is deliberately HIGHER than the source swatches: the theme colours are pale pastels
+   that flatten to grey once they leave the mid-tone. Keeping the hue and raising chroma is
+   what lets the ramp stay recognisably rose/sage at both ends. */
+const HUE_ROSE=36, HUE_SAGE=152;
+const TRACK='#303035';
+/* Softer ramp than the first pass: L 0.50 -> 0.74 rather than -> 0.86. A wide
+   lightness swing over a 360deg sweep is what made the ring look like a gradient
+   swatch instead of a ring. */
+const P={
+  focus: ramp([{t:0,L:0.52,C:0.082,h:HUE_ROSE},{t:0.5,L:0.60,C:0.103,h:HUE_ROSE-5},{t:1,L:0.70,C:0.124,h:HUE_ROSE-12}]),
+  tasks: ramp([{t:0,L:0.52,C:0.060,h:HUE_SAGE},{t:0.5,L:0.61,C:0.079,h:HUE_SAGE-3},{t:1,L:0.72,C:0.100,h:HUE_SAGE-9}])
+};
+const PAL=P;   /* active palettes (guard may replace these) */
+
+const NS='http://www.w3.org/2000/svg';
+const rad=d=>(d-90)*Math.PI/180;
+const cxs=(c,r,d)=>c+r*Math.cos(rad(d));
+const cys=(c,r,d)=>c+r*Math.sin(rad(d));
+
+/* ============================================================================
+   B. GLYPHS
+   ========================================================================== */
+const GLYPH={
+  target:'<circle cx="12" cy="12" r="7.6"/><circle cx="12" cy="12" r="3.4"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/>',
+  flame :'<path d="M12 2.8c3.1 3.6 5.1 6.1 5.1 9.1a5.1 5.1 0 0 1-10.2 0c0-2 1-3.6 2.6-5.1C10.9 5.4 12 4.3 12 2.8z"/><path d="M12 12.1c1.2 1.4 1.8 2.3 1.8 3.3a1.8 1.8 0 1 1-3.6 0c0-1 .6-1.9 1.8-3.3z"/>',
+  check :'<path d="M5 12.6 10 17.4 19.2 7"/>',
+  bolt  :'<path d="M13.2 2.8 5.4 13.1h5.6l-.9 8.1 8.5-11h-5.6l.2-7.4z"/>',
+  book  :'<path d="M4 5.2c2.6-1.2 5.3-1.2 8 .2 2.7-1.4 5.4-1.4 8-.2v13c-2.6-1.2-5.3-1.2-8 .2-2.7-1.4-5.4-1.4-8-.2v-13z"/><path d="M12 5.4v13"/>',
+  moon  :'<path d="M20 14.4A8.6 8.6 0 0 1 9.6 4 8.6 8.6 0 1 0 20 14.4z"/>',
+  leaf  :'<path d="M20 4c0 8-4.6 12-10 12-2.2 0-4-.7-5-2C5 14 5 13 5 12c0-5 5-8 15-8z"/><path d="M4 20c3-4 6.5-6.5 11-8"/>',
+  clock :'<circle cx="12" cy="12" r="8.4"/><path d="M12 7.4V12l3.2 2"/>',
+  grip  :'<path d="M9 6.4h9M9 12h9M9 17.6h9"/><circle cx="5.4" cy="6.4" r="1.1" fill="currentColor" stroke="none"/><circle cx="5.4" cy="12" r="1.1" fill="currentColor" stroke="none"/><circle cx="5.4" cy="17.6" r="1.1" fill="currentColor" stroke="none"/>'
+};
+function glyphSVG(name,size,color){
+  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="${color||'currentColor'}"
+    stroke-width="2.05" stroke-linecap="round" stroke-linejoin="round">${GLYPH[name]||GLYPH.target}</svg>`;
+}
+
+/* ============================================================================
+   C. THE RING ENGINE
+   ----------------------------------------------------------------------------
+   Technique (per research): a real SWEEP gradient, not a linear axis.
+     - CSS conic-gradient paints the sweep (0deg = 12 o'clock, clockwise)
+     - mask: radial-gradient(farthest-side, ...) punches the annulus out of it
+     - colour stops are mapped into the drawn sweep only, so the ramp always
+       spans start->tip regardless of progress
+     - `in oklch` interpolation is declared second so unsupported engines fall
+       back to the sRGB version (kills the grey dead-zone / banding)
+     - round caps are explicit filled circles, never stroke-linecap, avoiding
+       the double-cap bump at 100% and the seam at the start point
+     - >=100% draws a full annulus with no caps, then a second lap from 12
+   ========================================================================== */
+/* Mask edges.
+   A hard stop (`transparent Npx,#000 Npx`) is NOT antialiased by Chromium, so every
+   mask boundary rasterises as a stair-stepped circle — that is the aliasing visible
+   around the circumference. Feathering each stop by a fraction of a pixel gives the
+   rasteriser something to work with, which is what actually smooths the edge. */
+const FEATHER=0.75;
+function bandMask(rInner,f){
+  f=f==null?FEATHER:f;
+  return `radial-gradient(farthest-side,transparent ${(rInner-f).toFixed(2)}px,#000 ${(rInner+f).toFixed(2)}px)`;
+}
+function hairline(rOuter,rInner,f){
+  f=f==null?FEATHER*0.8:f;
+  return `radial-gradient(farthest-side,transparent ${(rInner-f).toFixed(2)}px,#000 ${(rInner+f).toFixed(2)}px,`+
+         `#000 ${(rOuter-f).toFixed(2)}px,transparent ${(rOuter+f).toFixed(2)}px)`;
+}
+function annulusBand(rOuter,rInner){
+  return hairline(rOuter,rInner,FEATHER);
+}
+function annulusMask(rOuter,rInner){ return bandMask(rInner); }
+/* Tileable fractal noise. Applied over the bands with mix-blend-mode:overlay, it
+   dithers the ramp so smooth gradients stop quantising into visible steps. */
+const NOISE="url('data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%27160%27 height=%27160%27%3E%3Cfilter id=%27n%27%3E%3CfeTurbulence type=%27fractalNoise%27 baseFrequency=%27.9%27 numOctaves=%272%27 stitchTiles=%27stitch%27/%3E%3C/filter%3E%3Crect width=%27160%27 height=%27160%27 filter=%27url(%23n)%27/%3E%3C/svg%3E')";
+function laneDiv(geom,bg,mask,extra){
+  return `<div class="lane" style="left:${geom.left}px;top:${geom.top}px;width:${geom.d}px;height:${geom.d}px;
+    background:${bg};-webkit-mask:${mask};mask:${mask};${extra||''}"></div>`;
+}
+function rampAt(pal,f0,f1,k){return pal.at(f0+(f1-f0)*k);}
+function sweepCSS(pal,sweepDeg,mode,f0,f1){
+  f0=f0==null?0:f0; f1=f1==null?1:f1;
+  if(mode==='slice') return sliceStops(pal,sweepDeg,f0,f1);
+  const stops=[0,0.5,1].map(k=>`${rampAt(pal,f0,f1,k)} ${(k*sweepDeg).toFixed(2)}deg`).join(',');
+  const tail=sweepDeg>=359.5?'':`,rgba(0,0,0,0) ${sweepDeg.toFixed(2)}deg,rgba(0,0,0,0) 360deg`;
+  return `conic-gradient(from 0deg,${stops}${tail})`;
+}
+function sweepCSSok(pal,sweepDeg,mode,f0,f1){
+  f0=f0==null?0:f0; f1=f1==null?1:f1;
+  if(mode==='slice') return sweepCSS(pal,sweepDeg,mode,f0,f1);
+  const stops=[0,0.5,1].map(k=>`${rampAt(pal,f0,f1,k)} ${(k*sweepDeg).toFixed(2)}deg`).join(',');
+  const tail=sweepDeg>=359.5?'':`,rgba(0,0,0,0) ${sweepDeg.toFixed(2)}deg,rgba(0,0,0,0) 360deg`;
+  return `conic-gradient(from 0deg in oklch,${stops}${tail})`;
+}
+function sliceStops(pal,sweepDeg,f0,f1){
+  f0=f0==null?0:f0; f1=f1==null?1:f1;
+  const N=STATE.slices, out=[];
+  for(let i=0;i<N;i++){
+    const a=i/N,b=(i+1)/N;
+    out.push(`${rampAt(pal,f0,f1,(a+b)/2)} ${(a*sweepDeg).toFixed(2)}deg ${(b*sweepDeg).toFixed(2)}deg`);
+  }
+  if(sweepDeg<359.5) out.push(`rgba(0,0,0,0) ${sweepDeg.toFixed(2)}deg 360deg`);
+  return `conic-gradient(from 0deg,${out.join(',')})`;
+}
+function capHTML(geom,cx,cy,r,angle,t,color){
+  /* coordinates are already absolute within .ringset — do NOT add geom.left/top */
+  const x=cxs(cx,r,angle),y=cys(cy,r,angle);
+  return `<div class="cap" style="left:${x.toFixed(2)}px;top:${y.toFixed(2)}px;
+    width:${t.toFixed(2)}px;height:${t.toFixed(2)}px;
+    margin-left:${(-t/2).toFixed(2)}px;margin-top:${(-t/2).toFixed(2)}px;background:${color}"></div>`;
+}
+
+/* Build one ring set. lanes[] outermost -> innermost.
+   Geometry: bands are CONTIGUOUS (no gap) — the outer radius of one band equals
+   the inner radius of the one outside it — and they are separated by a bevel,
+   which is how Apple's rings read. `bevel:false` falls back to a proportional
+   dark gap so the two treatments can be compared side by side. */
+function ringHTML(o){
+  const S=o.size, n=o.lanes.length, pad=o.pad!=null?o.pad:0;
+  const contiguous=o.bevel!==false;
+  const gw=contiguous?0:0.29;
+  const Ro0=S/2-pad;
+  /* Band weight is the primary expression of the ring: Apple's is ~0.20 of the
+     outer radius. Deriving the hole from it (instead of the reverse) keeps two
+     rings looking like rings rather than a bullseye. */
+  const br=o.bandRatio!=null?o.bandRatio:0.21;
+  const w=br*Ro0;
+  const gap=w*gw;
+  const cx=S/2, cy=S/2;
+  let out=`<div class="ringset" style="width:${S}px;height:${S}px">`;
+  const meta=[];
+  o.lanes.forEach((lane,i)=>{
+    const Ro=Ro0-i*(w+gap), t=w;
+    const geom={left:+(cx-Ro).toFixed(3),top:+(cy-Ro).toFixed(3),d:+(Ro*2).toFixed(3)};
+    const rMid=Ro-t/2;
+    const p=clamp(lane.p,0,2);
+    const pal=lane.pal;
+    const track=lane.track||TRACK;
+    /* 1. track + inner groove so the band reads against the card */
+    out+=laneDiv(geom,track,bandMask(Ro-t),'');
+    out+=laneDiv(geom,'rgba(0,0,0,.5)',hairline(Ro-t,Ro-t-0.9),'');
+    /* 2. lap 1.
+       'span' (default): the ramp spans TOTAL progress, not the lap. Lap 1 carries
+       the first 1/p of the range and lap 2 carries the rest, so the colour is
+       continuous across the 12 o'clock restart and the only step left is at the
+       lap boundary — which is where the step belongs. */
+    const sweep1=Math.min(p,1)*360;
+    const rampEnd1=1;   /* lap 1 always carries the full ramp: crossing 100% must not dull the ring */
+    if(sweep1>0.6){
+      out+=laneDiv(geom,sweepCSS(pal,sweep1,o.gradientMode,0,rampEnd1),annulusMask(Ro,Ro-t),'');
+      out+=laneDiv(geom,sweepCSSok(pal,sweep1,o.gradientMode,0,rampEnd1),annulusMask(Ro,Ro-t),'');
+    }
+    /* 3. lap 2 — the overflow pass */
+    const sweep2=Math.max(0,Math.min(1,p-1))*360;
+    if(sweep2>0.6){
+      if(o.lapMode==='restart'){
+        const pal2=o.lapLift?pal.lift(0.05,0.01):pal;
+        if(o.seam) out+=laneDiv(geom,`conic-gradient(from 0deg,rgba(2,2,4,.9) 0deg 1.4deg,rgba(0,0,0,0) 1.4deg 360deg)`,
+          annulusMask(Ro,Ro-t),'');
+        out+=laneDiv(geom,sweepCSS(pal2,sweep2,o.gradientMode),annulusMask(Ro,Ro-t),'');
+        out+=laneDiv(geom,sweepCSSok(pal2,sweep2,o.gradientMode),annulusMask(Ro,Ro-t),'');
+      } else if(o.lapMode==='wash'){
+        /* Arc lives in the BACKGROUND conic, band lives in the mask — one mask layer,
+           so no mask-composite involved. (Compositing two mask layers was silently
+           misinterpreting, which made the wash appear at the wrong angles.) */
+        const wc=rgbaOf(pal.at(1),o.washOpacity!=null?o.washOpacity:0.30);
+        out+=laneDiv(geom,
+          `conic-gradient(from 0deg,${wc} 0deg,${wc} ${sweep2.toFixed(2)}deg,rgba(0,0,0,0) ${sweep2.toFixed(2)}deg)`,
+          annulusMask(Ro,Ro-t),'');
+      } else {
+        out+=laneDiv(geom,sweepCSS(pal,sweep2,o.gradientMode,0,1),annulusMask(Ro,Ro-t),'');
+        out+=laneDiv(geom,sweepCSSok(pal,sweep2,o.gradientMode,0,1),annulusMask(Ro,Ro-t),'');
+      }
+    }
+    /* 4. explicit round caps (never stroke-linecap) */
+    if(o.caps!==false&&t>3){
+      if(sweep1>0.6&&sweep1<359.5){
+        out+=capHTML(geom,cx,cy,rMid,0,t,pal.at(0));
+        out+=capHTML(geom,cx,cy,rMid,sweep1,t,pal.at(rampEnd1));
+      }
+      if(sweep2>0.6&&sweep2<359.5){
+        out+=capHTML(geom,cx,cy,rMid,sweep2,t,pal.at(1));
+      }
+    }
+    /* 5. bevel: dark outer edge + top-light inner edge. With contiguous bands
+       these two hairlines land back-to-back at each boundary and read as a
+       machined groove — that is what separates the rings, not a gap. */
+    if(o.rim){
+      out+=laneDiv(geom,'rgba(0,0,0,.6)',hairline(Ro,Ro-1.6),'');
+      out+=laneDiv(geom,'rgba(255,255,255,.10)',hairline(Ro-t+1.4,Ro-t),'');
+    }
+    /* 6. leading-edge glyph — colour picked from the tip luminance so it never
+       goes white-on-pale (the classic contrast failure on a light ramp end) */
+    if(lane.icon&&o.icons!==false&&t>9){
+      const tip=p<=1?sweep1:Math.max(0,(p-1))*360;
+      const gs=Math.min(t*1.2,22);
+      const ic=o.iconColor||(luminance(pal.at(1))>0.36?'#2B211E':'#FFFFFF');
+      out+=`<div class="tipglyph" style="width:${gs}px;height:${gs}px;
+        left:${(cxs(cx,rMid,tip)-gs/2).toFixed(2)}px;top:${(cys(cy,rMid,tip)-gs/2).toFixed(2)}px;
+        filter:drop-shadow(0 1px 1.5px rgba(0,0,0,.45))">${glyphSVG(lane.icon,gs,ic)}</div>`;
+    }
+    meta.push({i,p,t,Ro,rMid,pal,geom,full1:sweep1>=359.5,sweep1,sweep2});
+  });
+  /* dither overlay — one layer for the whole ring set, masked to the bands */
+  if(o.grain!==false){
+    const masks=meta.map(m=>annulusBand(m.Ro,m.Ro-m.t)).join(',');
+    out+=`<div class="grain" style="background-image:${NOISE};background-size:150px 150px;
+      opacity:${o.grainOpacity!=null?o.grainOpacity:0.16};
+      -webkit-mask:${masks};mask:${masks}"></div>`;
+  }
+  /* xray: centreline, band edges, 0deg anchor, tip */
+  if(o.xray){
+    out+='<div class="overlay">';
+    out+=`<div style="position:absolute;left:50%;top:0;bottom:0;width:1px;background:rgba(224,138,122,.32)"></div>`;
+    meta.forEach(m=>{
+      out+=`<div style="position:absolute;left:${m.geom.left}px;top:${m.geom.top}px;width:${m.geom.d}px;height:${m.geom.d}px;border-radius:50%;
+        box-shadow:0 0 0 1px rgba(224,138,122,.26) inset"></div>`;
+      /* sit the readouts on the band itself, at 12 and 6 o'clock, so they never collide */
+      out+=`<div class="ann" style="left:${(cx-15).toFixed(2)}px;top:${(cy-m.rMid-6).toFixed(2)}px">${Math.round(m.p*100)}%</div>`;
+      out+=`<div class="ann c" style="left:${(cx-15).toFixed(2)}px;top:${(cy+m.rMid-6).toFixed(2)}px">${Math.round(m.sweep1)}&deg;</div>`;
+    });
+    out+='</div>';
+  }
+  out+='</div>';
+  return out;
+}
+
+/* ============================================================================
+   D. DATA
+   ========================================================================== */
+const STATE={f:1.32,t:1.14,slices:24,xray:false,rim:true,guard:true,lapLift:true,grid:true,scale:.78,
+             gradientMode:'smooth',grain:true,bevel:true,band:0.32,seam:false,lapMode:'wash'};
+const GOAL={f:120,t:7};
+const NAMES={f:'Focus',t:'Tasks'};
+const ICON={f:'flame',t:'check'};
+const UNITS={f:'MIN',t:''};
+
+function activePal(){
+  const g=STATE.guard;
+  return {
+    f:g?PAL.focus.guarded(TRACK,3.0):PAL.focus,
+    t:g?PAL.tasks.guarded(TRACK,3.0):PAL.tasks
+  };
+}
+function ratios(){
+  const p=activePal();
+  return {f:contrast(p.f.at(0),TRACK),t:contrast(p.t.at(0),TRACK),
+          lf:contrast(p.f.at(0),'#1B1B1E'),lt:contrast(p.t.at(0),'#1B1B1E')};
+}
+function pct(k){return Math.round(STATE[k]*100);}
+function now(k){return Math.round(STATE[k]*GOAL[k]);}
+function badge(k){
+  const r=ratios()[k];
+  return `<span class="badge ${r>=3?'ok':'bad'}">${r.toFixed(2)}:1 ${r>=3?'PASS':'FAIL'}</span>`;
+}
+function ringOpts(extra){
+  const pal=activePal();
+  return Object.assign({
+    size:190,pad:1,bandRatio:STATE.band,
+    lanes:[{p:STATE.f,pal:pal.f,icon:ICON.f},{p:STATE.t,pal:pal.t,icon:ICON.t}],
+    rim:STATE.rim,xray:STATE.xray,lapLift:STATE.lapLift,caps:true,
+    grain:STATE.grain,bevel:STATE.bevel,grainOpacity:STATE.grainOpacity,seam:STATE.seam,
+    lapMode:STATE.lapMode
+  },extra||{});
+}
+function ringBox(size,extra){return ringHTML(ringOpts(Object.assign({size},extra||{})));}
+function gradText(pal,txt,extra){
+  const s=`linear-gradient(160deg,${pal.at(0.55)},${pal.at(1)})`;
+  return `<span style="background-image:${s};-webkit-background-clip:text;background-clip:text;color:transparent;${extra||''}">${txt}</span>`;
+}
+
+/* ============================================================================
+   E. THE 10 BRAND-RING VARIATIONS  (two rings: Focus + Tasks)
+   ========================================================================== */
+function statusbar(t){return `<div class="sb"><span>${t||'8:02'}</span><span class="ic">
+  <svg width="18" height="12" viewBox="0 0 18 12" fill="currentColor"><rect x="0" y="8.4" width="3" height="3.6" rx="1"/><rect x="5" y="5.8" width="3" height="6.2" rx="1"/><rect x="10" y="3" width="3" height="9" rx="1"/><rect x="15" y="0" width="3" height="12" rx="1" opacity=".35"/></svg>
+  <svg width="17" height="12" viewBox="0 0 17 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1 4.1C3.2 2.2 5.8 1.2 8.4 1.2s5.2 1 7.4 2.9"/><path d="M3.6 7c1.4-1.2 3.1-1.9 4.8-1.9S11.8 5.8 13.2 7"/><path d="M6.2 9.5c.8-.6 1.5-.9 2.2-.9s1.4.3 2.2.9"/></svg>
+  <svg width="26" height="13" viewBox="0 0 26 13"><rect x=".7" y=".7" width="22" height="11.6" rx="3.4" fill="none" stroke="currentColor" stroke-opacity=".45"/><rect x="2.4" y="2.4" width="15" height="8.2" rx="2" fill="currentColor"/><path d="M24.4 4.4v4.2c1-.3 1.4-1 1.4-2.1s-.4-1.8-1.4-2.1z" fill="currentColor" fill-opacity=".5"/></svg>
+  </span></div>`;}
+
+function metricBlock(k){
+  const pal=activePal()[k];
+  return `<div style="display:flex;align-items:baseline;gap:8px">
+      <span style="font-size:13.5px;color:var(--ink2)">${NAMES[k]}</span>
+      <span style="margin-left:auto;white-space:nowrap" class="mono">${GOAL[k]}${UNITS[k]?' '+UNITS[k]:''}</span>
+    </div>
+    <div class="num" style="font-size:24px;margin-top:2px">${gradText(pal,now(k))}<span style="font-size:12px;color:var(--ink3);font-weight:600"> /${GOAL[k]}</span>
+      <span class="mono" style="margin-left:7px">${Math.round(STATE[k]*100)}%</span></div>`;
+}
+
+/* 01 — Brand Core: the canonical two-ring card */
+function v01(){return `
+  <div style="margin-top:10px"><div class="h1">Today</div><div class="h2">Focus and tasks, in brand hue</div></div>
+  <div class="card" style="margin-top:16px">
+    <div style="display:flex;gap:16px;align-items:center">
+      <div style="flex:0 0 186px">${ringBox(186)}</div>
+      <div style="flex:1;min-width:0">
+        ${metricBlock('f')}
+        <div style="height:1px;background:#2A2A2E;margin:12px 0"></div>
+        ${metricBlock('t')}
+      </div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:12px;display:flex;align-items:center;gap:10px">
+    <span style="font-size:12px;color:var(--ink2)">Contrast at the dimmest stop</span>
+    <span style="margin-left:auto">${badge('f')}${badge('t')}</span>
+  </div>
+  <div class="card" style="margin-top:12px;padding:16px">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:13.5px">Focus through the day</span><span class="mono">PEAK 10 AM</span>
+    </div>
+    <div style="display:flex;align-items:flex-end;gap:3px;height:54px;margin-top:12px">
+      ${[.14,.2,.34,.28,.52,.4,.68,.44,.82,.5,.36,.58].map(v=>`<i style="flex:1;height:${Math.round(v*100)}%;border-radius:2px;background:linear-gradient(180deg,${activePal().f.at(0.9)},${activePal().f.at(0.3)})"></i>`).join('')}
+    </div>
+    <div class="mono" style="display:flex;justify-content:space-between;margin-top:7px"><span>12 AM</span><span>6 AM</span><span>12 PM</span><span>6 PM</span></div>
+  </div>
+  <div class="duo" style="margin-top:12px">
+    <div class="card" style="padding:15px"><div class="mono">STREAK</div>
+      <div class="num" style="font-size:26px;margin-top:7px">14<span style="font-size:11px;color:var(--ink3)"> DAYS</span></div></div>
+    <div class="card" style="padding:15px"><div class="mono">BLOCKED</div>
+      <div class="num" style="font-size:26px;margin-top:7px">27</div></div>
+  </div>
+  <div class="mono" style="margin-top:12px;line-height:1.8">
+    CONIC SWEEP GRADIENT, INTERPOLATED IN OKLCH<br>
+    HUE PRESERVED · CHROMA PUSHED TOWARD THE TIP<br>
+    TRACK FIXED AT ${TRACK} — NOT DERIVED FROM THE HUE
+  </div>`;}
+
+/* 02 — Lap anatomy: the >100% second pass, labelled */
+function v02(){return `
+  <div style="margin-top:10px"><div class="h1">Lap Anatomy</div><div class="h2">What happens past 100%</div></div>
+  <div class="card" style="margin-top:14px;position:relative">
+    <div style="display:flex;justify-content:center">${ringBox(216,{xray:true})}</div>
+  </div>
+  ${['f','t'].map(k=>{
+    const p=STATE[k],over=Math.max(0,p-1);
+    return `<div style="margin-top:12px">
+      <div style="display:flex;justify-content:space-between;font-size:13px">
+        <span style="color:${activePal()[k].at(0.7)}">${NAMES[k]}</span>
+        <span class="num" style="font-size:13px">${Math.round(p*100)}%</span>
+      </div>
+      <div style="display:flex;height:9px;border-radius:4px;background:${TRACK};overflow:hidden;margin-top:6px">
+        <div style="width:${Math.min(100,p*100/2)}%;background:linear-gradient(90deg,${activePal()[k].at(0)},${activePal()[k].at(1)})"></div>
+        ${over>0?`<div style="width:${Math.min(50,over*50)}%;background:linear-gradient(90deg,${activePal()[k].lift(0.085,0.012).at(0)},${activePal()[k].lift(0.085,0.012).at(1)})"></div>`:''}
+      </div>
+      <div class="mono" style="margin-top:5px">${over>0?`LAP 1 100% · LAP 2 ${Math.round(over*100)}% · RESTARTS AT 12 O'CLOCK`:`${Math.round((1-p)*100)}% OF LAP 1 TO GO`}</div>
+    </div>`;}).join('')}
+  <div class="card2" style="margin-top:14px;padding:15px">
+    <div style="font-size:13px;font-weight:600;margin-bottom:8px">Rules applied</div>
+    <div class="mono" style="line-height:1.85">
+      LAP 2 SAME RADIUS · BRIGHTER RAMP (+0.085 L)<br>
+      HAIRLINE SEAM UNDER LAP 2 SO THE EDGE READS<br>
+      CLAMPED AT 200% — BEYOND THAT IT IS AMBIGUOUS
+    </div>
+  </div>
+  <div class="card" style="margin-top:12px;padding:15px">
+    <div class="mono" style="margin-bottom:9px">LAP MATHS</div>
+    ${['f','t'].map(k=>`<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:9px">
+      <span style="font-size:12.5px;color:${activePal()[k].at(0.8)}">${NAMES[k]}</span>
+      <span class="mono" style="margin-left:auto">${now(k)} / ${GOAL[k]} = LAP 1 + ${Math.max(0,now(k)-GOAL[k])}</span>
+    </div>`).join('')}
+    <div class="mono" style="line-height:1.7;color:#5f5855">ONE EXTRA LAP IS ALL THE SYSTEM CAN SHOW<br>WITHOUT THE RING BECOMING AMBIGUOUS</div>
+  </div>`;}
+
+/* 03 — Contrast guard: the legibility fix, measured */
+function v03(){
+  const p=activePal();
+  const raw={f:contrast(P.focus.at(0),TRACK),t:contrast(P.tasks.at(0),TRACK)};
+  const gd={f:contrast(p.f.at(0),TRACK),t:contrast(p.t.at(0),TRACK)};
+  return `
+  <div style="margin-top:10px"><div class="h1">Contrast Guard</div><div class="h2">WCAG 2.2 · SC 1.4.11 · 3:1</div></div>
+  <div style="display:flex;justify-content:center;margin-top:14px">${ringBox(178)}</div>
+  ${['f','t'].map(k=>`<div class="card" style="margin-top:12px;padding:14px">
+    <div style="display:flex;align-items:center;gap:8px">
+      <span class="swatch" style="background:${p[k].at(0)}"></span>
+      <span style="font-size:13px">${NAMES[k]}</span>
+      <span style="margin-left:auto">${badge(k)}</span>
+    </div>
+    <div class="mono" style="margin-top:9px;line-height:1.7">
+      DIMMEST STOP ${p[k].at(0)} vs TRACK ${TRACK}<br>
+      ${STATE.guard?`GUARDED FROM ${raw[k].toFixed(2)}:1 &rarr; ${gd[k].toFixed(2)}:1`:`UNGUARDED ${raw[k].toFixed(2)}:1 — FAILS ON DARK`}
+    </div>
+    <div style="display:flex;gap:3px;margin-top:9px">
+      ${[0,0.25,0.5,0.75,1].map(t=>`<span style="flex:1;height:10px;border-radius:2px;background:${p[k].at(t)}"></span>`).join('')}
+    </div>
+    <div class="mono" style="margin-top:6px">RAMP AT 0 / .25 / .5 / .75 / 1</div>
+  </div>`).join('')}
+  <div class="card2" style="margin-top:12px;padding:15px">
+    <div style="font-size:13px;font-weight:600;margin-bottom:9px">What the guard does</div>
+    <div class="mono" style="line-height:1.9">
+      RAISES L IN OKLCH, HUE AND CHROMA UNTOUCHED<br>
+      NEVER LOWERS OPACITY — OPACITY BREAKS LUMINANCE<br>
+      TESTS THE DIMMEST STOP, NOT THE AVERAGE<br>
+      TRACK IS A FIXED NEUTRAL, NEVER HUE-DERIVED
+    </div>
+    <div style="display:flex;gap:10px;margin-top:11px;align-items:center">
+      <span class="swatch" style="background:${TRACK};width:14px;height:14px"></span>
+      <span class="mono">TRACK ${TRACK} vs CARD #1B1B1E = ${contrast(TRACK,'#1B1B1E').toFixed(2)}:1</span>
+    </div>
+  </div>`;}
+
+/* 04 — Duotone rose: one hue, two lightnesses */
+function v04(){
+  const base=PAL.focus.guarded(TRACK,3.0);
+  const duo=base.lift(0.14,0.012);
+  const pal={f:base,t:duo};
+  return `
+  <div style="margin-top:10px"><div class="h1">Duotone</div><div class="h2">One hue, two lightnesses</div></div>
+  <div style="display:flex;justify-content:center;margin-top:18px">
+    ${ringHTML(ringOpts({size:208,lanes:[{p:STATE.f,pal:pal.f,icon:'target'},{p:STATE.t,pal:pal.t,icon:'grip'}]}))}
+  </div>
+  <div class="duo" style="margin-top:18px">
+    ${['f','t'].map(k=>`<div class="card" style="padding:15px">
+      <div style="display:flex;align-items:center;gap:7px"><span class="swatch" style="background:${pal[k].at(0.8)}"></span>
+      <span style="font-size:12.5px;color:var(--ink2)">${NAMES[k]}</span></div>
+      <div class="num" style="font-size:26px;margin-top:8px;color:${pal[k].at(0.85)}">${Math.round(STATE[k]*100)}<span style="font-size:12px">%</span></div>
+      <div class="mono" style="margin-top:4px">${now(k)}/${GOAL[k]}</div>
+    </div>`).join('')}
+  </div>
+  <div class="mono" style="margin-top:14px;line-height:1.8">SAME HUE, SECOND RING +0.14 L / +0.012 C<br>DIFFERENTIATION WITHOUT A SECOND COLOUR</div>
+  <div class="card" style="margin-top:12px;padding:15px">
+    <div class="mono" style="margin-bottom:9px">RAMP 2 — THE LIGHTER OF THE PAIR</div>
+    <div style="display:flex;gap:3px">
+      ${[0,0.25,0.5,0.75,1].map(t=>`<span style="flex:1;height:16px;border-radius:3px;background:${pal.t.at(t)}"></span>`).join('')}
+    </div>
+    <div class="mono" style="margin-top:6px">CONTRAST ${contrast(pal.t.at(0),TRACK).toFixed(2)}:1 vs TRACK · STILL PASSES</div>
+  </div>
+  <div class="card" style="margin-top:12px;padding:15px">
+    <div class="mono" style="margin-bottom:9px">RAMP 1 — THE DARKER OF THE PAIR</div>
+    <div style="display:flex;gap:3px">
+      ${[0,0.25,0.5,0.75,1].map(t=>`<span style="flex:1;height:16px;border-radius:3px;background:${pal.f.at(t)}"></span>`).join('')}
+    </div>
+    <div class="mono" style="margin-top:6px">CONTRAST ${contrast(pal.f.at(0),TRACK).toFixed(2)}:1 vs TRACK · ΔL BETWEEN RINGS 0.14</div>
+  </div>`;}
+
+/* 05 — Rim & bevel: definition on a dark card */
+function v05(){return `
+  <div style="margin-top:10px"><div class="h1">Rim &amp; Bevel</div><div class="h2">Definition, not saturation</div></div>
+  <div style="background:linear-gradient(180deg,#232326,#17171a);border-radius:24px;padding:20px;margin-top:16px;
+       border:1px solid rgba(255,255,255,.06)">
+    <div style="display:flex;justify-content:center">${ringBox(212,{rim:true})}</div>
+  </div>
+  <div class="card" style="margin-top:12px;padding:15px">
+    ${['f','t'].map(k=>`<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <span class="swatch" style="background:${activePal()[k].at(0.8)}"></span>
+      <span style="font-size:12.5px">${NAMES[k]}</span>
+      <span class="mono" style="margin-left:auto">${now(k)}/${GOAL[k]}</span>
+    </div>`).join('')}
+  </div>
+  <div class="mono" style="margin-top:14px;line-height:1.85">
+    1.6PX DARK OUTER EDGE (APPLE HIG)<br>
+    INNER HAIRLINE 0.9PX GROOVE · 1.4PX TOP LIGHT<br>
+    BANDS CONTIGUOUS — OUTER R OF ONE = INNER R OF NEXT
+  </div>
+  <div class="card2" style="margin-top:12px;padding:15px">
+    <div class="mono" style="margin-bottom:10px">EDGE STACK, OUTSIDE IN</div>
+    ${[['1.6PX DARK EDGE','rgba(0,0,0,.6)',14],['TRACK '+TRACK+' · BAND','#303035',16],
+       ['0.9PX GROOVE','rgba(0,0,0,.5)',3],['1.4PX TOP LIGHT','rgba(255,255,255,.10)',3],
+       ['FOUNDATION GRAIN','#6b6b6b',10]]
+      .map(([l,c,h])=>`<div style="display:flex;align-items:center;gap:9px;margin-bottom:7px">
+        <span style="width:${h}px;height:10px;border-radius:2px;background:${c};box-shadow:0 0 0 1px rgba(255,255,255,.09)"></span>
+        <span class="mono">${l}</span></div>`).join('')}
+  </div>`;}
+
+/* 06 — Light ground: the same rings on a light surface */
+function v06(){
+  const palL={f:ramp([{t:0,L:0.38,C:0.075,h:HUE_ROSE},{t:0.55,L:0.56,C:0.115,h:HUE_ROSE-5},{t:1,L:0.70,C:0.135,h:HUE_ROSE-11}]),
+              t:ramp([{t:0,L:0.38,C:0.055,h:HUE_SAGE},{t:0.55,L:0.57,C:0.085,h:HUE_SAGE-3},{t:1,L:0.72,C:0.105,h:HUE_SAGE-7}])};
+  const LTRACK='#E2DAD6';
+  return `
+  <div style="position:absolute;inset:0;background:#F3ECE9"></div>
+  <div style="position:relative;color:#2A2523">
+    <div style="margin-top:10px"><div class="h1" style="color:#2A2523">Light Ground</div>
+    <div class="h2" style="color:#6B615D">Brand hue on a light surface</div></div>
+    <div style="background:#FFFCFA;border-radius:22px;padding:18px;margin-top:16px;box-shadow:0 10px 30px -18px rgba(60,45,40,.5)">
+      <div style="display:flex;gap:16px;align-items:center">
+        <div style="flex:0 0 180px">
+          ${ringHTML(ringOpts({size:180,pad:1,track:LTRACK,iconColor:'#4A403C',
+            lanes:[{p:STATE.f,pal:palL.f,icon:'target',track:LTRACK},{p:STATE.t,pal:palL.t,icon:'leaf',track:LTRACK}]}))}
+        </div>
+        <div style="flex:1;min-width:0">
+          ${['f','t'].map(k=>`<div style="margin-bottom:14px">
+            <div style="font-size:13px;color:#6B615D">${NAMES[k]}</div>
+            <div class="num" style="font-size:21px;color:${palL[k].at(0.9)}">${Math.round(STATE[k]*100)}<span style="font-size:11px">%</span>
+              <span style="font-size:11px;color:#8C827D;font-weight:600"> ${now(k)}/${GOAL[k]}</span></div>
+          </div>`).join('')}
+        </div>
+      </div>
+    </div>
+    <div class="mono" style="margin-top:12px;color:#8C827D;line-height:1.8">
+      TRACK REVERSED TO ${LTRACK} · RAMP DEEPENED −0.12 L<br>
+      DARK ARC ON LIGHT: ${contrast(palL.f.at(0),LTRACK).toFixed(2)}:1 / ${contrast(palL.t.at(0),LTRACK).toFixed(2)}:1
+    </div>
+    <div style="background:#FFFCFA;border-radius:22px;padding:16px;margin-top:12px;box-shadow:0 10px 30px -20px rgba(60,45,40,.45)">
+      <div style="font-size:13.5px;font-weight:600">Same geometry, inverted ground</div>
+      <div class="mono" style="margin-top:9px;color:#8C827D;line-height:1.8">
+        THE RAMP IS NOT REUSED — IT IS RECOMPUTED<br>
+        DIMMEST STOP VS LIGHT TRACK ${Math.min(contrast(palL.f.at(0),LTRACK),contrast(palL.t.at(0),LTRACK)).toFixed(2)}:1
+      </div>
+      <div style="display:flex;gap:3px;margin-top:10px">
+        ${[0,0.25,0.5,0.75,1].map(t=>`<span style="flex:1;height:12px;border-radius:3px;background:${palL.f.at(t)}"></span>`).join('')}
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px">
+      <div style="background:#FFFCFA;border-radius:22px;padding:16px;box-shadow:0 10px 30px -20px rgba(60,45,40,.45)">
+        <div class="mono" style="color:#8C827D">STREAK</div>
+        <div class="num" style="font-size:24px;color:#2A2523;margin-top:7px">14<span style="font-size:11px;color:#8C827D"> DAYS</span></div>
+      </div>
+      <div style="background:#FFFCFA;border-radius:22px;padding:16px;box-shadow:0 10px 30px -20px rgba(60,45,40,.45)">
+        <div class="mono" style="color:#8C827D">BLOCKED</div>
+        <div class="num" style="font-size:24px;color:#2A2523;margin-top:7px">27</div>
+      </div>
+    </div>
+    <div style="background:#FFFCFA;border-radius:22px;padding:16px;margin-top:12px;box-shadow:0 10px 30px -20px rgba(60,45,40,.45)">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:13.5px;font-weight:600;color:#2A2523">Focus through the day</span>
+        <span class="mono" style="color:#8C827D">PEAK 10 AM</span>
+      </div>
+      <div style="display:flex;align-items:flex-end;gap:3px;height:52px;margin-top:12px">
+        ${[.14,.2,.34,.28,.52,.4,.68,.44,.82,.5,.36,.58].map(v=>`<i style="flex:1;height:${Math.round(v*100)}%;border-radius:2px;background:linear-gradient(180deg,${palL.f.at(0.95)},${palL.f.at(0.4)})"></i>`).join('')}
+      </div>
+      <div class="mono" style="display:flex;justify-content:space-between;margin-top:7px;color:#8C827D"><span>12 AM</span><span>6 AM</span><span>12 PM</span><span>6 PM</span></div>
+    </div>
+  </div>`;}
+
+/* 07 — Chroma tip: muted base, vivid leading edge */
+function v07(){
+  const tipPal={f:ramp([{t:0,L:0.50,C:0.030,h:HUE_ROSE},{t:0.72,L:0.64,C:0.055,h:HUE_ROSE},{t:0.92,L:0.78,C:0.135,h:HUE_ROSE-8},{t:1,L:0.90,C:0.155,h:HUE_ROSE-14}]),
+                t:ramp([{t:0,L:0.51,C:0.022,h:HUE_SAGE},{t:0.72,L:0.66,C:0.040,h:HUE_SAGE},{t:0.92,L:0.80,C:0.105,h:HUE_SAGE-5},{t:1,L:0.91,C:0.120,h:HUE_SAGE-10}])};
+  return `
+  <div style="margin-top:10px"><div class="h1">Chroma Tip</div><div class="h2">Muted base, vivid leading edge</div></div>
+  <div style="display:flex;justify-content:center;margin-top:16px">
+    ${ringHTML(ringOpts({size:206,lanes:[{p:STATE.f,pal:tipPal.f,icon:'flame'},{p:STATE.t,pal:tipPal.t,icon:'leaf'}]}))}
+  </div>
+  <div class="card" style="margin-top:16px;padding:15px">
+    <div class="mono" style="line-height:1.85">
+      CHROMA HELD FLAT TO 72% OF THE SWEEP, THEN ×2.4<br>
+      LEADING EDGE REACHES oklch(0.90 0.155) — BRAND HUE INTACT<br>
+      DIMMEST STOP STILL ${contrast(tipPal.f.at(0),TRACK).toFixed(2)}:1 vs TRACK
+    </div>
+  </div>
+  <div style="display:flex;gap:4px;margin-top:12px">
+    ${[0,0.2,0.4,0.6,0.8,1].map(t=>`<span style="flex:1;height:14px;border-radius:3px;background:${tipPal.f.at(t)}"></span>`).join('')}
+  </div>
+  <div class="mono" style="margin-top:6px">ROSE RAMP — NOTICE THE SATURATION LIVES AT THE TIP</div>
+  <div class="card" style="margin-top:14px;padding:15px">
+    <div class="mono" style="margin-bottom:9px">SAGE RAMP — SAME TREATMENT</div>
+    <div style="display:flex;gap:4px">
+      ${[0,0.2,0.4,0.6,0.8,1].map(t=>`<span style="flex:1;height:14px;border-radius:3px;background:${tipPal.t.at(t)}"></span>`).join('')}
+    </div>
+  </div>
+  <div class="duo" style="margin-top:12px">
+    <div class="card" style="padding:15px"><div class="mono">BASE CHROMA</div>
+      <div class="num" style="font-size:24px;margin-top:7px">0.030</div>
+      <div class="mono" style="margin-top:4px">FLAT, UNTIL 72%</div></div>
+    <div class="card" style="padding:15px"><div class="mono">TIP CHROMA</div>
+      <div class="num" style="font-size:24px;margin-top:7px">0.155</div>
+      <div class="mono" style="margin-top:4px">×5.2 OF BASE</div></div>
+  </div>`;}
+
+/* 08 — Slice study: why a real sweep gradient beats a linear axis */
+function v08(){return `
+  <div style="margin-top:10px"><div class="h1">Slice Study</div><div class="h2">Gradient construction, live</div></div>
+  <div class="card" style="margin-top:14px">
+    <div style="display:flex;justify-content:center">
+      ${ringHTML(ringOpts({size:196,gradientMode:'slice'}))}
+    </div>
+    <div class="mono" style="text-align:center;margin-top:12px">N = ${STATE.slices} DISCRETE SLICES</div>
+  </div>
+  <div class="card2" style="margin-top:12px;padding:15px">
+    <div class="mono" style="line-height:1.9">
+      SLICES ARE FLAT-STROKED COLOUR STOPS ON ONE<br>
+      conic-gradient — SAME PAINT COST AT ANY N.<br><br>
+      N &LT; 14 &rarr; BANDING AT THE TIP<br>
+      N &GT; 36 &rarr; VISUALLY SMOOTH, NO GAIN BEYOND<br><br>
+      SMOOTH MODE INSTEAD USES A REAL SWEEP WITH A<br>
+      FRACTAL-NOISE DITHER LAYER, BECAUSE 8-BIT COLOUR<br>
+      QUANTISES A LONG RAMP INTO CONCENTRIC STEPS.<br>
+      THE GRAIN IS THE FIX — AND IT READS AS TEXTURE.<br><br>
+      SVG HAS NO CONIC GRADIENT: THE TWO REALISTIC<br>
+      OPTIONS ARE N SLICES, OR conic-gradient + MASK<br>
+      (THIS BUILD) OR Brush.sweepGradient IN COMPOSE.
+    </div>
+  </div>
+  <div class="mono" style="margin-top:12px">DRAG "SLICE N" IN THE TOOLBAR TO SEE IT</div>`;}
+
+/* 09 — Compact numerals: ring as accent, type as hero */
+function v09(){return `
+  <div style="margin-top:10px"><div class="h1">Numerals First</div><div class="h2">Ring as accent</div></div>
+  <div class="card" style="margin-top:16px;display:flex;align-items:center;gap:16px">
+    <div style="flex:0 0 104px">${ringHTML(ringOpts({size:104,pad:1,bandRatio:0.30,icons:false,
+      lanes:[{p:STATE.f,pal:activePal().f}]}))}</div>
+    <div style="flex:1;min-width:0">
+      <div class="mono">FOCUS</div>
+      <div class="num" style="font-size:34px;margin-top:3px">${now('f')}<span style="font-size:14px;color:var(--ink3)"> /${GOAL.f} MIN</span></div>
+      <div class="mono" style="margin-top:5px">${badge('f')}</div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:12px;display:flex;align-items:center;gap:16px">
+    <div style="flex:0 0 104px">${ringHTML(ringOpts({size:104,pad:1,bandRatio:0.30,icons:false,
+      lanes:[{p:STATE.t,pal:activePal().t}]}))}</div>
+    <div style="flex:1;min-width:0">
+      <div class="mono">TASKS</div>
+      <div class="num" style="font-size:34px;margin-top:3px">${now('t')}<span style="font-size:14px;color:var(--ink3)"> /${GOAL.t}</span></div>
+      <div class="mono" style="margin-top:5px">${badge('t')}</div>
+    </div>
+  </div>
+  <div class="mono" style="margin-top:14px;line-height:1.8">AT 104PT THE GLYPH IS DROPPED AND THE BAND<br>THICKENS TO 0.34 HOLE — THE RING IS A SIGNAL,<br>THE NUMERAL CARRIES THE VALUE</div>
+  <div class="duo" style="margin-top:12px">
+    <div class="card" style="padding:15px"><div class="mono">STREAK</div>
+      <div class="num" style="font-size:24px;margin-top:7px">14<span style="font-size:11px;color:var(--ink3)"> DAYS</span></div></div>
+    <div class="card" style="padding:15px"><div class="mono">BLOCKED</div>
+      <div class="num" style="font-size:24px;margin-top:7px">27</div></div>
+  </div>
+  <div class="card" style="margin-top:12px;padding:15px">
+    <div class="mono" style="margin-bottom:9px">TYPE SCALE</div>
+    <div style="display:flex;align-items:baseline;gap:10px">
+      <span class="num" style="font-size:34px">${now('f')}</span>
+      <span class="num" style="font-size:22px">${now('t')}</span>
+      <span class="mono" style="margin-left:auto">34 / 22 / 11</span>
+    </div>
+  </div>`;}
+
+/* 10 — Overlap hero at 200% */
+function v10(){return `
+  <div style="margin-top:10px"><div class="h1">Two Laps</div><div class="h2">The 200% ceiling</div></div>
+  <div style="display:flex;justify-content:center;margin-top:12px">${ringBox(226)}</div>
+  <div class="duo" style="margin-top:16px">
+    ${['f','t'].map(k=>{
+      const p=clamp(STATE[k],0,2),over=Math.max(0,p-1),whole=Math.min(p,1);
+      return `<div class="card" style="padding:14px">
+        <div style="display:flex;align-items:center;gap:7px">
+          <span class="swatch" style="background:${activePal()[k].at(0.85)}"></span>
+          <span style="font-size:12px;color:var(--ink2)">${NAMES[k]}</span>
+        </div>
+        <div class="num" style="font-size:24px;margin-top:8px">${Math.round(p*100)}<span style="font-size:11px;color:var(--ink3)">%</span></div>
+        <div class="mono" style="margin-top:8px;line-height:1.6">
+          LAP 1 ${Math.round(whole*100)}%<br>
+          LAP 2 ${Math.round(over*100)}%${p>=2?' · CAPPED':''}
+        </div>
+      </div>`;}).join('')}
+  </div>
+  <div style="margin-top:14px;display:flex;gap:8px;align-items:center">
+    <div style="flex:1;height:6px;border-radius:3px;background:${TRACK};overflow:hidden;position:relative">
+      <div style="position:absolute;left:0;top:0;bottom:0;width:${Math.min(100,STATE.f*50)}%;background:linear-gradient(90deg,${activePal().f.at(0)},${activePal().f.at(1)})"></div>
+      <div style="position:absolute;left:50%;top:-3px;bottom:-3px;width:1.5px;background:rgba(238,233,231,.55)"></div>
+    </div>
+    <span class="mono" style="flex:0 0 auto">0 &rarr; 200%</span>
+  </div>
+  <div class="card2" style="margin-top:14px;padding:15px">
+    <div class="mono" style="line-height:1.9">
+      LAP 1 SPANS 0-100% OF THE GOAL<br>
+      LAP 2 SPANS 100-200% · SAME RADIUS, BRIGHTER<br>
+      BEYOND 200% THE RING STOPS MOVING, THE NUMBER<br>
+      KEEPS CLIMBING — THAT IS THE HONEST FAILURE MODE
+    </div>
+  </div>`;}
+
+const VARIANTS=[
+  {n:'01',name:'Brand Core',spec:'2 rings · contiguous bands + bevel · conic sweep · oklch · dithered',html:v01},
+  {n:'02',name:'Lap Anatomy',spec:'>100% second lap · same radius · seam · clamped at 200%',html:v02},
+  {n:'03',name:'Contrast Guard',spec:'WCAG 2.2 1.4.11 · dimmest stop vs track · live ratio',html:v03},
+  {n:'04',name:'Duotone',spec:'one hue, two lightnesses · +0.14 L on ring 2',html:v04},
+  {n:'05',name:'Rim & Bevel',spec:'contiguous bands · 1.6px dark edge · 0.9px groove · grain',html:v05},
+  {n:'06',name:'Light Ground',spec:'cream surface · deepened ramp · dark arc on light',html:v06},
+  {n:'07',name:'Chroma Tip',spec:'chroma flat to 72% then ×2.4 · vivid leading edge',html:v07},
+  {n:'08',name:'Slice Study',spec:'N flat slices on one conic-gradient · live N',html:v08},
+  {n:'09',name:'Numerals First',spec:'104pt accent rings · type carries the value',html:v09},
+  {n:'10',name:'Two Laps',spec:'200% ceiling · lap split readout',html:v10}
+];
+
+/* ============================================================================
+   F. HARNESS
+   ========================================================================== */
+function buildScreen(i){
+  const w=document.createElement('div');
+  w.className='screen';w.dataset.variant=i;
+  w.innerHTML=statusbar()+'<div class="ios">'+VARIANTS[i].html()+'</div>'+'<div class="home"></div>';
+  return w;
+}
+function buildDevice(i){
+  const d=document.createElement('div');
+  d.className='device';
+  d.innerHTML='<div class="bezel"><div class="side a"></div><div class="side b"></div><div class="side c"></div><div class="side d"></div></div>';
+  d.querySelector('.bezel').appendChild(buildScreen(i));
+  return d;
+}
+const bench=document.getElementById('bench');let slots=[];let SOLO=null;
+function buildBench(){
+  bench.innerHTML='';slots=[];
+  VARIANTS.forEach((v,i)=>{
+    const s=document.createElement('div');s.className='slot';
+    s.innerHTML=`<div class="slot-head"><span class="num">${v.n}</span><b>${v.name}</b><span class="ok">${v.spec.slice(0,26)}</span></div>
+      <div class="slot-body"></div><div class="slot-foot"></div>`;
+    s.querySelector('.slot-body').appendChild(buildDevice(i));
+    bench.appendChild(s);slots.push(s);
+  });
+}
+function renderAll(){
+  document.querySelectorAll('.screen').forEach(scr=>{
+    const i=+scr.dataset.variant;
+    scr.querySelector('.ios').innerHTML=VARIANTS[i].html();
+  });
+  /* isolate mode: one big ring on a plain ground, for judging the artefact itself */
+  if(SOLO) SOLO.innerHTML=ringBox(SOLO._size,{pad:2});
+  const r=ratios();
+  const rf=[['f','FOCUS'],['t','TASKS']].map(([k,l])=>{
+    const over=STATE[k]>1.001;
+    return `${l} <b>${Math.round(STATE[k]*100)}%</b>${over?` <span style="color:#E9A091">+${Math.round((STATE[k]-1)*100)}%</span>`:''}`;
+  });
+  document.getElementById('r1').textContent=Math.round(STATE.f*100)+'% · '+now('f')+'/'+GOAL.f;
+  document.getElementById('r2').textContent=Math.round(STATE.t*100)+'% · '+now('t')+'/'+GOAL.t;
+  const rg=document.getElementById('rg');
+  const worst=Math.min(r.f,r.t);
+  rg.textContent=`CONTRAST ${r.f.toFixed(2)}:1 / ${r.t.toFixed(2)}:1`;
+  rg.className=worst>=3?'pass':'fail';
+  slots.forEach(s=>{
+    s.querySelector('.slot-foot').innerHTML=
+      `<span>FOCUS <b>${Math.round(STATE.f*100)}%</b> ${badge('f')}</span>`+
+      `<span>TASKS <b>${Math.round(STATE.t*100)}%</b> ${badge('t')}</span>`;
+  });
+  document.getElementById('vf').textContent=Math.round(STATE.f*100)+'%';
+  document.getElementById('vt').textContent=Math.round(STATE.t*100)+'%';
+}
+let raf=0;function schedule(){if(raf)return;raf=requestAnimationFrame(()=>{raf=0;renderAll();});}
+
+function bindSlider(id,key){
+  const el=document.getElementById(id);
+  el.addEventListener('input',()=>{STATE[key]=+el.value/100;
+    document.querySelectorAll('[data-preset]').forEach(p=>p.classList.remove('on'));schedule();});
+}
+bindSlider('sf','f');bindSlider('st','t');
+document.getElementById('ss').addEventListener('input',e=>{
+  STATE.slices=+e.target.value;document.getElementById('vs').textContent=e.target.value;schedule();});
+document.getElementById('sb').addEventListener('input',e=>{
+  STATE.band=+e.target.value/100;document.getElementById('vb').textContent=STATE.band.toFixed(2);schedule();});
+document.querySelectorAll('[data-preset]').forEach(b=>b.addEventListener('click',()=>{
+  const [f,t]=b.dataset.preset.split(',').map(Number);
+  STATE.f=f;STATE.t=t;
+  document.getElementById('sf').value=f*100;document.getElementById('st').value=t*100;
+  document.querySelectorAll('[data-preset]').forEach(p=>p.classList.remove('on'));b.classList.add('on');
+  renderAll();
+}));
+document.querySelectorAll('[data-tg]').forEach(b=>b.addEventListener('click',()=>{
+  const k=b.dataset.tg;
+  if(k==='wash'){ STATE.lapMode=(STATE.lapMode==='wash')?'restart':'wash'; b.classList.toggle('on',STATE.lapMode==='wash'); renderAll(); return; }
+  STATE[k]=!STATE[k];b.classList.toggle('on',STATE[k]);
+  if(k==='grid')document.body.classList.toggle('no-grid',!STATE.grid);
+  renderAll();
+}));
+document.getElementById('sz').addEventListener('input',e=>{
+  document.getElementById('vz').textContent=e.target.value+'%';
+  STATE.scale=+e.target.value/100;
+  document.documentElement.style.setProperty('--s',STATE.scale);
+});
+bench.addEventListener('click',e=>{
+  const d=e.target.closest('.device');if(!d)return;
+  openModal(+d.querySelector('.screen').dataset.variant);
+});
+function openModal(i){
+  const v=VARIANTS[i],s=Math.min(1,(window.innerHeight-190)/862);
+  document.getElementById('mnum').textContent=v.n;
+  document.getElementById('mname').textContent=v.name;
+  document.getElementById('mspec').textContent=v.spec;
+  const b=document.getElementById('mbody');
+  b.innerHTML='';b.style.transform='scale('+s+')';b.style.height=(862*s)+'px';
+  b.appendChild(buildDevice(i).querySelector('.bezel'));
+  document.getElementById('modal').hidden=false;
+}
+document.getElementById('mclose').addEventListener('click',()=>{document.getElementById('modal').hidden=true;});
+document.getElementById('modal').addEventListener('click',e=>{if(e.target.id==='modal')document.getElementById('modal').hidden=true;});
+let cur=0;
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){document.getElementById('modal').hidden=true;return;}
+  const k=e.key.toLowerCase();
+  if(k==='j'||e.key==='ArrowDown'){e.preventDefault();cur=(cur+1)%slots.length;slots[cur].scrollIntoView({behavior:'smooth',block:'center'});}
+  if(k==='k'||e.key==='ArrowUp'){e.preventDefault();cur=(cur-1+slots.length)%slots.length;slots[cur].scrollIntoView({behavior:'smooth',block:'center'});}
+  if(e.key==='Enter')openModal(cur);
+});
+buildBench();
+document.documentElement.style.setProperty('--s',STATE.scale);
+renderAll();
+
+/* ---- deep links: ?v=3 opens variant 3 · ?zoom=100 · ?f=1.6&t=0.4 · ?guard=0 ---- */
+(function(){
+  const q=new URLSearchParams(location.search);
+  if(q.has('zoom')){STATE.scale=Math.max(.5,Math.min(1,+q.get('zoom')/100));
+    document.documentElement.style.setProperty('--s',STATE.scale);
+    document.getElementById('sz').value=Math.round(STATE.scale*100);}
+  if(q.has('f')){STATE.f=+q.get('f');document.getElementById('sf').value=STATE.f*100;}
+  if(q.has('t')){STATE.t=+q.get('t');document.getElementById('st').value=STATE.t*100;}
+  if(q.has('band')) STATE.band=+q.get('band')/100;
+  if(q.has('lap')) STATE.lapMode=q.get('lap');
+  if(q.has('seam')) STATE.seam=q.get('seam')!=='0';
+  if(q.has('graino')) STATE.grainOpacity=+q.get('graino')/100;
+  ['guard','rim','lapLift','xray','grain','bevel'].forEach(k=>{ if(q.has(k)) STATE[k]=q.get(k)!=='0'; });
+  if(q.has('v')) openModal(Math.max(0,Math.min(9,+q.get('v')-1)));
+  /* ?solo=1&size=420 — isolate one ring on a plain ground at a given size */
+  if(q.has('solo')){
+    SOLO={_size:+(q.get('size')||420)};
+    document.querySelector('.bar').style.display='none';
+    document.querySelector('.ruler').style.display='none';
+    const host=document.createElement('div');
+    host.style.cssText='display:flex;justify-content:center;padding:16px;background:#1B1B1E';
+    bench.innerHTML='';bench.style.display='block';bench.style.gridTemplateColumns='none';
+    bench.style.maxWidth='none';bench.appendChild(host);
+    SOLO.el=host;SOLO=Object.assign(host,{_size:SOLO._size});
+  }
+  renderAll();
+})();
+</script>
+</body>
+</html>

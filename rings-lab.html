@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FocusLock — Rings Lab</title>
+<style>
+  :root{
+    --pink:#FF2D78; --cyan:#00E5FF; --blue:#4285F4;
+    --green:#34d399; --violet:#a78bfa;
+    --ink:#0e1116; --line:#1d2430;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{
+    background:var(--ink); color:#e7ecf3;
+    font-family:"Inter","Segoe UI",system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  header{
+    position:sticky; top:0; z-index:10;
+    display:flex; gap:20px; align-items:center; flex-wrap:wrap;
+    padding:14px 24px; background:rgba(14,17,22,.88);
+    backdrop-filter:blur(12px); border-bottom:1px solid var(--line);
+  }
+  header h1{font-size:15px;font-weight:700;letter-spacing:.02em;margin-right:8px}
+  header .ctl{display:flex;align-items:center;gap:10px;font-size:12px;color:#8b95a5}
+  header input[type=range]{width:170px;accent-color:var(--pink)}
+  header .keys{font-size:11px;color:#5b6474;margin-left:auto}
+  header .keys b{color:#8b95a5}
+  .note{font-size:12px;color:#5b6474;padding:16px 24px}
+  section{
+    min-height:82vh; display:grid; place-items:center;
+    border-bottom:1px solid var(--line); padding:56px 24px;
+  }
+  .tile{display:flex; gap:54px; align-items:center; flex-wrap:wrap; justify-content:center; max-width:1100px}
+  .meta .num{font-size:11px;letter-spacing:.25em;text-transform:uppercase;color:#5b6474;margin-bottom:10px}
+  .meta h2{font-size:26px;font-weight:700;margin-bottom:8px}
+  .meta p{max-width:320px;color:#8b95a5;font-size:14px;line-height:1.55}
+  .statwrap{display:grid;gap:10px;font-size:13px;color:#8b95a5;min-width:230px}
+  .statwrap b{color:#fff;font-variant-numeric:tabular-nums}
+  svg{display:block;overflow:visible}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Rings Lab · 10 variations</h1>
+  <label class="ctl">Focus <input id="fGoal" type="range" min="0" max="120" value="77"><span id="fVal">64%</span></label>
+  <label class="ctl">Tasks <input id="tGoal" type="range" min="0" max="5" value="3"><span id="tVal">60%</span></label>
+  <span class="keys"><b>J</b> / <b>K</b> or <b>↑</b>/<b>↓</b> to step through</span>
+</header>
+
+<p class="note">Every variant tracks the same two dashboard goals — <b style="color:var(--pink)">focus minutes vs 120</b> and <b style="color:var(--cyan)">tasks vs 5</b> — so you're comparing presentation, not data. Drag the sliders.</p>
+
+<!-- 01 -->
+<section id="v1">
+  <div class="tile">
+    <div class="meta">
+      <div class="num">01 · Baseline</div>
+      <h2>Classic Twin</h2>
+      <p>The current Android dashboard hero, re-ported to SVG: fat rounded pink/cyan strokes, tabular center % and "Focus", blue task badge pinned at the bottom edge.</p>
+    </div>
+    <svg id="s1" width="340" height="356" viewBox="0 0 340 356"></svg>
+    <div class="statwrap" data-variant="1"></div>
+  </div>
+</section>
+
+<!-- 02 -->
+<section id="v2">
+  <div class="tile">
+    <div class="meta">
+      <div class="num">02 · Direction</div>
+      <h2>Neon Halo</h2>
+      <p>Same twin geometry, cyberpunk register: glow filters, thin light strokes, 24 progress ticks in a halo. Reads "locked in", pairs with the Nuke overlay vibe.</p>
+    </div>
+    <svg id="s2" width="340" height="340" viewBox="0 0 340 340"></svg>
+    <div class="statwrap" data-variant="2"></div>
+  </div>
+</section>
+
+<!-- 03 -->
+<section id="v3">
+  <div class="tile">
+    <div class="meta">
+      <div class="num">03 · Direction</div>
+      <h2>Segmented Blocks</h2>
+      <p>Each ring built from 36 discrete segments (5-minute blocks, task ticks). Quantized lighting feels mechanical and game-y — progress earns "blocks".</p>
+    </div>
+    <svg id="s3" width="340" height="340" viewBox="0 0 340 340"></svg>
+    <div class="statwrap" data-variant="3"></div>
+  </div>
+</section>
+
+<!-- 04 -->
+<section id="v4">
+  <div class="tile">
+    <div class="meta">
+      <div class="num">04 · Direction</div>
+      <h2>Gradient Sweep</h2>
+      <p>Two 270° speedometer gauges stacked vertically, hue rotating red→gold and ice→mint along the arc. Friendly for "minutes remaining" reads.</p>
+    </div>
+    <svg id="s4" width="340" height="380" viewBox="0 0 340 380"></svg>
+    <div class="statwrap" data-variant="4"></div>
+  </div>
+</section>
+
+<!-- 05 -->
+<section id="v5">
+  <div class="tile">
+    <div>
+      <div class="num">05 · Direction</div>
+      <h2>Paper &amp; Ink</h2>
+      <p>Cream ground, hairline strokes, serif numerals. Progress reads through overprint color, not weight. For a calm, editorial settings/summary page.</p>
+    </div>
+    <svg id="s5" width="340" height="340" viewBox="0 0 340 340"></svg>
+    <div class="statwrap" data-variant="5"></div>
+  </div>
+</section>
+
+<!-- 06 -->
+<section id="v6">
+  <div class="tile">
+    <div class="meta">
+      <div class="num">06 · Direction</div>
+      <h2>Move · Focus · Guard</h2>
+      <p>Apple-Watch triple play: Move (focus), Exercise (tasks), plus a new third ring — <b>Guard</b>, the share of the day you stayed inside your screen-time budget (demoed at 70%).</p>
+    </div>
+    <svg id="s6" width="340" height="340" viewBox="0 0 340 340"></svg>
+    <div class="statwrap" data-variant="6"></div>
+  </div>
+</section>
+
+<!-- 07 -->
+<section id="v7">
+  <div class="tile">
+    <div class="meta">
+      <div class="num">07 · Direction</div>
+      <h2>Instrument Half-Gauges</h2>
+      <p>Two 180° gauges stacked like a dashboard cluster. Zero-height friendly, reads at a glance — good if the hero has to shrink into a compact row.</p>
+    </div>
+    <svg id="s7" width="340" height="360" viewBox="0 0 340 360"></svg>
+    <div class="statwrap" data-variant="7"></div>
+  </div>
+</section>
+
+<!-- 08 -->
+<section id="v8">
+  <div class="tile">
+    <div class="meta">
+      <div class="num">08 · Direction</div>
+      <h2>Orbit Comet</h2>
+      <p>Progress lives in one comet-dot travelling a thin orbit, dragging a fading tail. The center is freed for streak counts. Tasks stays as a hairline inner loop.</p>
+    </div>
+    <svg id="s8" width="340" height="340" viewBox="0 0 340 340"></svg>
+    <div class="statwrap" data-variant="8"></div>
+  </div>
+</section>
+
+<!-- 09 -->
+<section id="v9">
+  <div class="tile">
+    <div class="meta">
+      <div class="num">09 · Direction</div>
+      <h2>Beat Your Week</h2>
+      <p>Rings get pressure: a 7-day bar column beside them colors each past day by how close you got to goal, with today highlighted. "Ring as personal best".</p>
+    </div>
+    <svg id="s9" width="460" height="330" viewBox="0 0 460 330"></svg>
+    <div class="statwrap" data-variant="9"></div>
+  </div>
+</section>
+
+<!-- 10 -->
+<section id="v10">
+  <div class="tile">
+    <div class="meta">
+      <div class="num">10 · Direction</div>
+      <h2>Bento Mini-Chips</h2>
+      <p>The ring demoted to seasoning: each goal becomes a bento card with a micro-ring in the corner. Best landing when the dashboard grows more stats than two.</p>
+    </div>
+    <svg id="s10" width="460" height="330" viewBox="0 0 460 330"></svg>
+    <div class="statwrap" data-variant="10"></div>
+  </div>
+</section>
+
+<script>
+"use strict";
+const NS="http://www.w3.org/2000/svg";
+const PINK="#FF2D78", CYAN="#00E5FF", BLUE="#4285F4", GREEN="#34d399",
+      VIOLET="#a78bfa", GOLD="#fbbf24", ICE="#7dd3fc";
+const TRACK="#222a38", TEXT="#e7ecf3", MUT="#8b95a5", DIM="#5b6474";
+
+let F = 64/100;   // focus progress 0..1 (77/120)
+let T = 3/5;      // tasks progress 0..1
+
+const el=(t,a={})=>{const n=document.createElementNS(NS,t);for(const k in a)n.setAttribute(k,a[k]);return n};
+const svg=id=>document.getElementById(id);
+const polar=(cx,cy,r,deg)=>{const a=(deg-90)*Math.PI/180;return[cx+r*Math.cos(a),cy+r*Math.sin(a)]};
+const arcPath=(cx,cy,r,a0,a1)=>{
+  const[x0,y0]=polar(cx,cy,r,a0),[x1,y1]=polar(cx,cy,r,a1);
+  const large=((a1-a0)%360+360)%360>180?1:0;
+  return `M ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1}`;
+};
+const txt=(x,y,s,o={})=>{
+  const t=el("text",{x,y,fill:o.fill||MUT,"text-anchor":o.anchor||"middle",
+    "font-size":o.size||13,"font-weight":o.weight||400,
+    "font-family":o.serif?'Iowan Old Style,Georgia,serif':'"Segoe UI",system-ui,sans-serif'});
+  t.textContent=s;return t;
+};
+
+/* rounded ring: dashed pathLength=360 circle, rotated to start at top */
+function ring(cx,cy,r,pct,color,width,track,opts={}){
+  const g=el("g");
+  if(track!==null) g.append(el("circle",{cx,cy,r,fill:"none",stroke:track,
+    "stroke-width":opts.trackWidth||width,"stroke-linecap":"round"}));
+  g.append(el("circle",{cx,cy,r,fill:"none",stroke:color,"stroke-width":width,
+    "stroke-linecap":"round",pathLength:360,
+    "stroke-dasharray":`${Math.max(pct,0.001)*359.5} 1000`,
+    transform:`rotate(-90 ${cx} ${cy})`,
+    ...(opts.filter?{"filter":`url(#${opts.filter})`}:{})}));
+  return g;
+}
+/* gauge from a0 to a0+sweep degrees */
+function gauge(cx,cy,r,a0,sweep,pct,color,width,track){
+  const g=el("g");
+  g.append(el("path",{d:arcPath(cx,cy,r,a0,a0+sweep),fill:"none",
+    stroke:track,"stroke-width":width,"stroke-linecap":"round"}));
+  if(pct>0) g.append(el("path",{d:arcPath(cx,cy,r,a0,a0+sweep*Math.min(pct,.9999)),
+    fill:"none",stroke:color,"stroke-width":width,"stroke-linecap":"round"}));
+  return g;
+}
+
+const FOCUS_MIN=Math.round(F*120), TASKS_N=Math.round(T*5);
+const pct=s=>`${Math.round(s*100)}%`;
+
+/* ---------- 01 Classic Twin ---------- */
+function v1(){
+  const s=svg("s1");s.innerHTML="";
+  const cx=170,cy=168;
+  s.append(ring(cx,cy,132,F,PINK,26,TRACK));
+  s.append(ring(cx,cy,96,T,CYAN,26,TRACK));
+  s.append(txt(cx,cy-10,pct(F),{size:52,fill:TEXT,weight:800}));
+  s.append(txt(cx,cy+34,"Focus",{size:15}));
+  s.append(el("circle",{cx,cy:316,r:18,fill:BLUE}));
+  s.append(txt(cx,321,`+${TASKS_N}`,{size:13,fill:"#fff",weight:700}));
+}
+
+/* ---------- 02 Neon Halo ---------- */
+function v2(){
+  const s=svg("s2");s.innerHTML="";
+  const cx=170,cy=170;
+  const defs=el("defs");
+  defs.innerHTML=`<filter id="neon" x="-60%" y="-60%" width="220%" height="220%">
+    <feGaussianBlur stdDeviation="5" result="b"/>
+    <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>`;
+  s.append(defs);
+  for(let i=0;i<24;i++){
+    const a=i*15-90, on=i < Math.round(F*24);
+    const[x1,y1]=polar(cx,cy,146,a),[x2,y2]=polar(cx,cy,156,a);
+    s.append(el("line",{x1,y1,x2,y2,stroke:on?"#3b82f655":TRACK,"stroke-width":3,"stroke-linecap":"round"}));
+  }
+  s.append(ring(cx,cy,132,F,"#3b82f6",8,"#131a26",{filter:"neon"}));
+  s.append(ring(cx,cy,112,T,CYAN,8,"#131a26",{filter:"neon"}));
+  s.append(txt(cx,cy-6,pct(F),{size:46,fill:"#dff5ff",weight:200}));
+  s.append(txt(cx,cy+30,"FOCUS LOCKED",{size:11,fill:ICE}));
+}
+
+/* ---------- 03 Segmented Blocks ---------- */
+function v3(){
+  const s=svg("s3");s.innerHTML="";
+  const cx=170,cy=170,SEG=36;
+  const segments=(r,pctDone,color,w)=>{
+    const sweep=360/SEG, gapDeg=2.4;
+    for(let i=0;i<SEG;i++){
+      const a0=i*sweep-90+gapDeg/2, a1=(i+1)*sweep-90-gapDeg/2;
+      const on=i<Math.round(pctDone*SEG);
+      s.append(el("path",{d:arcPath(cx,cy,r,a0,a1),fill:"none",
+        stroke:on?color:TRACK,"stroke-width":w,"stroke-linecap":"round"}));
+    }};
+  segments(134,F,PINK,18);
+  segments(100,T,CYAN,18);
+  s.append(txt(cx,cy-10,`${Math.round(F*36)}/36`,{size:32,fill:TEXT,weight:800}));
+  s.append(txt(cx,cy+28,"focus blocks",{size:13}));
+}
+
+/* ---------- 04 Gradient Sweep ---------- */
+function v4(){
+  const s=svg("s4");s.innerHTML="";
+  const cx=170;
+  const defs=el("defs");
+  defs.innerHTML=`
+    <linearGradient id="g4a" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#ff4d6d"/><stop offset="1" stop-color="#ffb703"/></linearGradient>
+    <linearGradient id="g4b" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#00d4ff"/><stop offset="1" stop-color="#7CFFB2"/></linearGradient>`;
+  s.append(defs);
+  s.append(gauge(cx,124,120,-135,270,F,"url(#g4a)",24,TRACK));
+  s.append(txt(cx,116,`${FOCUS_MIN} min`,{size:24,fill:TEXT,weight:800}));
+  s.append(txt(cx,142,"of 180 focus",{size:12}));
+  s.append(gauge(cx,282,120,-135,270,T,"url(#g4b)",24,TRACK));
+  s.append(txt(cx,276,`${TASKS_N} / 5`,{size:24,fill:TEXT,weight:800}));
+  s.append(txt(cx,302,"tasks today",{size:12}));
+}
+
+/* ---------- 05 Paper & Ink ---------- */
+function v5(){
+  const s=svg("s5");s.innerHTML="";
+  const cx=170,cy=170;
+  s.append(el("rect",{x:0,y:0,width:340,height:340,rx:20,fill:"#f6f4ef"}));
+  s.append(ring(cx,cy,130,F,PINK,12,"#ded9cd"));
+  s.append(ring(cx,cy,102,T,"#1f6feb",8,"#ded9cd"));
+  s.append(txt(cx,cy-12,String(Math.round(F*100)),{size:58,fill:"#17150f",weight:700,serif:true}));
+  s.append(txt(cx,cy+38,"percent",{size:15,fill:"#7d786d",serif:true}));
+}
+
+/* ---------- 06 Triple ---------- */
+function v6(){
+  const s=svg("s6");s.innerHTML="";
+  const cx=170,cy=170,G=.70;
+  s.append(ring(cx,cy,136,F,PINK,22,TRACK));
+  s.append(ring(cx,cy,106,T,CYAN,22,TRACK));
+  s.append(ring(cx,cy,76,G,GREEN,22,TRACK));
+  s.append(txt(cx,cy-8,pct(F),{size:30,fill:TEXT,weight:800}));
+  s.append(txt(cx,cy+30,"focus · tasks · guard",{size:11}));
+  s.append(txt(170,332,"guard = % of day inside screen budget",{size:10,fill:DIM}));
+}
+
+/* ---------- 07 Half Gauges ---------- */
+function v7(){
+  const s=svg("s7");s.innerHTML="";
+  s.append(gauge(170,150,124,-90,180,F,PINK,28,TRACK));
+  s.append(txt(170,158,pct(F),{size:34,fill:TEXT,weight:800}));
+  s.append(txt(170,190,"focus",{size:13}));
+  s.append(gauge(170,322,124,90,180,T,CYAN,28,TRACK));
+  s.append(txt(170,314,pct(T),{size:34,fill:TEXT,weight:800}));
+  s.append(txt(170,342,"tasks",{size:13}));
+}
+
+/* ---------- 08 Orbit Comet ---------- */
+function v8(){
+  const s=svg("s8");s.innerHTML="";
+  const cx=170,cy=170;
+  const defs=el("defs");
+  defs.innerHTML=`<filter id="dot" x="-80%" y="-80%" width="260%" height="260%">
+    <feGaussianBlur stdDeviation="4" result="b"/>
+    <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>`;
+  s.append(defs);
+  s.append(el("circle",{cx,cy,r:142,fill:"none",stroke:TRACK,"stroke-width":6}));
+  const tailDeg=F*360;
+  if(tailDeg>1){
+    s.append(el("path",{d:arcPath(cx,cy,142,Math.max(tailDeg-70,-359),tailDeg),
+      fill:"none",stroke:CYAN,"stroke-width":10,"stroke-linecap":"round",opacity:.35}));
+  }
+  const[px,py]=polar(cx,cy,142,tailDeg);
+  s.append(el("circle",{cx:px,cy:py,r:12,fill:"#22d3ee",filter:"url(#dot)"}));
+  s.append(ring(cx,cy,108,T,CYAN,5,"#161c28"));
+  s.append(txt(cx,cy-12,`🔥 ${3+Math.round(F*4)}`,{size:32,fill:TEXT,weight:800}));
+  s.append(txt(cx,cy+34,"day streak",{size:13}));
+}
+
+/* ---------- 09 Beat Your Week ---------- */
+function v9(){
+  const s=svg("s9");s.innerHTML="";
+  const cx=150,cy=165;
+  s.append(ring(cx,cy,120,F,PINK,24,TRACK));
+  s.append(ring(cx,cy,90,T,CYAN,24,TRACK));
+  s.append(txt(cx,cy-10,pct(F),{size:38,fill:TEXT,weight:800}));
+  s.append(txt(cx,cy+34,"today",{size:12}));
+  const data=[.35,.8,.55,1,.4,.7,F]; // past six + today
+  const names=["M","T","W","T","F","S","S"];
+  const bx=352, bw=13, gap=6, base=250;
+  s.append(txt(bx+ (bw+gap)*3 , 50,"last 7 days",{size:11,fill:DIM}));
+  data.forEach((v,i)=>{
+    const x=bx+i*(bw+gap), h=150*v, y=base-h, today=i===6;
+    s.append(el("rect",{x,y,width:bw,height:h,rx:4,
+      fill: today? (F>=.8?GREEN:BLUE) : (v>=.8?PINK:"#2a3344")}));
+    s.append(txt(x+bw/2,264,names[i],{size:10,fill:today?BLUE:MUT}));
+    s.append(el("line",{x1:bx-8,y1:base-150*(0.8),x2:bx+7*(bw+gap),y2:base-150*0.8,
+      stroke:"#3a435655","stroke-dasharray":"3 4","stroke-width":1}));
+  });
+  s.append(txt(bx+96,24,"80% goal line",{size:10,fill:DIM,anchor:"start"}));
+}
+
+/* ---------- 10 Bento Mini-Chips ---------- */
+function v10(){
+  const s=svg("s10");s.innerHTML="";
+  const cards=[
+    {x:12,y:12,w:212,h:148,title:"Focus",      v:`${FOCUS_MIN} / 120 min`, p:F, c:PINK},
+    {x:236,y:12,w:212,h:148,title:"Tasks",     v:`${TASKS_N} / 5 done`,    p:T, c:CYAN},
+    {x:12,y:170,w:212,h:148,title:"Scroll bank",v:`+${Math.round(F*38)} m earned`,p:Math.min(F*1.2,1), c:VIOLET},
+    {x:236,y:170,w:212,h:148,title:"Blocked raids",v:"None today",        p:0, c:GREEN},
+  ];
+  cards.forEach(c=>{
+    s.append(el("rect",{x:c.x,y:c.y,width:c.w,height:c.h,rx:20,fill:"#161c28",stroke:"#232b3b"}));
+    s.append(txt(c.x+20,c.y+36,c.title,{size:12,fill:MUT,anchor:"start"}));
+    s.append(txt(c.x+20,c.y+72,c.v,{size:17,fill:TEXT,weight:700,anchor:"start"}));
+    if(c.p>0){
+      s.append(ring(c.x+c.w-62,c.y+62,30,c.p,c.c,8,TRACK));
+    } else {
+      s.append(el("circle",{cx:c.x+c.w-62,cy:c.y+62,r:30,fill:"#12241c",stroke:GREEN}));
+      s.append(txt(c.x+c.w-62,c.y+70,"✓",{size:24,fill:GREEN}));
+    }
+  });
+}
+
+/* ---------- engine ---------- */
+const VARIANT_FN=[null,v1,v2,v3,v4,v5,v6,v7,v8,v9,v10];
+function statsFor(section){
+  const box=section.querySelector(".statwrap");
+  if(!box)return;
+  box.innerHTML=
+    `<span>Focus <b>${FOCUS_MIN} / 120 min</b></span>`+
+    `<span>Tasks <b>${TASKS_N} / 5</b></span>`+
+    `<span style="color:${DIM};font-size:11px">same data · different framing</span>`;
+}
+function render(){
+  for(let i=1;i<=10;i++) VARIANT_FN[i]();
+  document.querySelectorAll("#v1,#v2,#v3,#v4,#v5,#v6,#v7,#v8,#v9,#v10").forEach(statsFor);
+  document.getElementById("fVal").textContent=pct(F);
+  document.getElementById("tVal").textContent=pct(T);
+}
+document.getElementById("fGoal").addEventListener("input",e=>{F=+e.target.value/120;render()});
+document.getElementById("tGoal").addEventListener("input",e=>{T=+e.target.value/5;render()});
+
+const IDS=["v1","v2","v3","v4","v5","v6","v7","v8","v9","v10"];
+function currentIndex(){
+  let best=0,bd=Infinity;
+  IDS.forEach((id,i)=>{
+    const r=document.getElementById(id).getBoundingClientRect();
+    const d=Math.abs(r.top+r.height/2-innerHeight/2);
+    if(d<bd){bd=d;best=i}
+  });
+  return best;
+}
+addEventListener("keydown",e=>{
+  const k=e.key.toLowerCase();
+  let step=null;
+  if(k==="j"||e.key==="ArrowDown")step=1;
+  if(k==="k"||e.key==="ArrowUp")step=-1;
+  if(step===null)return;
+  const next=Math.max(0,Math.min(IDS.length-1,currentIndex()+step));
+  document.getElementById(IDS[next])?.scrollIntoView({behavior:"smooth",block:"center"});
+});
+render();
+</script>
+</body>
+</html>

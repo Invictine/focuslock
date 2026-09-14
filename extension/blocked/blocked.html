@@ -4,26 +4,30 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Stay Focused — FocusLock</title>
+<link rel="stylesheet" href="../shared/theme-tokens.css" />
 <style>
   :root { color-scheme: dark; }
   * { box-sizing: border-box; }
-  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: radial-gradient(1200px 600px at 50% -10%, #1e293b, #020617); color: #e2e8f0; font-family: Inter, system-ui, Segoe UI, Roboto, sans-serif; }
-  .card { width: min(560px, 92vw); background: rgba(15,23,42,.9); border: 1px solid #1e293b; border-radius: 20px; padding: 36px 32px; text-align: center; box-shadow: 0 30px 80px rgba(0,0,0,.5); }
-  .lock { font-size: 52px; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--fl-background,#0d0d0f); color: var(--fl-on-surface,#eee9e7); font-family: var(--fl-font-family,"Segoe UI",Roboto,system-ui,-apple-system,BlinkMacSystemFont,sans-serif); }
+  .card { width: min(560px, 92vw); background: var(--fl-surface-container-low,#141416); border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-large,20px); padding: 36px 32px; text-align: center; }
+  .lock { font-size: 16px; color: var(--fl-primary,#dfbdb6); font-weight: 800; letter-spacing:.08em; }
   h1 { margin: 12px 0 6px; font-size: 28px; letter-spacing: -.02em; }
-  p.sub { color: #94a3b8; margin: 0 0 18px; }
-  .pill { display: inline-block; background: #7f1d1d; color: #fecaca; border: 1px solid #991b1b; padding: 6px 14px; border-radius: 999px; font-size: 13px; margin-bottom: 14px; }
-  .url { font-size: 13px; color: #64748b; word-break: break-all; background: #020617; border: 1px solid #1e293b; border-radius: 10px; padding: 10px 12px; margin: 0 0 18px; }
-  .quote { font-style: italic; color: #cbd5e1; background: #0f172a; border-left: 3px solid #22c55e; padding: 12px 14px; border-radius: 0 12px 12px 0; margin: 0 0 20px; text-align: left; }
+  p.sub { color: var(--fl-on-surface-variant,#bbb4b1); margin: 0 0 18px; }
+  .pill { display: inline-block; background: var(--fl-error-container,#482725); color: var(--fl-error,#f2b2ad); border: 1px solid var(--fl-error,#f2b2ad); padding: 6px 14px; border-radius: 999px; font-size: 13px; margin-bottom: 14px; }
+  .url { font-size: 13px; color: var(--fl-on-surface-variant,#bbb4b1); word-break: break-all; background: var(--fl-surface-container-lowest,#09090b); border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-medium,12px); padding: 10px 12px; margin: 0 0 18px; }
+  .quote { font-style: italic; color: var(--fl-on-surface,#eee9e7); background: var(--fl-surface-container-lowest,#09090b); border-left: 3px solid var(--fl-primary,#dfbdb6); padding: 12px 14px; border-radius: 0 var(--fl-radius-medium,12px) var(--fl-radius-medium,12px) 0; margin: 0 0 20px; text-align: left; }
   .row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
-  button { cursor: pointer; border-radius: 12px; border: 1px solid #334155; background: #1e293b; color: #e2e8f0; padding: 11px 18px; font-size: 14px; font-weight: 600; }
-  button.primary { background: #16a34a; border-color: #15803d; }
-  button.danger { background: #7f1d1d; border-color: #991b1b; }
+  button { cursor: pointer; border-radius: var(--fl-radius-medium,12px); border: 1px solid var(--fl-outline-variant,#353235); background: var(--fl-surface-container-high,#232326); color: var(--fl-on-surface,#eee9e7); padding: 11px 18px; font-size: 14px; font-weight: 650; transition: background .15s ease,border-color .15s ease,transform .15s ease; }
+  button:hover { border-color: var(--fl-on-surface-variant,#bbb4b1); } button:active { transform: translateY(1px); }
+  button.primary { background: var(--fl-primary,#dfbdb6); border-color: var(--fl-primary,#dfbdb6); color: var(--fl-on-primary,#30201d); }
+  button.danger { background: var(--fl-error-container,#482725); border-color: var(--fl-error,#f2b2ad); color: var(--fl-error,#f2b2ad); }
   button:disabled { opacity: .5; cursor: not-allowed; }
-  #snoozeBox { display: none; margin-top: 16px; background: #020617; border: 1px dashed #334155; border-radius: 12px; padding: 14px; }
-  input { width: 100%; background: #0f172a; color: #e2e8f0; border: 1px solid #334155; border-radius: 10px; padding: 10px 12px; font-size: 14px; margin: 8px 0; }
-  .hint { font-size: 12px; color: #64748b; margin-top: 14px; }
-  a { color: #4ade80; }
+  button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid var(--fl-primary,#dfbdb6); outline-offset: 2px; }
+  #snoozeBox { display: none; margin-top: 16px; background: var(--fl-surface-container-lowest,#09090b); border: 1px dashed var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-medium,12px); padding: 14px; }
+  input { width: 100%; background: var(--fl-surface-container-low,#141416); color: var(--fl-on-surface,#eee9e7); border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-medium,12px); padding: 10px 12px; font-size: 14px; margin: 8px 0; }
+  .hint { font-size: 12px; color: var(--fl-on-surface-variant,#bbb4b1); margin-top: 14px; }
+  a { color: var(--fl-primary,#dfbdb6); }
+  @media (prefers-reduced-motion: reduce) { *,*::before,*::after { transition:none !important; animation:none !important; } }
 </style>
 </head>
 <body>
@@ -40,7 +44,7 @@
       <button id="snoozeBtn">Need 5 min?</button>
     </div>
     <div id="snoozeBox">
-      <div style="font-size:13px;color:#94a3b8">Emergency break: type <b id="phrase" style="color:#fbbf24"></b> then wait <b id="count">60</b>s. Frozen Turkey blocks cannot be bypassed.</div>
+      <div style="font-size:13px;color:var(--fl-on-surface-variant,#bbb4b1)">Emergency break: type <b id="phrase" style="color:var(--fl-warning,#e5c58f)"></b> then wait <b id="count">60</b>s. Frozen Turkey blocks cannot be bypassed.</div>
       <input id="phraseInput" placeholder="type the phrase…" autocomplete="off" />
       <button id="snoozeGo" class="danger" disabled>Unlock 5 minutes</button>
     </div>

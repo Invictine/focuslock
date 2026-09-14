@@ -4,6 +4,8 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "theme:generate": "node scripts/generate-theme.mjs",
+    "theme:check": "node scripts/generate-theme.mjs --check",
     "convex:dev": "convex dev",
     "convex:deploy": "convex deploy"
   },

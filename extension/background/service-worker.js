@@ -1,10 +1,16 @@
 /* FocusLock service worker — tracking + blocking engine (Cold Turkey core). */
-importScripts('../src/matcher.js', '../src/store.js');
+importScripts('../src/matcher.js', '../src/store.js', '../dist/cloud-sync.js');
 
 const M = self.FocusLockMatcher;
 const Store = self.FocusLockStore;
 
-let mem = { state: null, cur: { tabId: -1, url: '', since: 0 }, focused: true };
+let mem = {
+  state: null,
+  cur: { tabId: -1, url: '', since: 0 },
+  focused: true,
+  lastEnforced: new Map(), // tabId -> last URL a verdict was delivered for
+  lastFlushedDay: null,    // JSON of today's stats map at the last persist
+};
 
 // ---------- helpers ----------
 function nowMs() { return Date.now(); }
@@ -61,6 +67,10 @@ function verdictFor(urlStr, state, t) {
   try { domain = new URL(urlStr).hostname.toLowerCase(); } catch (e) { return { blocked: false }; }
   const shortDomain = domain.replace(/^www\./, '');
 
+  // Today's per-domain seconds, read once per verdict so daily-limit checks
+  // don't re-lookup/re-iterate the stats map for every list.
+  const day = state.stats[Store.todayKey(new Date(t))] || {};
+
   // Nuclear: block everything except allow-list
   if (state.nuclear.active && state.nuclear.until > t) {
     if (M.matchesAny(urlStr, state.nuclear.allow || [])) return { blocked: false };
@@ -88,7 +98,7 @@ function verdictFor(urlStr, state, t) {
     }
     // daily time limit: block list domains once budget exhausted (even if schedule says on)
     if (list.dailyLimitMin > 0 && M.matchesAny(urlStr, list.sites)) {
-      const used = minutesUsedToday(state, list, t);
+      const used = minutesUsedForDay(day, list.sites);
       if (used >= list.dailyLimitMin) {
         return { blocked: true, mode: 'daily-limit', listId: list.id, listName: list.name, reason: 'daily-limit', schedule: st.schedule };
       }
@@ -97,20 +107,32 @@ function verdictFor(urlStr, state, t) {
   return { blocked: false };
 }
 
-function minutesUsedToday(state, list, t) {
-  const key = Store.todayKey(new Date(t || nowMs()));
-  const day = state.stats[key] || {};
+// Sum today's tracked seconds for domains matching a list's patterns. Patterns
+// are compiled ONCE per call instead of once per probed domain (the old path
+// recompiled the whole pattern list for every domain in today's stats).
+function minutesUsedForDay(day, sites) {
+  const compiled = M.compileList(sites);
   let secs = 0;
   for (const [domain, s] of Object.entries(day)) {
     const probe = 'https://' + domain + '/';
-    if (M.matchesAny(probe, list.sites)) secs += s;
+    for (const c of compiled) {
+      try { if (c.test(probe)) { secs += s; break; } } catch (e) { /* ignore */ }
+    }
   }
   return secs / 60;
 }
 
+function minutesUsedToday(state, list, t) {
+  const key = Store.todayKey(new Date(t || nowMs()));
+  return minutesUsedForDay(state.stats[key] || {}, list.sites);
+}
+
 // ---------- tracking ----------
 async function ensureState() {
-  if (!mem.state) mem.state = await Store.load();
+  if (!mem.state) {
+    mem.state = await Store.load();
+    mem.lastFlushedDay = null; // unknown what's on disk — force next flush to persist
+  }
   return mem.state;
 }
 
@@ -135,8 +157,25 @@ async function flushActiveSlice(t) {
   // prune old days (keep 60)
   const keys = Object.keys(state.stats).sort();
   while (keys.length > 60) delete state.stats[keys.shift()];
-  await Store.save(state);
+  // The whole state lives under one storage key, so every save rewrites all
+  // 60 days of stats + the 500-entry log. Only persist when today's slice
+  // actually moved since the last flush; flush() touches nothing else.
+  const dayJson = JSON.stringify(state.stats[key]);
+  if (dayJson !== mem.lastFlushedDay) {
+    await Store.save(state);
+    mem.lastFlushedDay = dayJson;
+  }
   mem.state = state;
+}
+
+async function syncCloud(reason) {
+  try {
+    const state = await ensureState();
+    return await self.FocusLockCloud.syncUsage(state, reason || 'background');
+  } catch (error) {
+    console.warn('[focuslock] cloud sync failed', error);
+    return { signedIn: false, ok: false, error: error && error.message ? error.message : 'Sync failed' };
+  }
 }
 
 async function setActive(url, tabId) {
@@ -149,6 +188,9 @@ async function enforceTab(tabId, url) {
   if (!url) return;
   const state = await ensureState();
   const v = verdictFor(url, state, nowMs());
+  // Record that a verdict was delivered for this tab+URL so secondary
+  // enforcement points (tabs.onUpdated) can skip duplicate work.
+  mem.lastEnforced.set(tabId, url);
   if (!v.blocked) return;
   // log + redirect
   const domain = M.domainOf(url);
@@ -166,6 +208,15 @@ async function enforceTab(tabId, url) {
   } catch (e) { /* tab gone */ }
 }
 
+// Secondary enforcement (tabs.onUpdated loading/complete): only run a verdict
+// when the tab's URL actually changed since the last verdict for that tab.
+// webNavigation.onBeforeNavigate stays the primary point and always enforces,
+// so re-navigating to the same URL is still re-checked (no bypass).
+async function enforceTabIfChanged(tabId, url) {
+  if (!url || mem.lastEnforced.get(tabId) === url) return;
+  await enforceTab(tabId, url);
+}
+
 // ---------- events ----------
 chrome.tabs.onActivated.addListener(async (info) => {
   try {
@@ -178,10 +229,14 @@ chrome.tabs.onActivated.addListener(async (info) => {
 chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
   if (change.status === 'loading' && change.url) {
     await setActive(change.url, tabId);
-    await enforceTab(tabId, change.url);
+    await enforceTabIfChanged(tabId, change.url);
   } else if (tab.active && tab.url && change.status === 'complete') {
-    await enforceTab(tabId, tab.url);
+    await enforceTabIfChanged(tabId, tab.url);
   }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  mem.lastEnforced.delete(tabId);
 });
 
 chrome.windows.onFocusChanged.addListener(async (winId) => {
@@ -202,6 +257,13 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
 });
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
+  // Cloud sync has its own slower cadence (focuslock-sync, 5 min); the
+  // maintenance alarm drives blocking decisions and stays at 1 minute.
+  if (alarm.name === 'focuslock-sync') {
+    await flushActiveSlice(nowMs()); // sync the freshest slice, like the old combined alarm
+    await syncCloud('alarm');
+    return;
+  }
   const state = await ensureState();
   const t = nowMs();
   let dirty = false;
@@ -236,7 +298,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 });
 
 function notify(title, message) {
-  try { chrome.notifications.create({ type: 'basic', iconUrl: 'icons/lock.svg', title, message }); }
+  try { chrome.notifications.create({ type: 'basic', iconUrl: 'icons/icon-128.png', title, message }); }
   catch (e) { /* notifications may be unavailable */ }
 }
 
@@ -264,8 +326,51 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === 'verdict') {
       sendResponse(verdictFor(msg.url, state, nowMs()));
     } else if (msg.type === 'todayStats') {
+      await flushActiveSlice(nowMs());
       const key = Store.todayKey();
       sendResponse({ day: state.stats[key] || {}, blockedTotal: state.blockedTotal || 0, log: state.blockedLog.slice(0, 50) });
+    } else if (msg.type === 'cloudSnapshot') {
+      await flushActiveSlice(nowMs());
+      sendResponse(await self.FocusLockCloud.getSnapshot(await ensureState(), Boolean(msg.sync)));
+    } else if (msg.type === 'cloudSignOut') {
+      sendResponse(await self.FocusLockCloud.signOut());
+    } else if (msg.type === 'getDashboard') {
+      sendResponse(await self.FocusLockCloud.getDashboard(msg.fromDate, msg.toDate));
+    } else if (msg.type === 'savePrefs') {
+      try { sendResponse(await self.FocusLockCloud.savePrefs(msg.prefs || {})); }
+      catch (e) { sendResponse({ signedIn: true, ok: false, error: e && e.message ? e.message : 'Prefs save failed' }); }
+    } else if (msg.type === 'addWorkRecord') {
+      try { sendResponse(await self.FocusLockCloud.addWorkRecord(msg.record || {})); }
+      catch (e) { sendResponse({ signedIn: true, ok: false, error: e && e.message ? e.message : 'Work log failed' }); }
+    } else if (msg.type === 'logFocusSession') {
+      try { sendResponse(await self.FocusLockCloud.logFocusSession(msg.session || {})); }
+      catch (e) { sendResponse({ signedIn: true, ok: false, error: e && e.message ? e.message : 'Focus session failed' }); }
+    } else if (msg.type === 'protectionStatus') {
+      const t = nowMs();
+      const idleTimeoutSec = (state.settings && state.settings.idleTimeoutSec) || 60;
+      let idleState = 'active';
+      try {
+        idleState = await new Promise(res => chrome.idle.queryState(idleTimeoutSec, res));
+      } catch (e) { /* idle api unavailable — assume active */ }
+      let listsActive = 0;
+      for (const l of state.lists) if (listIsActive(l, state, t).active) listsActive++;
+      let cloudStatus = { signedIn: false, lastSyncAt: 0, lastError: '' };
+      try { cloudStatus = await self.FocusLockCloud.status(); } catch (e) { /* not signed in / unavailable */ }
+      sendResponse({
+        engineRunning: true,
+        focused: Boolean(mem.focused),
+        idleState,
+        idleTimeoutSec,
+        listsActive,
+        listsTotal: state.lists.length,
+        nuclearActive: Boolean(state.nuclear && state.nuclear.active && state.nuclear.until > t),
+        nuclearUntil: state.nuclear && state.nuclear.until ? state.nuclear.until : 0,
+        signedIn: Boolean(cloudStatus.signedIn),
+        lastSyncAt: Number(cloudStatus.lastSyncAt) || 0,
+        lastSyncError: cloudStatus.lastError || '',
+        currentUrl: mem.cur.url || '',
+        blockedTotal: state.blockedTotal || 0,
+      });
     } else if (msg.type === 'snooze') {
       const domain = M.domainOf(msg.url);
       state.snoozes[domain] = nowMs() + (msg.minutes || 5) * 60000;
@@ -273,6 +378,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: true, until: state.snoozes[domain] });
     } else if (msg.type === 'refresh') {
       mem.state = await Store.load();
+      mem.lastFlushedDay = null;
       updateBadge(mem.state);
       sendResponse({ ok: true });
     } else {
@@ -284,14 +390,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 chrome.runtime.onInstalled.addListener(async () => {
   mem.state = await Store.load();
+  // Maintenance (expiry, badge, slice flush) must stay at 1 min — it drives
+  // verdict state. Cloud sync is network I/O only, so it runs every 5 min.
   await chrome.alarms.create('focuslock-maint', { periodInMinutes: 1 });
+  await chrome.alarms.create('focuslock-sync', { periodInMinutes: 5 });
   updateBadge(mem.state);
+  await syncCloud('installed');
 });
 
 chrome.runtime.onStartup.addListener(async () => {
   mem.state = await Store.load();
   await chrome.alarms.create('focuslock-maint', { periodInMinutes: 1 });
+  await chrome.alarms.create('focuslock-sync', { periodInMinutes: 5 });
   updateBadge(mem.state);
+  await syncCloud('startup');
 });
 
 // expose for tests

@@ -5,9 +5,18 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.os.Build
+import com.focuslock.app.data.repository.AppLimitsRepository
+import com.focuslock.app.data.repository.BlockLogRepository
+import com.focuslock.app.data.repository.BlockSchedulesRepository
 import com.focuslock.app.data.repository.CreditBankRepository
 import com.focuslock.app.data.repository.SettingsRepository
 import com.focuslock.app.sync.FocusSyncManager
+import com.focuslock.app.work.DailyReminderScheduler
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 
 class FocusLockApplication : Application() {
 
@@ -17,14 +26,29 @@ class FocusLockApplication : Application() {
     lateinit var settingsRepository: SettingsRepository
         private set
 
+    lateinit var appLimitsRepository: AppLimitsRepository
+        private set
+
+    lateinit var blockSchedulesRepository: BlockSchedulesRepository
+        private set
+
+    lateinit var blockLogRepository: BlockLogRepository
+        private set
+
     lateinit var syncManager: FocusSyncManager
         private set
+
+    /** Process-lifetime scope for lightweight startup reconciliation work. */
+    private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun onCreate() {
         super.onCreate()
         instance = this
         creditBankRepository = CreditBankRepository(applicationContext)
         settingsRepository = SettingsRepository(applicationContext)
+        appLimitsRepository = AppLimitsRepository(applicationContext)
+        blockSchedulesRepository = BlockSchedulesRepository(applicationContext)
+        blockLogRepository = BlockLogRepository(applicationContext)
         syncManager = FocusSyncManager(applicationContext, creditBankRepository, settingsRepository)
 
         // Clerk auth (optional until configured). Key comes from BuildConfig via
@@ -37,6 +61,23 @@ class FocusLockApplication : Application() {
         } catch (_: Exception) { }
 
         createNotificationChannels()
+
+        // WorkManager entries don't survive restore/reinstall; reconcile the daily
+        // reminder's scheduled worker with the persisted preference at process start.
+        appScope.launch {
+            try {
+                if (settingsRepository.dailyReminderEnabledFlow.first()) {
+                    DailyReminderScheduler.schedule(
+                        this@FocusLockApplication,
+                        settingsRepository.dailyReminderMinuteOfDayFlow.first(),
+                    )
+                } else {
+                    DailyReminderScheduler.cancel(this@FocusLockApplication)
+                }
+            } catch (e: Exception) {
+                android.util.Log.w("FocusLockApplication", "daily reminder reconcile failed", e)
+            }
+        }
     }
 
     private fun createNotificationChannels() {

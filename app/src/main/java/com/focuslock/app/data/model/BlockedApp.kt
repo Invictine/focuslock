@@ -8,7 +8,8 @@ data class BlockedApp(
     val appName: String,
     val isBlocked: Boolean = true,
     val category: String = "Social Media",
-    val specificShortsOnly: Boolean = false
+    val specificShortsOnly: Boolean = false,
+    val isPermanent: Boolean = false
 ) {
     companion object {
         val DEFAULT_DOOMSCROLL_APPS = listOf(

@@ -10,7 +10,7 @@
     "beforeBuildCommand": "npm run build"
   },
   "app": {
-    "windows": [{ "title": "FocusLock", "width": 1000, "height": 720 }],
+    "windows": [{ "title": "FocusLock", "width": 1000, "height": 720, "theme": "Dark", "backgroundColor": "#0d0d0f" }],
     "security": { "csp": null }
   },
   "bundle": {

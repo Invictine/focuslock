@@ -1,15 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <style name="Theme.FocusLock" parent="android:Theme.Material.Light.NoActionBar">
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.FocusLock" parent="android:Theme.Material.NoActionBar">
         <item name="android:statusBarColor">@color/bg_dark</item>
         <item name="android:navigationBarColor">@color/bg_dark</item>
         <item name="android:windowBackground">@color/bg_dark</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="27">false</item>
+        <item name="android:navigationBarDividerColor" tools:targetApi="28">@color/bg_dark</item>
+        <item name="android:forceDarkAllowed" tools:targetApi="29">false</item>
     </style>
 
-    <style name="Theme.FocusLock.Blocker" parent="android:Theme.Material.Light.NoActionBar">
+    <style name="Theme.FocusLock.Blocker" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/bg_dark</item>
         <item name="android:statusBarColor">@color/bg_dark</item>
         <item name="android:navigationBarColor">@color/bg_dark</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="27">false</item>
+        <item name="android:navigationBarDividerColor" tools:targetApi="28">@color/bg_dark</item>
+        <item name="android:forceDarkAllowed" tools:targetApi="29">false</item>
         <item name="android:windowFullscreen">false</item>
     </style>
 </resources>

@@ -1,0 +1,10 @@
+@import "./theme-tokens.css";
+:root { color-scheme: dark; font-family: var(--fl-font-family, "Segoe UI", system-ui, sans-serif); background: var(--fl-background, #0d0d0f); color: var(--fl-on-surface, #eee9e7); }
+body { margin: 0; }
+.bootstrap-shell { min-height: 100dvh; display: grid; place-items: center; padding: 24px; background: var(--fl-background, #0d0d0f); }
+.bootstrap-card { width: min(100%, 540px); padding: 28px; border: 1px solid var(--fl-outline-variant, #353235); border-radius: var(--fl-radius-extra-large, 20px); background: var(--fl-surface, #1b1b1e); }
+.bootstrap-card h1 { margin: 6px 0 12px; font-size: clamp(26px, 5vw, 36px); line-height: 1.05; letter-spacing: -.04em; }
+.bootstrap-card p, .bootstrap-card li { color: var(--fl-on-surface-variant, #bbb4b1); line-height: 1.55; }
+.bootstrap-card code { color: var(--fl-on-primary-container, #f4dcd6); }
+.bootstrap-eyebrow { margin: 0; color: var(--fl-primary, #dfbdb6) !important; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.bootstrap-note { margin-bottom: 0; font-size: 12px; }

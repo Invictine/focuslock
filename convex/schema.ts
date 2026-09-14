@@ -49,6 +49,14 @@ export default defineSchema({
     .index("by_user", ["userId"])
     .index("by_user_record", ["userId", "recordId"]),
 
+  // Version rows survive an intentionally empty collection, allowing clients
+  // to distinguish "deleted everywhere" from "never synced".
+  syncVersions: defineTable({
+    userId: v.string(),
+    collection: v.union(v.literal("blockedApps"), v.literal("blockedWebsites"), v.literal("appLimits"), v.literal("blockSchedules")),
+    updatedAt: v.number(),
+  }).index("by_user_collection", ["userId", "collection"]),
+
   // StayFree parity: per-app / per-site limits (daily cap + per-session cap).
   appLimits: defineTable({
     userId: v.string(),
@@ -111,13 +119,60 @@ export default defineSchema({
     .index("by_user", ["userId"])
     .index("by_user_date", ["userId", "date"]),
 
+  // A stable installation record.  Device IDs are generated and persisted by
+  // each client; they are never inferred from a device name.
+  devices: defineTable({
+    userId: v.string(),
+    deviceId: v.string(),
+    name: v.string(),
+    platform: v.union(v.literal("android"), v.literal("windows"), v.literal("browser")),
+    appVersion: v.string(),
+    trackingStatus: v.union(
+      v.literal("active"),
+      v.literal("paused"),
+      v.literal("permission_required"),
+      v.literal("error"),
+    ),
+    statusDetail: v.optional(v.string()),
+    lastSeen: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_user", ["userId"])
+    .index("by_user_device", ["userId", "deviceId"]),
+
+  // Absolute per-device counters make retries idempotent. Multiple devices
+  // never overwrite one aggregate row, and summaries add the buckets.
+  deviceUsage: defineTable({
+    userId: v.string(),
+    deviceId: v.string(),
+    date: v.string(), // local device day, YYYY-MM-DD
+    targetKind: v.union(v.literal("app"), v.literal("website")),
+    targetKey: v.string(),
+    targetLabel: v.string(),
+    category: v.optional(v.string()),
+    trackedSeconds: v.number(),
+    blockedSeconds: v.optional(v.number()),
+    launchCount: v.optional(v.number()),
+    updatedAt: v.number(),
+  })
+    .index("by_user", ["userId"])
+    .index("by_user_date", ["userId", "date"])
+    .index("by_user_device_date", ["userId", "deviceId", "date"])
+    .index("by_user_usage_bucket", ["userId", "deviceId", "date", "targetKind", "targetKey"]),
+
   // StayFree parity: global prefs (strict mode, reminders, exports).
+  // workRatio / taskBonusMinutes are cross-platform synced settings (Android,
+  // desktop, extension) with per-field timestamps for independent last-writer-wins.
   userPrefs: defineTable({
     userId: v.string(),
     strictMode: v.boolean(),
     weeklyReport: v.boolean(),
     dailyReminderMinutes: v.optional(v.number()),
     globalDailyCapMinutes: v.optional(v.number()),
+    workRatio: v.optional(v.number()),
+    workRatioUpdatedAt: v.optional(v.number()),
+    taskBonusMinutes: v.optional(v.number()),
+    taskBonusMinutesUpdatedAt: v.optional(v.number()),
     updatedAt: v.number(),
   }).index("by_user", ["userId"]),
 

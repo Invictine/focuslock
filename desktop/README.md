@@ -40,6 +40,17 @@ npm run tauri:build    # installer in src-tauri/target/release/bundle
 
 ## Sync model (Convex, realtime)
 
+Cross-device tracking uses two additional tables and four public functions:
+
+- `devices:heartbeat` records the installation name, platform, app version and
+  tracking health; `devices:listDevices` supplies the dashboard device list.
+- `usage:recordUsageBatch` stores absolute per-device/day/target counters. A
+  reconnect retry cannot double-count usage.
+- `usage:getUsageSummary` returns combined totals plus explicit per-device and
+  per-target breakdowns, so Android and Windows activity remain distinguishable.
+- Missing or malformed Clerk/Convex environment values stop at a clear setup
+  screen. The app never initializes placeholder credentials.
+
 - `../../convex/schema.ts` is the source of truth:
   `focusState` (1 doc/user), `blockedApps`, `blockedWebsites`, `workRecords`.
 - Desktop subscribes with `useQuery(api.focus.getSnapshot)` — updates from the

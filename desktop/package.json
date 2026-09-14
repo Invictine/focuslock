@@ -4,6 +4,8 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "predev": "node ../scripts/generate-theme.mjs --check",
+    "prebuild": "node ../scripts/generate-theme.mjs --check",
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",

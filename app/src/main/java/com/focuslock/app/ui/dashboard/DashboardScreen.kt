@@ -1,7 +1,7 @@
 package com.focuslock.app.ui.dashboard
 
+import android.content.Intent
 import android.widget.Toast
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
@@ -9,120 +9,302 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.PhoneAndroid
-import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material3.*
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.clerk.api.Clerk
+import com.focuslock.app.BuildConfig
 import com.focuslock.app.FocusLockApplication
+import com.focuslock.app.auth.AuthViewModel
 import com.focuslock.app.data.model.TickTickWorkRecord
-import com.focuslock.app.data.model.UserStats
 import com.focuslock.app.data.model.WorkRecordSource
+import com.focuslock.app.data.repository.CreditBankRepository
 import com.focuslock.app.service.DailyUsageSummary
+import com.focuslock.app.service.InstalledAppsRepository
+import com.focuslock.app.service.TickTickApiClient
+import com.focuslock.app.service.TickTickAuthConfig
 import com.focuslock.app.service.UsageStatsRepository
+import com.focuslock.app.sync.ConvexSyncClient
+import com.focuslock.app.ui.nuke.NukeActivity
 import com.focuslock.app.ui.permissions.PermissionHelper
 import com.focuslock.app.ui.permissions.PermissionKind
 import com.focuslock.app.ui.permissions.PermissionOnboardingDialog
+import com.focuslock.app.ui.permissions.PermissionReturnWatcher
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
 
+/** Load state for the dashboard TickTick tasks ring. */
+private enum class TickTickTasksState { Loading, NoAccount, Loaded, Error }
+
+/** Resume-driven TickTick refetch throttle; matches the client's display-only TTL window. */
+private const val TICKTICK_SOFT_REFETCH_MS = 3L * 60L * 1000L
+
+/** Pull-to-refresh spinner stays up at least this long for UX (real work may take longer). */
+private const val MIN_REFRESH_SPINNER_MS = 1_500L
+
+/**
+ * One off-main binder pass over every permission kind (each probed exactly once per
+ * resume tick). `missing` is derived from these booleans in PermissionKind.entries
+ * order — identical content to PermissionHelper.getMissingPermissions without a
+ * second redundant 7-check sweep.
+ */
+private data class PermissionSnapshot(
+    val accessibilityOn: Boolean,
+    val usageOn: Boolean,
+    val notificationOn: Boolean,
+    val missing: List<PermissionKind>
+)
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DashboardScreen(
     onOpenTickTick: () -> Unit,
-    onNavigatePermissions: () -> Unit
+    onNavigatePermissions: () -> Unit,
+    onOpenSettings: (() -> Unit)? = null,
+    onOpenAccount: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
-    val bank = FocusLockApplication.instance.creditBankRepository
-    val settings = FocusLockApplication.instance.settingsRepository
+    val app = FocusLockApplication.instance
+    val bank = app.creditBankRepository
+    val settings = app.settingsRepository
+    // Activity-scoped ViewModel: reused by the activity's own `by viewModels()` instance.
+    val authViewModel: AuthViewModel = viewModel()
 
-    val stats by bank.statsFlow.collectAsState(initial = UserStats())
-    val liveBalanceSeconds by bank.liveBalanceSeconds.collectAsState()
-    val history by bank.workHistoryFlow.collectAsState(initial = emptyList())
+    // Flow snapshots are held as State (not read) at the root so a DataStore write only
+    // invalidates the LazyColumn item that consumes it (hero Canvas/buttons no longer
+    // recompose on every bank/settings write). Focus minutes derive from this snapshot.
+    val liveBalanceState = bank.liveBalanceSeconds.collectAsStateWithLifecycle()
+    val historyState = bank.workHistoryFlow.collectAsStateWithLifecycle(initialValue = null)
 
     // Refresh permission + usage state on every resume (fixes stale "Setup needed" pill)
     var permissionTick by remember { mutableIntStateOf(0) }
+
+    // Tasks ring counts ONLY TickTick tasks actually completed today (never overdue, never focus records).
+    var tickTickTasksDone by remember { mutableIntStateOf(0) }
+    var tickTickTasksState by remember { mutableStateOf(TickTickTasksState.Loading) }
+    var tickTickFetchJob by remember { mutableStateOf<Job?>(null) }
+    var tickTickLastFetchMs by remember { mutableLongStateOf(0L) }
+
+    /**
+     * Fetches the completed-today TickTick count. [bypassCache] = true (pull-to-refresh,
+     * Retry) skips the client's 3-minute display TTL; resume refetches are throttled to
+     * one per TTL window, so a quick app switch costs zero network calls.
+     */
+    fun startTickTickFetch(bypassCache: Boolean): Job {
+        tickTickFetchJob?.cancel()
+        return scope.launch {
+            tickTickLastFetchMs = System.currentTimeMillis()
+            tickTickTasksState = TickTickTasksState.Loading
+            tickTickTasksState = try {
+                val token = TickTickAuthConfig.getValidAccessToken(settings)
+                if (token.isNullOrBlank()) {
+                    tickTickTasksDone = 0
+                    TickTickTasksState.NoAccount
+                } else {
+                    tickTickTasksDone = TickTickApiClient()
+                        .fetchCompletedTaskTitlesToday(token, bypassCache = bypassCache).size
+                    TickTickTasksState.Loaded
+                }
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                TickTickTasksState.Error
+            }
+        }.also { tickTickFetchJob = it }
+    }
+
+    LaunchedEffect(Unit) { startTickTickFetch(bypassCache = false) }
+
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) permissionTick++
+            if (event == Lifecycle.Event.ON_RESUME) {
+                permissionTick++
+                // TickTick ring: refetch on resume at most once per TTL window.
+                if (System.currentTimeMillis() - tickTickLastFetchMs > TICKTICK_SOFT_REFETCH_MS) {
+                    startTickTickFetch(bypassCache = false)
+                }
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    val isAccessibilityOn = remember(context, permissionTick) { PermissionHelper.isAccessibilityServiceEnabled(context) }
-    val isUsageAccessOn = remember(context, permissionTick) { PermissionHelper.isUsageAccessGranted(context) }
-    val isNotificationOn = remember(context, permissionTick) { PermissionHelper.isNotificationListenerGranted(context) }
-    val hasAllPermissions = isAccessibilityOn && isUsageAccessOn && isNotificationOn
+    // Binder-backed permission checks are computed off the main thread, only when the resume
+    // tick changes, so recomposition never blocks on PackageManager IPC. Null = not checked
+    // yet, so the setup card waits for a real result instead of flashing on the first frame.
+    // One single pass probes each kind exactly once; the onboarding `missing` list below is
+    // derived from these booleans (no redundant getMissingPermissions re-sweep per resume).
+    val permSnapshot by produceState<PermissionSnapshot?>(initialValue = null, key1 = permissionTick) {
+        value = withContext(Dispatchers.IO) {
+            val accessibility = PermissionHelper.isAccessibilityServiceEnabled(context)
+            val usage = PermissionHelper.isUsageAccessGranted(context)
+            val overlay = PermissionHelper.isOverlayGranted(context)
+            val notification = PermissionHelper.isNotificationListenerGranted(context)
+            val battery = PermissionHelper.isBatteryOptimizationIgnored(context)
+            val deviceAdmin = PermissionHelper.isDeviceAdminActive(context)
+            val postNotifications = PermissionHelper.isPostNotificationsGranted(context)
+            PermissionSnapshot(
+                accessibilityOn = accessibility,
+                usageOn = usage,
+                notificationOn = notification,
+                missing = buildList {
+                    if (!accessibility) add(PermissionKind.ACCESSIBILITY)
+                    if (!usage) add(PermissionKind.USAGE)
+                    if (!overlay) add(PermissionKind.OVERLAY)
+                    if (!notification) add(PermissionKind.NOTIFICATION_LISTENER)
+                    if (!battery) add(PermissionKind.BATTERY)
+                    if (!deviceAdmin) add(PermissionKind.DEVICE_ADMIN)
+                    if (!postNotifications) add(PermissionKind.POST_NOTIFICATIONS)
+                }
+            )
+        }
+    }
+    val isAccessibilityOn: Boolean? = permSnapshot?.accessibilityOn
+    val isUsageAccessOn: Boolean? = permSnapshot?.usageOn
+    val isNotificationOn: Boolean? = permSnapshot?.notificationOn
+    val permissionsChecked = permSnapshot != null
+    val hasAllPermissions = permissionsChecked &&
+        isAccessibilityOn == true && isUsageAccessOn == true && isNotificationOn == true
 
     // Step-through onboarding: auto-show once per session on foreground while anything is missing.
-    val missing = remember(context, permissionTick) { PermissionHelper.getMissingPermissions(context) }
+    // Derived from the same single off-main permission pass above — zero extra binder sweeps.
+    val missing: List<PermissionKind> = permSnapshot?.missing ?: emptyList()
     var shownThisSession by rememberSaveable { mutableStateOf(false) }
     var dialogIndex by rememberSaveable { mutableIntStateOf(0) }
     var showOnboarding by remember { mutableStateOf(false) }
-    LaunchedEffect(permissionTick) {
-        val current = PermissionHelper.getMissingPermissions(context)
-        if (current.isNotEmpty() && !shownThisSession) {
-            dialogIndex = dialogIndex.coerceIn(0, current.size - 1)
-            showOnboarding = true
-        } else if (current.isEmpty()) {
+    LaunchedEffect(missing) {
+        if (missing.isEmpty()) {
             showOnboarding = false
+        } else {
+            // Re-derive the step from live grant state on every resume so the dialog
+            // never points at a stale/out-of-range index after returning from Settings.
+            dialogIndex = dialogIndex.coerceIn(0, missing.size - 1)
+            if (!shownThisSession) showOnboarding = true
         }
     }
 
-    // StayFree-style screen-time summary
-    var usageSummary by remember { mutableStateOf(DailyUsageSummary(0L, emptyList(), 0)) }
+    // StayFree-style screen-time summary. Null until the first query resolves so the UI can
+    // distinguish "loading" from a real empty result (no zero-state flash).
+    var usageSummary by remember { mutableStateOf<DailyUsageSummary?>(null) }
     LaunchedEffect(permissionTick) {
         usageSummary = UsageStatsRepository.getTodaySummary(context, maxApps = 8)
     }
 
+    // In-app fallback auto-return: polls the permission the user just opened Settings for
+    // and brings the app forward once granted, even before the accessibility service is
+    // connected. Intentionally an infinite cancellable loop — dies with this composable.
+    LaunchedEffect(Unit) {
+        PermissionReturnWatcher.fallbackWatch(context)
+    }
+
     var showManualLogDialog by remember { mutableStateOf(false) }
-    var showFocusTimerDialog by remember { mutableStateOf(false) }
+    var showFocusTimerDialog by rememberSaveable { mutableStateOf(false) }
+    var showAllHistory by remember { mutableStateOf(false) }
+    var isRefreshing by remember { mutableStateOf(false) }
+
+    // Playful Nuke launcher states (header button); nukeActive is collected inside the header item.
+    var showNukeConfirm by remember { mutableStateOf(false) }
+    var showNukeInfo by remember { mutableStateOf(false) }
+    var nuking by remember { mutableStateOf(false) }
+    fun launchNukeActivity() {
+        try {
+            context.startActivity(Intent(context, NukeActivity::class.java))
+        } catch (_: Exception) { }
+    }
 
     val todayFormatted = remember {
         val sdf = SimpleDateFormat("EEEE, MMM d", Locale.getDefault())
         sdf.format(Date())
     }
 
+    val listState = rememberLazyListState()
+    PullToRefreshBox(
+        isRefreshing = isRefreshing,
+        onRefresh = {
+            if (!isRefreshing) {
+                isRefreshing = true
+                val startedAtMs = System.currentTimeMillis()
+                permissionTick++ // refresh permission checks + usage summary
+                // Force refetch bypasses the TickTick TTL cache; the spinner waits for the
+                // real fetch to settle (min 1.5s for UX) instead of a fixed 700ms timer.
+                val fetchJob = startTickTickFetch(bypassCache = true)
+                scope.launch {
+                    fetchJob.join()
+                    val elapsedMs = System.currentTimeMillis() - startedAtMs
+                    if (elapsedMs < MIN_REFRESH_SPINNER_MS) delay(MIN_REFRESH_SPINNER_MS - elapsedMs)
+                    isRefreshing = false
+                }
+            }
+        },
+        modifier = Modifier.fillMaxSize()
+    ) {
     LazyColumn(
+        state = listState,
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
-            .padding(horizontal = 20.dp),
-        contentPadding = PaddingValues(top = 16.dp, bottom = 28.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+            .padding(horizontal = 16.dp),
+        contentPadding = PaddingValues(top = 16.dp, bottom = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         // 1. At-a-glance header
-        item {
+        item(key = "header") {
+            val nukeActive by settings.nukeActiveFlow.collectAsStateWithLifecycle(initialValue = false)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -147,45 +329,188 @@ fun DashboardScreen(
                     )
                 }
 
-                Surface(
-                    color = if (hasAllPermissions) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.errorContainer,
-                    shape = RoundedCornerShape(50),
-                    modifier = Modifier.clip(RoundedCornerShape(50))
+                // Right side: Nuke (with tiny label) + account avatar (Google-ref style).
+                // Avatar tap opens Settings; falls back to the permissions nav (same tab).
+                val openSettings: () -> Unit = onOpenSettings ?: onNavigatePermissions
+                val openAccount: () -> Unit = onOpenAccount ?: openSettings
+                val clerkUser by Clerk.userFlow.collectAsState(initial = null)
+                val accountBlue = MaterialTheme.colorScheme.primary
+                val accountName = listOfNotNull(clerkUser?.firstName, clerkUser?.lastName)
+                    .joinToString(" ").trim().ifBlank { null }
+                    ?: clerkUser?.primaryEmailAddress?.emailAddress
+                val accountInitial = accountName?.firstOrNull { it.isLetterOrDigit() }
+                    ?.uppercaseChar()?.toString() ?: ""
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    // Nuke button (compact ☢️; tap to arm, long-press for details).
+                    val nukeInteraction = remember { MutableInteractionSource() }
+                    val nukePressed by nukeInteraction.collectIsPressedAsState()
+                    val nukePressScale by animateFloatAsState(
+                        targetValue = if (nukePressed) 0.88f else 1f,
+                        animationSpec = tween(150),
+                        label = "nuke-press"
+                    )
+                    val nukePulse = rememberInfiniteTransition(label = "nuke-pulse")
+                    val nukeHaloAlphaState = nukePulse.animateFloat(
+                        initialValue = 0.08f,
+                        targetValue = 0.22f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(1200),
+                            repeatMode = RepeatMode.Reverse
+                        ),
+                        label = "nuke-halo"
+                    )
+                    val nukeHaloColor = MaterialTheme.colorScheme.error
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .graphicsLayer {
+                                // Read the press animation in the layer lambda, not composition.
+                                scaleX = nukePressScale
+                                scaleY = nukePressScale
+                            }
+                            .clip(CircleShape)
+                            .drawBehind {
+                                // Animated alpha is read in the draw phase so the pulse
+                                // never recomposes the header.
+                                drawCircle(
+                                    color = nukeHaloColor,
+                                    alpha = (nukeHaloAlphaState.value + 0.07f).coerceIn(0f, 1f)
+                                )
+                            }
+                            .semantics {
+                                contentDescription = "Nuke: emergency lockdown"
+                            }
+                            .combinedClickable(
+                                interactionSource = nukeInteraction,
+                                indication = null,
+                                onClick = {
+                                    if (nukeActive) launchNukeActivity() else showNukeConfirm = true
+                                },
+                                onLongClick = { showNukeInfo = true }
+                            ),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            imageVector = if (hasAllPermissions) Icons.Outlined.Shield else Icons.Default.Warning,
-                            contentDescription = null,
-                            tint = if (hasAllPermissions) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onErrorContainer,
-                            modifier = Modifier.size(15.dp)
-                        )
                         Text(
-                            text = if (hasAllPermissions) "Protected" else "Setup needed",
-                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.SemiBold),
-                            color = if (hasAllPermissions) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onErrorContainer
+                            text = "☢️",
+                            fontSize = 22.sp,
+                            color = MaterialTheme.colorScheme.error,
+                            textAlign = TextAlign.Center
                         )
+                    }
+
+                    // Settings gear — 48dp touch target, opens the Settings tab.
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .semantics { contentDescription = "Settings" }
+                            .clickable { openSettings() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.surfaceContainerHighest, CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Default.Settings,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+
+                    // Account avatar: 48dp touch target; initial-letter circle with blue ring.
+                    if (accountInitial.isNotEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .semantics { contentDescription = "Account" }
+                                .clickable { openAccount() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .clip(CircleShape)
+                                    .background(accountBlue, CircleShape)
+                                    .border(2.dp, accountBlue, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = accountInitial,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onPrimary,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .semantics { contentDescription = "Account" }
+                                .clickable { openAccount() },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.surfaceContainerHighest, CircleShape)
+                                    .border(2.dp, accountBlue, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    Icons.Default.Person,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
                     }
                 }
             }
         }
 
-        // 2. Missing Permissions Warning Card
-        if (!hasAllPermissions) {
-            item {
-                val setupPulse = rememberInfiniteTransition(label = "setup-pulse")
-                val setupAlpha by setupPulse.animateFloat(
-                    initialValue = 0.45f,
-                    targetValue = 1f,
-                    animationSpec = infiniteRepeatable(
-                        animation = tween(900),
-                        repeatMode = RepeatMode.Reverse
-                    ),
-                    label = "setup-pulse-alpha"
-                )
+        // 2. Missing Permissions Warning Card (only after all checks resolved)
+        if (permissionsChecked && !hasAllPermissions) {
+            item(key = "perms") {
+                // Cheap pulse: only run the infinite transition while resumed; static otherwise.
+                var cardResumed by remember { mutableStateOf(true) }
+                DisposableEffect(lifecycleOwner) {
+                    val observer = LifecycleEventObserver { _, event ->
+                        when (event) {
+                            Lifecycle.Event.ON_RESUME -> cardResumed = true
+                            Lifecycle.Event.ON_PAUSE -> cardResumed = false
+                            else -> {}
+                        }
+                    }
+                    lifecycleOwner.lifecycle.addObserver(observer)
+                    onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+                }
+                val setupAlphaState: State<Float>? = if (cardResumed) {
+                    val setupPulse = rememberInfiniteTransition(label = "setup-pulse")
+                    setupPulse.animateFloat(
+                        initialValue = 0.45f,
+                        targetValue = 1f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(1200),
+                            repeatMode = RepeatMode.Reverse
+                        ),
+                        label = "setup-pulse-alpha"
+                    )
+                } else {
+                    null
+                }
+                val cardBorderColor = MaterialTheme.colorScheme.error
                 Card(
                     colors = CardDefaults.cardColors(
                         containerColor = MaterialTheme.colorScheme.errorContainer
@@ -193,10 +518,19 @@ fun DashboardScreen(
                     shape = MaterialTheme.shapes.large,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .border(
-                            BorderStroke(2.dp, MaterialTheme.colorScheme.error.copy(alpha = setupAlpha)),
-                            MaterialTheme.shapes.large
-                        )
+                        .drawWithContent {
+                            drawContent()
+                            // Pulse alpha is read in the draw phase, not composition.
+                            // Theme large = RoundedCornerShape(20.dp), stroke 2.dp.
+                            drawRoundRect(
+                                color = cardBorderColor,
+                                topLeft = Offset(1.dp.toPx(), 1.dp.toPx()),
+                                size = Size(size.width - 2.dp.toPx(), size.height - 2.dp.toPx()),
+                                cornerRadius = CornerRadius(20.dp.toPx(), 20.dp.toPx()),
+                                style = Stroke(width = 2.dp.toPx()),
+                                alpha = setupAlphaState?.value ?: 1f
+                            )
+                        }
                 ) {
                     Row(
                         modifier = Modifier.padding(18.dp),
@@ -226,9 +560,9 @@ fun DashboardScreen(
                                 buildString {
                                     append("Missing: ")
                                     val missing = mutableListOf<String>()
-                                    if (!isAccessibilityOn) missing.add("Accessibility")
-                                    if (!isUsageAccessOn) missing.add("Usage Access")
-                                    if (!isNotificationOn) missing.add("Notifications")
+                                    if (isAccessibilityOn != true) missing.add("Accessibility")
+                                    if (isUsageAccessOn != true) missing.add("Usage Access")
+                                    if (isNotificationOn != true) missing.add("Notifications")
                                     append(missing.joinToString(", "))
                                     append(". Blocking + screen-time stats need these.")
                                 },
@@ -252,211 +586,440 @@ fun DashboardScreen(
             }
         }
 
-        // Balance is the primary reading; actions follow in order of emphasis.
-        item {
-            val minutes = liveBalanceSeconds / 60
-            val seconds = liveBalanceSeconds % 60
-            val available = liveBalanceSeconds > 0
-            Surface(
-                color = MaterialTheme.colorScheme.surfaceContainer,
-                shape = MaterialTheme.shapes.extraLarge,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    Text("Time to unwind", style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    Text(
-                        text = "${minutes}m ${seconds.toString().padStart(2, '0')}s",
-                        style = MaterialTheme.typography.displayLarge.copy(
-                            fontWeight = FontWeight.Medium, letterSpacing = (-2).sp,
-                            fontFeatureSettings = "tnum"),
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Row(verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Icon(if (available) Icons.Outlined.CheckCircle else Icons.Outlined.Shield,
-                            contentDescription = null, modifier = Modifier.size(18.dp),
-                            tint = MaterialTheme.colorScheme.primary)
-                        Text(if (available) "Ready when you are" else "Earn a little breathing room",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.primary)
-                    }
-                    Text(
-                        if (available) "Your selected apps unlock while you have time available."
-                        else "A little focused work now makes room for a break later.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Button(onClick = onOpenTickTick,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
-                        shape = MaterialTheme.shapes.large) {
-                        Icon(Icons.Outlined.Timer, contentDescription = null, modifier = Modifier.size(20.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("Open TickTick")
-                    }
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        TextButton(onClick = { showFocusTimerDialog = true }) { Text("Focus timer") }
-                        TextButton(onClick = { showManualLogDialog = true }) { Text("Log work manually") }
-                    }
-                }
+        // 2. Fitbit-style hero: rings circle (left) + 2 stacked cards (right),
+        // then Log / Focus-timer button row, then History outline button.
+        item(key = "hero") {
+            // Goals come from Settings → Daily Goals (focus minutes / TickTick tasks goal).
+            val focusGoalMinutes by settings.focusGoalMinutesFlow
+                .collectAsStateWithLifecycle(initialValue = 120)
+            val dailyTasksGoalSetting by settings.dailyTasksGoalFlow
+                .collectAsStateWithLifecycle(initialValue = 7)
+            // Focus minutes derive from the single collected history (no second JSON decode).
+            val historySnapshot = historyState.value
+            val focusMinutes = remember(historySnapshot) {
+                historySnapshot
+                    ?.filter { CreditBankRepository.isFocusRecord(it.source, it.durationMinutes) }
+                    ?.sumOf { it.durationMinutes } ?: 0
             }
-        }
-
-        // 3b. NUKE — total lock on phone+PC until 10-min reset + coach check-in.
-        item {
-            val nukeActive by settings.nukeActiveFlow.collectAsState(initial = false)
-            var nuking by remember { mutableStateOf(false) }
-            var showNukeConfirm by remember { mutableStateOf(false) }
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = if (nukeActive) MaterialTheme.colorScheme.errorContainer
-                    else MaterialTheme.colorScheme.surfaceContainer
-                ),
-                shape = MaterialTheme.shapes.large,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text(
-                        if (nukeActive) "☢ NUKE ACTIVE — phone + PC locked"
-                        else "☢ Nuke it",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                        color = if (nukeActive) MaterialTheme.colorScheme.onErrorContainer
-                        else MaterialTheme.colorScheme.onSurface
-                    )
-                    Text(
-                        if (nukeActive) "Finish the 10-minute reset + coach check-in to lift it on both devices."
-                        else "Completely blocks phone + PC until you finish a 10-minute breathing reset and talk through your plan with the coach.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = if (nukeActive) MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.85f)
-                        else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Button(
-                        onClick = {
-                            if (nukeActive) {
-                                context.startActivity(android.content.Intent(context, com.focuslock.app.ui.nuke.NukeActivity::class.java).apply {
-                                    addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                                })
-                            } else showNukeConfirm = true
-                        },
-                        enabled = !nuking,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.error,
-                            contentColor = MaterialTheme.colorScheme.onError
-                        ),
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
-                        shape = MaterialTheme.shapes.large
+            val focusMinutesLoaded = historySnapshot != null
+            val dailyFocusGoal = focusGoalMinutes.coerceAtLeast(1)
+            val dailyTasksGoal = dailyTasksGoalSetting.coerceAtLeast(1)
+            // Real tasks = TickTick completed-today count (loaded above).
+            val tasksDone = tickTickTasksDone
+            val tasksLoaded = tickTickTasksState == TickTickTasksState.Loaded
+            val focusProgress = if (focusMinutesLoaded) {
+                (focusMinutes / dailyFocusGoal.toFloat()).coerceIn(0f, 1f)
+            } else 0f
+            val tasksProgress = if (tasksLoaded) {
+                (tasksDone / dailyTasksGoal.toFloat()).coerceIn(0f, 1f)
+            } else 0f
+            val focusSweep by animateFloatAsState(
+                targetValue = focusProgress,
+                animationSpec = tween(800),
+                label = "focus-sweep"
+            )
+            val tasksSweep by animateFloatAsState(
+                targetValue = tasksProgress,
+                animationSpec = tween(800),
+                label = "tasks-sweep"
+            )
+            val focusPct = (focusProgress * 100).toInt()
+            val ringPink = MaterialTheme.colorScheme.primary
+            val ringCyan = MaterialTheme.colorScheme.tertiary
+            val ringTrack = MaterialTheme.colorScheme.surfaceVariant
+            val subtitleGray = MaterialTheme.colorScheme.onSurfaceVariant
+            val tealCard = MaterialTheme.colorScheme.secondaryContainer
+            val tealText = MaterialTheme.colorScheme.onSecondaryContainer
+            val purpleCard = MaterialTheme.colorScheme.tertiaryContainer
+            val purpleText = MaterialTheme.colorScheme.onTertiaryContainer
+            val googleBlue = MaterialTheme.colorScheme.primary
+            // Top used app today (exclude launcher noise); null while loading / off / empty.
+            val topApp = usageSummary?.topApps?.firstOrNull {
+                !it.packageName.contains("launcher", ignoreCase = true) &&
+                    !it.appName.contains("launcher", ignoreCase = true)
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    // Ring variant: fixed Canvas (option 1 of 10) — proper stroke/inset proportions.
+                    Box(
+                        modifier = Modifier.size(140.dp),
+                        contentAlignment = Alignment.Center
                     ) {
-                        Text(if (nuking) "Arming…" else if (nukeActive) "Return to reset" else "NUKE everything")
-                    }
-                }
-            }
-            if (showNukeConfirm) {
-                AlertDialog(
-                    onDismissRequest = { showNukeConfirm = false },
-                    title = { Text("Nuke phone + PC?") },
-                    text = { Text("This locks EVERYTHING on both devices. The only way out is the 10-minute breathing reset + an honest check-in with the coach about what you will do next. No bypass.") },
-                    confirmButton = {
-                        TextButton(onClick = {
-                            showNukeConfirm = false
-                            nuking = true
-                            scope.launch {
-                                try {
-                                    settings.setNukeActive(true)
-                                    // Push to Convex so PC locks too (~30s sync + instant on open).
-                                    try {
-                                        val authVm = com.focuslock.app.auth.AuthViewModel()
-                                        val url = try { com.focuslock.app.BuildConfig.CONVEX_URL.trim() } catch (_: Exception) { "" }
-                                        if (url.startsWith("http")) {
-                                            val client = com.focuslock.app.sync.ConvexSyncClient(url, authVm::getConvexToken)
-                                            client.activateNuke()
-                                        }
-                                    } catch (_: Exception) { }
-                                    context.startActivity(android.content.Intent(context, com.focuslock.app.ui.nuke.NukeActivity::class.java).apply {
-                                        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                                    })
-                                } finally { nuking = false }
-                            }
-                        }) { Text("NUKE it", color = MaterialTheme.colorScheme.error) }
-                    },
-                    dismissButton = { TextButton(onClick = { showNukeConfirm = false }) { Text("Cancel") } }
-                )
-            }
-        }
-
-        // 4. Digital Wellbeing / StayFree: Screen Time Today
-        item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-                shape = MaterialTheme.shapes.large,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.padding(20.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column {
+                        Canvas(modifier = Modifier.fillMaxSize()) {
+                            val stroke = 12.dp.toPx()
+                            val gap = 8.dp.toPx()
+                            val cx = size.width / 2
+                            val cy = size.height / 2
+                            val outerR = size.minDimension / 2 - stroke / 2
+                            val innerR = outerR - stroke - gap
+                            fun topLeft(r: Float) = Offset(cx - r, cy - r)
+                            fun arcSize(r: Float) = Size(r * 2, r * 2)
+                            // Tracks
+                            drawArc(
+                                color = ringTrack,
+                                startAngle = -90f,
+                                sweepAngle = 360f,
+                                useCenter = false,
+                                topLeft = topLeft(outerR),
+                                size = arcSize(outerR),
+                                style = Stroke(width = stroke, cap = StrokeCap.Round)
+                            )
+                            drawArc(
+                                color = ringTrack,
+                                startAngle = -90f,
+                                sweepAngle = 360f,
+                                useCenter = false,
+                                topLeft = topLeft(innerR),
+                                size = arcSize(innerR),
+                                style = Stroke(width = stroke, cap = StrokeCap.Round)
+                            )
+                            // Progress arcs
+                            drawArc(
+                                color = ringPink,
+                                startAngle = -90f,
+                                sweepAngle = 360f * focusSweep,
+                                useCenter = false,
+                                topLeft = topLeft(outerR),
+                                size = arcSize(outerR),
+                                style = Stroke(width = stroke, cap = StrokeCap.Round)
+                            )
+                            drawArc(
+                                color = ringCyan,
+                                startAngle = -90f,
+                                sweepAngle = 360f * tasksSweep,
+                                useCenter = false,
+                                topLeft = topLeft(innerR),
+                                size = arcSize(innerR),
+                                style = Stroke(width = stroke, cap = StrokeCap.Round)
+                            )
+                        }
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             Text(
-                                "Screen time",
-                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                                text = if (focusMinutesLoaded) "$focusPct%" else "…",
+                                style = MaterialTheme.typography.titleLarge.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    fontFeatureSettings = "tnum"
+                                ),
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                             Text(
-                                if (isUsageAccessOn) "${usageSummary.appCount} apps used"
-                                else "Grant Usage Access to see stats",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                text = "Focus",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = subtitleGray
                             )
                         }
-                        Text(
-                            UsageStatsRepository.formatDuration(usageSummary.totalScreenMinutes),
-                            style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.SemiBold),
-                            color = MaterialTheme.colorScheme.primary
-                        )
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .offset(y = 10.dp)
+                                .size(24.dp)
+                                .clip(CircleShape)
+                                .background(googleBlue, CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = if (tasksLoaded) "+$tasksDone" else "—",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimary
+                            )
+                        }
                     }
-
-                    Spacer(modifier = Modifier.height(14.dp))
-
-                    if (!isUsageAccessOn) {
-                        Button(
-                            onClick = onNavigatePermissions,
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Surface(
+                            color = tealCard,
                             shape = RoundedCornerShape(20.dp),
                             modifier = Modifier.fillMaxWidth()
-                        ) { Text("Grant Usage Access") }
-                    } else if (usageSummary.topApps.isEmpty()) {
-                        Text(
-                            "No screen-time data yet. This updates when you return to FocusLock.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    } else {
-                        val maxMins = (usageSummary.topApps.maxOfOrNull { it.foregroundMinutes } ?: 1L).coerceAtLeast(1L)
-                        usageSummary.topApps.take(5).forEach { entry ->
-                            ScreenTimeBar(
-                                appName = entry.appName,
-                                minutes = entry.foregroundMinutes,
-                                fraction = entry.foregroundMinutes / maxMins.toFloat()
-                            )
-                            Spacer(modifier = Modifier.height(10.dp))
+                        ) {
+                            if (topApp != null) {
+                                Row(
+                                    modifier = Modifier.padding(14.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    // Real app icon from PackageManager (cached).
+                                    var topAppIcon by remember(topApp.packageName) {
+                                        mutableStateOf<ImageBitmap?>(null)
+                                    }
+                                    LaunchedEffect(topApp.packageName) {
+                                        topAppIcon = InstalledAppsRepository.getCachedIconBitmap(topApp.packageName)
+                                            ?: InstalledAppsRepository.getAppIconBitmap(context, topApp.packageName)
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .size(40.dp)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(tealText.copy(alpha = 0.2f)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        val bmp = topAppIcon
+                                        if (bmp != null) {
+                                            Image(
+                                                bitmap = bmp,
+                                                contentDescription = null,
+                                                modifier = Modifier.fillMaxSize()
+                                            )
+                                        } else {
+                                            Icon(
+                                                Icons.Outlined.PhoneAndroid,
+                                                contentDescription = null,
+                                                tint = tealText,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = topApp.appName,
+                                            style = MaterialTheme.typography.titleSmall.copy(
+                                                fontWeight = FontWeight.SemiBold
+                                            ),
+                                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = "${topApp.foregroundMinutes} min",
+                                            style = MaterialTheme.typography.headlineSmall.copy(
+                                                fontWeight = FontWeight.Bold,
+                                                fontFeatureSettings = "tnum"
+                                            ),
+                                            color = tealText
+                                        )
+                                    }
+                                }
+                            } else {
+                                Row(
+                                    modifier = Modifier.padding(14.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(40.dp)
+                                            .clip(RoundedCornerShape(12.dp))
+                                            .background(tealText.copy(alpha = 0.2f)),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            Icons.Outlined.PhoneAndroid,
+                                            contentDescription = null,
+                                            tint = tealText,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = when {
+                                                isUsageAccessOn != true -> "Usage Access needed"
+                                                usageSummary == null -> "Checking usage…"
+                                                else -> "No usage data yet"
+                                            },
+                                            style = MaterialTheme.typography.titleSmall.copy(
+                                                fontWeight = FontWeight.SemiBold
+                                            ),
+                                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                                        )
+                                        Text(
+                                            text = when {
+                                                isUsageAccessOn != true -> "Turn it on to see today's screen time."
+                                                usageSummary == null -> "Reading today's stats…"
+                                                else -> "Open some apps and check back later."
+                                            },
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.8f)
+                                        )
+                                        if (isUsageAccessOn != true) {
+                                            TextButton(
+                                                onClick = onNavigatePermissions,
+                                                contentPadding = PaddingValues(0.dp),
+                                                modifier = Modifier.height(28.dp)
+                                            ) {
+                                                Text(
+                                                    "Grant Usage Access",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = tealText
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Surface(
+                            color = purpleCard,
+                            shape = RoundedCornerShape(20.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(14.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(40.dp)
+                                        .background(purpleText.copy(alpha = 0.2f), CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Icon(
+                                        Icons.Outlined.CheckCircle,
+                                        contentDescription = null,
+                                        tint = purpleText,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = "Tasks",
+                                        style = MaterialTheme.typography.titleSmall.copy(
+                                            fontWeight = FontWeight.SemiBold
+                                        ),
+                                        color = MaterialTheme.colorScheme.onTertiaryContainer
+                                    )
+                                    when (tickTickTasksState) {
+                                        TickTickTasksState.Loading -> Text(
+                                            text = "…",
+                                            style = MaterialTheme.typography.headlineSmall.copy(
+                                                fontWeight = FontWeight.Bold
+                                            ),
+                                            color = purpleText
+                                        )
+                                        TickTickTasksState.Error -> Text(
+                                            text = "Couldn't load",
+                                            style = MaterialTheme.typography.titleSmall.copy(
+                                                fontWeight = FontWeight.SemiBold
+                                            ),
+                                            color = purpleText
+                                        )
+                                        else -> Text(
+                                            text = "$tasksDone/$dailyTasksGoal done",
+                                            style = MaterialTheme.typography.headlineSmall.copy(
+                                                fontWeight = FontWeight.Bold,
+                                                fontFeatureSettings = "tnum"
+                                            ),
+                                            color = purpleText
+                                        )
+                                    }
+                                    when (tickTickTasksState) {
+                                        TickTickTasksState.Error -> TextButton(
+                                            onClick = { startTickTickFetch(bypassCache = true) },
+                                            contentPadding = PaddingValues(0.dp),
+                                            modifier = Modifier.height(26.dp)
+                                        ) {
+                                            Text(
+                                                "Retry",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = purpleText
+                                            )
+                                        }
+                                        TickTickTasksState.NoAccount -> Text(
+                                            text = "Connect TickTick for task tracking",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = purpleText.copy(alpha = 0.85f),
+                                            modifier = Modifier.clickable {
+                                                (onOpenSettings ?: onNavigatePermissions)()
+                                            }
+                                        )
+                                        else -> Unit
+                                    }
+                                }
+                            }
                         }
                     }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Button(
+                        onClick = { showManualLogDialog = true },
+                        modifier = Modifier.weight(1f).height(52.dp),
+                        shape = RoundedCornerShape(28.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = googleBlue,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        ),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(20.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Log", maxLines = 1)
+                    }
+                    // Focus Timer: built-in single-session timer — no TickTick needed.
+                    Button(
+                        onClick = { showFocusTimerDialog = true },
+                        modifier = Modifier.weight(1f).height(52.dp),
+                        shape = RoundedCornerShape(28.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = googleBlue,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        ),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                    ) {
+                        Icon(
+                            Icons.Outlined.Timer,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Timer", maxLines = 1)
+                    }
+                    // "Tasks" opens the TickTick task app.
+                    Button(
+                        onClick = onOpenTickTick,
+                        modifier = Modifier.weight(1f).height(52.dp),
+                        shape = RoundedCornerShape(28.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = googleBlue,
+                            contentColor = MaterialTheme.colorScheme.onPrimary
+                        ),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Checklist,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Tasks", maxLines = 1)
+                    }
+                }
+                OutlinedButton(
+                    onClick = { showAllHistory = !showAllHistory },
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                    shape = RoundedCornerShape(28.dp),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = Color.Transparent,
+                        contentColor = MaterialTheme.colorScheme.onSurface
+                    )
+                ) {
+                    Icon(Icons.Default.History, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(if (showAllHistory) "Show less" else "History — show all")
                 }
             }
         }
 
-        item {
-            Text("Today, so far", style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.padding(top = 8.dp))
-            Spacer(Modifier.height(12.dp))
-            SummaryRow("Focused work", "${stats.totalWorkMinutesToday} min", Icons.Outlined.Timer)
-            SummaryRow("Tasks completed", "${stats.tasksCompletedToday}", Icons.Outlined.CheckCircle)
-            SummaryRow("Leisure used", "${stats.totalDoomscrollMinutesToday} min", Icons.Outlined.PhoneAndroid)
+        // Nuke trigger lives in the dashboard header (top-right ☢️ button).
+
+        // 5. Focus through the day — 24 hourly buckets, focus records only.
+        item(key = "day") {
+            FocusThroughDayCard(history = historyState.value ?: emptyList())
         }
 
         // 6. Work history
-        item {
+        item(key = "history") {
+            val history = historyState.value.orEmpty()
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -481,50 +1044,124 @@ fun DashboardScreen(
             }
         }
 
-        if (history.isEmpty()) {
-            item {
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceContainer
-                    ),
-                    shape = MaterialTheme.shapes.large,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(28.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Icon(
-                                Icons.Outlined.Timer,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                                modifier = Modifier.size(36.dp)
-                            )
-                            Spacer(modifier = Modifier.height(10.dp))
-                            Text(
-                                "No work logged yet today",
-                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
-                                color = MaterialTheme.colorScheme.onSurface
-                            )
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                "Use the Focus Timer, Log Work, or complete tasks in TickTick to earn screen time.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
-                            )
+        // One item owns the history snapshot: only this subtree recomposes on history writes.
+        if (showAllHistory) {
+            // Expanded: emit each record as a real lazy item (same 12dp LazyColumn spacing) so
+            // cards are composed and measured on demand instead of all in one giant frame.
+            val expandedHistory = historyState.value
+            if (expandedHistory.isNullOrEmpty()) {
+                item(key = "history-list") {
+                    if (expandedHistory != null) EmptyHistoryCard()
+                }
+            } else {
+                items(expandedHistory, key = { it.id }) { record ->
+                    PixelWorkRecordItem(record = record)
+                }
+            }
+        } else {
+            item(key = "history-list") {
+                val historySnapshot = historyState.value
+                val history = historySnapshot.orEmpty()
+                if (historySnapshot != null && history.isEmpty()) {
+                    EmptyHistoryCard()
+                } else if (history.isNotEmpty()) {
+                    // Collapsed to the 3 most recent until "History — show all" is tapped.
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        history.take(3).forEach { record ->
+                            key(record.id) { PixelWorkRecordItem(record = record) }
                         }
                     }
                 }
             }
-        } else {
-            items(history, key = { it.id }) { record ->
-                PixelWorkRecordItem(record = record)
+        }
+
+        // Demoted leisure: small caption card at the very bottom.
+        item(key = "bank") {
+            val liveBalanceSeconds = liveBalanceState.value
+            val bankMinutes = liveBalanceSeconds / 60
+            val bankSeconds = liveBalanceSeconds % 60
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                shape = MaterialTheme.shapes.medium,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = "Scroll bank (from focus): ${bankMinutes}m ${bankSeconds.toString().padStart(2, '0')}s",
+                    style = MaterialTheme.typography.labelSmall.copy(fontSize = 12.sp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
+                )
             }
         }
+
+    }
+    }
+
+    // Nuke confirm dialog: arm locally + sync to Convex, then launch NukeActivity.
+    if (showNukeConfirm) {
+        AlertDialog(
+            onDismissRequest = { if (!nuking) showNukeConfirm = false },
+            title = { Text("Detonate the Nuke?", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Text(
+                    "Full phone lockdown until you finish a 10-minute meditation + check-in. " +
+                        "No escape hatch — long-press the Nuke button anytime to learn more.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                Button(
+                    enabled = !nuking,
+                    onClick = {
+                        scope.launch {
+                            nuking = true
+                            try {
+                                settings.setNukeActive(true)
+                                try {
+                                    val url = try { BuildConfig.CONVEX_URL.trim() } catch (_: Exception) { "" }
+                                    if (url.startsWith("http") && authViewModel.isConfigured()) {
+                                        ConvexSyncClient(url, authViewModel::getConvexToken).activateNuke()
+                                    }
+                                } catch (_: Exception) { }
+                                launchNukeActivity()
+                            } finally {
+                                nuking = false
+                                showNukeConfirm = false
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError
+                    ),
+                    shape = RoundedCornerShape(20.dp)
+                ) { Text(if (nuking) "Detonating…" else "Detonate") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showNukeConfirm = false }) { Text("Cancel") }
+            },
+            shape = MaterialTheme.shapes.large
+        )
+    }
+
+    // Nuke explainer dialog (long-press).
+    if (showNukeInfo) {
+        AlertDialog(
+            onDismissRequest = { showNukeInfo = false },
+            title = { Text("What is the Nuke?", fontWeight = FontWeight.SemiBold) },
+            text = {
+                Text(
+                    "The Nuke locks your phone to one screen: 10 minutes of guided breathing, " +
+                        "then an AI check-in that only lifts when you commit to a real plan. " +
+                        "Tap the Nuke button to arm it; if a Nuke is already active, tapping jumps straight back in.",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showNukeInfo = false }) { Text("Got it") }
+            },
+            shape = MaterialTheme.shapes.large
+        )
     }
 
     // Manual work log dialog (fallback when TickTick API fails — core USP reliability fix)
@@ -592,11 +1229,13 @@ fun DashboardScreen(
         )
     }
 
-    // Built-in focus timer dialog (Pomodoro fallback — works without TickTick)
+    // Built-in focus timer dialog (single session — works without TickTick)
     if (showFocusTimerDialog) {
         FocusTimerDialog(
             onDismiss = { showFocusTimerDialog = false },
-            onComplete = { focusedMinutes ->
+            // Same record path as before: ONE work record per session, then the
+            // dialog closes.
+            onRecordWork = { focusedMinutes ->
                 scope.launch {
                     val ratio = settings.workRatioFlow.first()
                     val record = TickTickWorkRecord(
@@ -607,7 +1246,6 @@ fun DashboardScreen(
                         projectName = "Focus Timer"
                     )
                     val earned = bank.recordWorkCredit(record, ratio, 0)
-                    showFocusTimerDialog = false
                     permissionTick++
                     Toast.makeText(context, "Focus done! +$earned min leisure earned", Toast.LENGTH_LONG).show()
                 }
@@ -622,9 +1260,12 @@ fun DashboardScreen(
             currentIndex = dialogIndex.coerceIn(0, missing.size - 1),
             onGrant = { kind ->
                 PermissionHelper.openPermissionWithHighlight(context, kind)
-                if (dialogIndex < missing.size - 1) dialogIndex++ else {
-                    showOnboarding = false
-                    shownThisSession = true
+                // Do not advance just for opening Settings: PermissionReturnWatcher pulls the
+                // app back automatically once the grant lands, and the resume re-check then
+                // re-derives `missing` and flips the dialog action to Next/Done.
+                // Only skip ahead if it was already granted when tapped.
+                if (PermissionHelper.isGranted(context, kind) && dialogIndex < missing.size - 1) {
+                    dialogIndex++
                 }
             },
             onDismiss = {
@@ -642,55 +1283,46 @@ fun DashboardScreen(
 }
 
 @Composable
-private fun ScreenTimeBar(appName: String, minutes: Long, fraction: Float) {
-    Column {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text(
-                appName,
-                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Medium),
-                color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.weight(1f),
-                maxLines = 1
-            )
-            Text(
-                UsageStatsRepository.formatDuration(minutes),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-        Spacer(modifier = Modifier.height(4.dp))
-        LinearProgressIndicator(
-            progress = { fraction.coerceIn(0.02f, 1f) },
-            modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(50)),
-            color = MaterialTheme.colorScheme.primary,
-            trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
-        )
-    }
-}
-
-@Composable
 private fun FocusTimerDialog(
     onDismiss: () -> Unit,
-    onComplete: (Int) -> Unit
+    onRecordWork: (Int) -> Unit
 ) {
-    var selectedMinutes by remember { mutableIntStateOf(25) }
-    var isRunning by remember { mutableStateOf(false) }
-    var remainingSeconds by remember { mutableIntStateOf(25 * 60) }
+    var selectedMinutes by rememberSaveable { mutableIntStateOf(25) }
+    var isRunning by rememberSaveable { mutableStateOf(false) }
+    var remainingSeconds by rememberSaveable { mutableIntStateOf(25 * 60) }
+    // Wall-clock anchor of the running session (0 = none). Each tick recomputes the
+    // remaining time from this anchor instead of accumulating delay() jitter, so the
+    // countdown never drifts long. Reset when a run stops or completes.
+    var endAtMs by remember { mutableLongStateOf(0L) }
 
+    // Picking a different preset while idle resets the countdown.
     LaunchedEffect(selectedMinutes) {
         if (!isRunning) remainingSeconds = selectedMinutes * 60
     }
     LaunchedEffect(isRunning) {
-        while (isRunning && remainingSeconds > 0) {
-            delay(1000L)
-            remainingSeconds--
+        if (!isRunning) return@LaunchedEffect
+        if (endAtMs <= 0L) endAtMs = System.currentTimeMillis() + remainingSeconds * 1000L
+        var finishedNaturally = false
+        while (true) {
+            val remainingMs = endAtMs - System.currentTimeMillis()
+            if (remainingMs <= 0L) {
+                finishedNaturally = true
+                break
+            }
+            // Display ceil(remaining) — recomputed from the anchor every tick (no
+            // += accumulation), so the timer honors the real wall-clock end time.
+            val nextSeconds = ((remainingMs + 999L) / 1000L).toInt()
+            if (nextSeconds != remainingSeconds) remainingSeconds = nextSeconds
+            // Sleep exactly until the next displayed second flips (never a busy loop).
+            val tickDelay = remainingMs % 1000L
+            delay(if (tickDelay == 0L) 1000L else tickDelay)
         }
-        if (isRunning && remainingSeconds <= 0) {
+        if (finishedNaturally) {
+            endAtMs = 0L
+            remainingSeconds = 0
             isRunning = false
-            onComplete(selectedMinutes)
+            onRecordWork(selectedMinutes)
+            onDismiss()
         }
     }
 
@@ -704,7 +1336,12 @@ private fun FocusTimerDialog(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 if (!isRunning) {
-                    Text("Pick a focus block. Finishing earns leisure time — no TickTick needed.")
+                    Text(
+                        "Pick a focus block. Finishing earns leisure time — no TickTick needed.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = TextAlign.Center
+                    )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         listOf(15, 25, 50).forEach { mins ->
                             FilterChip(
@@ -725,7 +1362,11 @@ private fun FocusTimerDialog(
                         progress = { 1f - remainingSeconds / (selectedMinutes * 60f) },
                         modifier = Modifier.fillMaxWidth()
                     )
-                    Text("Stay focused — leaving keeps the timer running here.")
+                    Text(
+                        "Stay focused — leaving keeps the timer running here.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         },
@@ -735,9 +1376,13 @@ private fun FocusTimerDialog(
             } else {
                 TextButton(onClick = {
                     isRunning = false
-                    // Partial credit for >= 5 min of focus
-                    val doneMinutes = selectedMinutes - (remainingSeconds / 60)
-                    if (doneMinutes >= 5) onComplete(doneMinutes) else onDismiss()
+                    // Partial credit for >= 5 min of focus, then close. Ceil on the
+                    // remaining seconds (= floor of elapsed minutes) so the credited
+                    // minutes can never exceed the full-completion path (selectedMinutes).
+                    val doneMinutes = selectedMinutes - ((remainingSeconds + 59) / 60)
+                    endAtMs = 0L
+                    if (doneMinutes >= 5) onRecordWork(doneMinutes)
+                    onDismiss()
                 }) { Text("Finish Early") }
             }
         },
@@ -748,52 +1393,41 @@ private fun FocusTimerDialog(
     )
 }
 
+/** Empty-state card for the work-history section (loaded but no records today). */
 @Composable
-fun PixelStatCard(
-    title: String,
-    value: String,
-    icon: ImageVector,
-    containerColor: Color,
-    contentColor: Color,
-    modifier: Modifier = Modifier
-) {
+private fun EmptyHistoryCard() {
     Card(
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainer
         ),
         shape = MaterialTheme.shapes.large,
-        modifier = modifier
+        modifier = Modifier.fillMaxWidth()
     ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(28.dp),
+            contentAlignment = Alignment.Center
         ) {
-            Box(
-                modifier = Modifier
-                    .size(36.dp)
-                    .background(containerColor, CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(
-                    imageVector = icon,
+                    Icons.Outlined.Timer,
                     contentDescription = null,
-                    tint = contentColor,
-                    modifier = Modifier.size(18.dp)
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                    modifier = Modifier.size(36.dp)
                 )
-            }
-            Column {
+                Spacer(modifier = Modifier.height(10.dp))
                 Text(
-                    text = value,
-                    style = MaterialTheme.typography.headlineSmall.copy(
-                        fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
+                    "No work logged yet today",
+                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.onSurface
                 )
+                Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = title,
-                    style = MaterialTheme.typography.labelSmall.copy(
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    "Use the Focus Timer, Log Work, or complete tasks in TickTick to earn screen time.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center
                 )
             }
         }
@@ -802,8 +1436,10 @@ fun PixelStatCard(
 
 @Composable
 fun PixelWorkRecordItem(record: TickTickWorkRecord) {
-    val timeFormat = remember { SimpleDateFormat("h:mm a", Locale.getDefault()) }
-    val formattedTime = timeFormat.format(Date(record.timestamp))
+    // Format per timestamp instead of allocating a formatter on every row recomposition.
+    val formattedTime = remember(record.timestamp) {
+        SimpleDateFormat("h:mm a", Locale.getDefault()).format(Date(record.timestamp))
+    }
 
     Card(
         colors = CardDefaults.cardColors(
@@ -840,7 +1476,9 @@ fun PixelWorkRecordItem(record: TickTickWorkRecord) {
                     style = MaterialTheme.typography.titleSmall.copy(
                         fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface
-                    )
+                    ),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
                 Text(
                     text = "${record.durationMinutes} min focus • $formattedTime • ${record.source.name.lowercase().replace('_', ' ')}",
@@ -868,12 +1506,89 @@ fun PixelWorkRecordItem(record: TickTickWorkRecord) {
 }
 
 @Composable
-private fun SummaryRow(label: String, value: String, icon: ImageVector) {
-    ListItem(
-        headlineContent = { Text(label, style = MaterialTheme.typography.bodyLarge) },
-        leadingContent = { Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
-        trailingContent = { Text(value, style = MaterialTheme.typography.titleMedium.copy(fontFeatureSettings = "tnum")) },
-        colors = ListItemDefaults.colors(containerColor = MaterialTheme.colorScheme.background)
-    )
-    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+private fun FocusThroughDayCard(history: List<TickTickWorkRecord>) {
+    // 24 hourly buckets (0-23) from workHistory timestamps — focus records only.
+    val buckets = remember(history) {
+        val arr = IntArray(24)
+        val cal = java.util.Calendar.getInstance()
+        for (r in history) {
+            if (!com.focuslock.app.data.repository.CreditBankRepository.isFocusRecord(r.source, r.durationMinutes)) continue
+            cal.timeInMillis = r.timestamp
+            val h = cal.get(java.util.Calendar.HOUR_OF_DAY).coerceIn(0, 23)
+            arr[h] += r.durationMinutes
+        }
+        arr
+    }
+    val max = (buckets.maxOrNull() ?: 0).coerceAtLeast(0)
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        shape = MaterialTheme.shapes.large,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "Focus through the day",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    "max ${max}m",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+            if (max <= 0) {
+                Text(
+                    "No focus yet today — start Focus Timer, a TickTick session, or a manual log.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth().height(110.dp),
+                    horizontalArrangement = Arrangement.spacedBy(3.dp),
+                    verticalAlignment = Alignment.Bottom
+                ) {
+                    buckets.forEachIndexed { _, mins ->
+                        val fraction = if (max > 0) mins / max.toFloat() else 0f
+                        Column(
+                            modifier = Modifier.weight(1f).fillMaxHeight(),
+                            verticalArrangement = Arrangement.Bottom,
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .weight(1f),
+                                contentAlignment = Alignment.BottomCenter
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .fillMaxHeight(if (mins <= 0) 0.04f else fraction.coerceAtLeast(0.06f))
+                                        .clip(RoundedCornerShape(3.dp))
+                                        .background(
+                                            if (mins > 0) MaterialTheme.colorScheme.primary
+                                            else MaterialTheme.colorScheme.surfaceContainerHighest
+                                        )
+                                )
+                            }
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    listOf("0", "6", "12", "18", "23").forEach {
+                        Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+        }
+    }
 }

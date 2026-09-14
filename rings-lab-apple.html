@@ -1,0 +1,988 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FocusLock · Rings Lab — Apple Study</title>
+<style>
+/* ============================================================================
+   WORKBENCH  (debug emulator chrome)
+   ========================================================================== */
+:root{
+  --dbg:#FF2D6E; --dbg2:#00E5FF; --ok:#34d399;
+  --line:#1b1b21; --line2:#26262e; --panel:#0d0d10;
+  --mono:ui-monospace,SFMono-Regular,"JetBrains Mono","Cascadia Mono",Consolas,monospace;
+  --s:.78;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:#08080a; color:#c9c9d4;
+  font-family:var(--mono);
+  -webkit-font-smoothing:antialiased;
+  background-image:
+    linear-gradient(rgba(255,255,255,.022) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(255,255,255,.022) 1px,transparent 1px),
+    radial-gradient(ellipse at 50% -10%,rgba(255,45,110,.06),transparent 60%),
+    radial-gradient(ellipse at 90% 110%,rgba(0,229,255,.05),transparent 55%);
+  background-size:26px 26px,26px 26px,100% 100%,100% 100%;
+}
+body.no-grid{background-image:radial-gradient(ellipse at 50% -10%,rgba(255,45,110,.06),transparent 60%),radial-gradient(ellipse at 90% 110%,rgba(0,229,255,.05),transparent 55%)}
+
+/* ---- toolbar ---- */
+.bar{
+  position:sticky;top:0;z-index:60;
+  display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px;
+  padding:11px 16px;background:rgba(8,8,10,.9);backdrop-filter:blur(14px);
+  border-bottom:1px solid var(--line);
+}
+.brand{display:flex;align-items:baseline;gap:9px;padding-right:14px;border-right:1px solid var(--line)}
+.brand b{font-size:13px;letter-spacing:.16em;color:#fff}
+.brand span{font-size:10px;letter-spacing:.18em;color:#5c5c68}
+.ctl{display:flex;align-items:center;gap:8px;font-size:10px;letter-spacing:.13em;color:#71717f;text-transform:uppercase}
+.ctl input[type=range]{width:132px;accent-color:var(--dbg);height:14px}
+.ctl .v{color:#fff;font-variant-numeric:tabular-nums;min-width:52px;font-size:11px}
+.grp{display:flex;gap:6px;padding-left:14px;border-left:1px solid var(--line)}
+.pill{
+  font:inherit;font-size:10px;letter-spacing:.12em;text-transform:uppercase;
+  background:#101014;border:1px solid var(--line2);color:#7b7b8a;
+  padding:5px 9px;border-radius:5px;cursor:pointer;transition:.15s
+}
+.pill:hover{color:#d8d8e2;border-color:#3a3a46}
+.pill.on{color:#fff;border-color:var(--dbg);box-shadow:0 0 0 1px rgba(255,45,110,.35),0 0 18px -6px var(--dbg);background:rgba(255,45,110,.1)}
+.readout{margin-left:auto;font-size:10px;letter-spacing:.1em;color:#8d8d9c;display:flex;gap:14px;align-items:center}
+.readout b{color:#fff;font-weight:600}
+.readout .ov{color:var(--dbg)}
+.bar .hint{font-size:10px;color:#4d4d59;letter-spacing:.08em}
+
+/* ---- ruler strip ---- */
+.ruler{height:22px;border-bottom:1px solid var(--line);
+  background-image:repeating-linear-gradient(90deg,#22222a 0 1px,transparent 1px 26px),
+                   repeating-linear-gradient(90deg,#33333d 0 1px,transparent 1px 130px);
+  background-size:100% 8px,100% 14px;background-position:0 100%,0 100%;background-repeat:no-repeat}
+
+/* ---- grid of devices ---- */
+.bench{
+  display:grid;gap:22px;padding:22px 18px 70px;
+  grid-template-columns:repeat(auto-fill,minmax(calc(408px * var(--s) + 22px),1fr));
+  max-width:2600px;margin:0 auto;
+}
+.slot{
+  position:relative;border:1px solid var(--line);border-radius:10px;
+  background:linear-gradient(180deg,#0c0c0f,#09090b);padding:9px 9px 11px;
+}
+.slot:before,.slot:after{content:'';position:absolute;width:9px;height:9px;border:1px solid #33333d;pointer-events:none}
+.slot:before{top:-1px;left:-1px;border-right:0;border-bottom:0}
+.slot:after{bottom:-1px;right:-1px;border-left:0;border-top:0}
+.slot-head{display:flex;align-items:baseline;gap:8px;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#5c5c68;padding:1px 2px 8px}
+.slot-head b{color:#e9e9f0;letter-spacing:.08em;font-size:11px}
+.slot-head .num{color:var(--dbg);font-weight:700}
+.slot-head .ok{margin-left:auto;color:#3f3f4a}
+.slot-body{position:relative;height:calc(862px * var(--s));overflow:hidden}
+.slot-foot{display:flex;align-items:center;gap:10px;padding:8px 2px 0;font-size:10px;color:#5c5c68;letter-spacing:.06em;border-top:1px solid #14141a;margin-top:9px}
+.slot-foot b{color:#a5a5b4;font-weight:500}
+.slot-foot .ov{color:var(--dbg)}
+.slot-foot .dot{width:5px;height:5px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px var(--ok)}
+.slot-foot .dot.over{background:var(--dbg);box-shadow:0 0 8px var(--dbg)}
+
+/* ============================================================================
+   DEVICE  (iPhone-style emulator frame)
+   ========================================================================== */
+.device{position:absolute;top:0;left:50%;margin-left:-204px;width:408px;height:862px;transform:scale(var(--s));transform-origin:top center;cursor:zoom-in}
+.bezel{
+  position:relative;width:408px;height:862px;border-radius:58px;padding:11px;
+  background:linear-gradient(150deg,#60606b,#22222a 16%,#131317 48%,#3b3b45 84%,#0f0f12);
+  box-shadow:0 0 0 1.5px #000,0 26px 55px -18px rgba(0,0,0,.95),0 2px 0 rgba(255,255,255,.05) inset;
+}
+.bezel:after{content:'';position:absolute;inset:11px;border-radius:47px;box-shadow:0 0 0 1px rgba(255,255,255,.07) inset;pointer-events:none;z-index:9}
+.side{position:absolute;width:3px;border-radius:2px;background:linear-gradient(180deg,#55555f,#232329)}
+.side.a{left:-3px;top:172px;height:32px}
+.side.b{left:-3px;top:224px;height:64px}
+.side.c{left:-3px;top:300px;height:64px}
+.side.d{right:-3px;top:246px;height:96px}
+
+.screen{position:relative;width:100%;height:100%;border-radius:47px;overflow:hidden;background:#000;
+  font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","SF Pro Display","Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  color:#fff;font-weight:400;
+  --sb:54px;
+}
+.screen:after{content:'';position:absolute;inset:0;pointer-events:none;z-index:8;
+  background:linear-gradient(118deg,rgba(255,255,255,.07),rgba(255,255,255,0) 34%,rgba(255,255,255,0) 70%,rgba(255,255,255,.035))}
+.island{position:absolute;top:13px;left:50%;transform:translateX(-50%);width:124px;height:36px;border-radius:20px;background:#000;box-shadow:0 0 0 1px #17171c;z-index:7}
+.sb{position:relative;z-index:5;height:var(--sb);display:flex;align-items:flex-end;justify-content:space-between;padding:0 28px 7px;font-size:15px;font-weight:600;letter-spacing:.01em;font-variant-numeric:tabular-nums}
+.sb .ic{display:flex;align-items:center;gap:6px}
+.sb svg{display:block}
+.home{position:absolute;bottom:8px;left:50%;transform:translateX(-50%);width:140px;height:5px;border-radius:3px;background:rgba(255,255,255,.32);z-index:7}
+.ios{position:absolute;inset:var(--sb) 0 0;padding:0 18px 34px;overflow:hidden}
+
+/* ---- reusable iOS surfaces ---- */
+.h1{font-size:34px;font-weight:800;letter-spacing:-.024em;line-height:1.06}
+.h2{font-size:15px;font-weight:500;color:#8E8E93;letter-spacing:-.01em}
+.card{background:#1C1C1E;border-radius:22px;padding:18px}
+.card-t{font-size:17px;font-weight:700;letter-spacing:-.012em}
+.mrow{display:flex;flex-direction:column;gap:1px;min-width:0}
+.mrow .lab{font-size:14px;font-weight:500;letter-spacing:-.01em;white-space:nowrap}
+.mrow .val{font-size:19.5px;font-weight:800;letter-spacing:-.03em;line-height:1.12;white-space:nowrap}
+.mrow .val small{font-size:11.5px;font-weight:700;opacity:.9;letter-spacing:0}
+.grad{-webkit-background-clip:text;background-clip:text;color:transparent}
+.duo{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.scard{position:relative;background:#1C1C1E;border-radius:22px;padding:16px 16px 14px}
+.chev{position:absolute;top:14px;right:14px;width:28px;height:28px;border-radius:50%;background:#2C2C2E;display:grid;place-items:center;color:#fff;font-size:15px;font-weight:700;line-height:0}
+.bars{display:flex;align-items:flex-end;gap:3px;height:62px;margin-top:12px}
+.bars i{flex:1;border-radius:2px;background:linear-gradient(180deg,var(--a),var(--b));opacity:.92}
+.axis{display:flex;justify-content:space-between;font-size:9px;color:#6E6E73;margin-top:7px;font-weight:500}
+.tiny{font-size:11px;color:#8E8E93;font-weight:600;letter-spacing:.04em;text-transform:uppercase}
+.big{font-size:30px;font-weight:800;letter-spacing:-.03em;line-height:1}
+.big small{font-size:13px;font-weight:700}
+.chip{display:inline-flex;align-items:center;gap:6px;background:#2C2C2E;border-radius:20px;padding:7px 12px;font-size:12.5px;font-weight:600;color:#eee}
+.chip svg{display:block}
+.ringwrap{position:relative}
+.ringwrap svg{display:block;width:100%;height:100%}
+
+/* ---- debug overlay annotations ---- */
+.xray{position:absolute;inset:0;pointer-events:none;font:9px/1 var(--mono);letter-spacing:.08em}
+.ann{position:absolute;color:var(--dbg);background:rgba(255,45,110,.1);border:1px solid rgba(255,45,110,.4);padding:2px 4px;border-radius:3px;white-space:nowrap}
+.ann.c{color:var(--dbg2);background:rgba(0,229,255,.1);border-color:rgba(0,229,255,.4)}
+.wall{position:absolute;inset:0;overflow:hidden;background:
+  radial-gradient(60% 45% at 20% 18%,#ff3d7f55,transparent 70%),
+  radial-gradient(55% 40% at 82% 26%,#12c2e955,transparent 70%),
+  radial-gradient(70% 50% at 50% 92%,#a3e63540,transparent 70%),
+  linear-gradient(165deg,#141026,#05060a 60%)}
+.wall i{position:absolute;border-radius:50%;filter:blur(38px);opacity:.6}
+.glass{background:rgba(255,255,255,.09);backdrop-filter:blur(26px) saturate(170%);-webkit-backdrop-filter:blur(26px) saturate(170%);
+  border:1px solid rgba(255,255,255,.16);box-shadow:0 22px 50px -22px rgba(0,0,0,.8)}
+.brandtheme{background:#0D0D0F;color:#EEE9E7;font-family:"Segoe UI",Roboto,system-ui,sans-serif}
+.brandtheme .card{background:#1B1B1E}
+.brandtheme .h2,.brandtheme .tiny{color:#BBB4B1}
+
+@keyframes ringPulse{50%{transform:scale(1.014)}}
+@keyframes spin{to{transform:rotate(360deg)}}
+.motion [data-ring] svg{animation:ringPulse 2.6s ease-in-out infinite}
+.motion [data-ring] svg .sheen{animation:spin 7s linear infinite;transform-origin:center}
+.no-track [data-ring] .trackcircle{display:none}
+.no-glow [data-ring] .glowlayer{filter:none!important}
+
+/* ---- modal ---- */
+.modal{position:fixed;inset:0;z-index:200;background:rgba(4,4,6,.94);backdrop-filter:blur(10px);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px}
+.modal[hidden]{display:none}
+.modal-head{display:flex;align-items:baseline;gap:12px;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#6a6a78}
+.modal-head b{color:#fff;font-size:14px;letter-spacing:.08em}
+.modal-head .num{color:var(--dbg);font-weight:700}
+.modal-head button{margin-left:18px;font:inherit;font-size:10px;background:#141419;border:1px solid var(--line2);color:#9a9aa8;padding:6px 10px;border-radius:5px;cursor:pointer;letter-spacing:.12em}
+.modal-body{position:relative;width:408px;height:862px;transform-origin:top center}
+.modal-spec{font-size:10px;letter-spacing:.1em;color:#4f4f5b}
+</style>
+</head>
+<body>
+
+<header class="bar">
+  <div class="brand"><b>FOCUSLOCK</b><span>RINGS LAB / APPLE STUDY</span></div>
+
+  <label class="ctl">Focus <input id="sf" type="range" min="0" max="200" value="128"><span class="v" id="vf">128%</span></label>
+  <label class="ctl">Tasks <input id="st" type="range" min="0" max="200" value="114"><span class="v" id="vt">114%</span></label>
+  <label class="ctl">Guard <input id="sg" type="range" min="0" max="200" value="144"><span class="v" id="vg">144%</span></label>
+
+  <div class="grp">
+    <button class="pill" data-preset="0.62,0.45,0.78">under</button>
+    <button class="pill" data-preset="1,1,1">on goal</button>
+    <button class="pill on" data-preset="1.28,1.14,1.44">over 100%</button>
+    <button class="pill" data-preset="1.9,1.6,2.0">big day</button>
+  </div>
+
+  <div class="grp">
+    <button class="pill on" data-tg="track">track</button>
+    <button class="pill on" data-tg="overlapHi">overlap+</button>
+    <button class="pill" data-tg="xray">xray</button>
+    <button class="pill" data-tg="motion">motion</button>
+    <button class="pill on" data-tg="grid">grid</button>
+  </div>
+
+  <div class="grp"><label class="ctl">Zoom <input id="sz" type="range" min="50" max="100" value="78"><span class="v" id="vz">78%</span></label></div>
+
+  <div class="readout">
+    <span>FOCUS <b id="rf">154/120</b></span>
+    <span>TASKS <b id="rt">8/7</b></span>
+    <span>GUARD <b id="rg">144/100</b></span>
+    <span class="ov" id="rov">OVERLAP ACTIVE · 2 RINGS</span>
+    <span class="hint">J / K — jump · click a device to inspect</span>
+  </div>
+</header>
+<div class="ruler"></div>
+
+<main class="bench" id="bench"></main>
+
+<div class="modal" id="modal" hidden>
+  <div class="modal-head"><span class="num" id="mnum">01</span><b id="mname">Activity Classic</b><button id="mclose">ESC / CLOSE</button></div>
+  <div class="modal-body" id="mbody"></div>
+  <div class="modal-spec" id="mspec"></div>
+</div>
+
+<script>
+/* ============================================================================
+   1. COLOR + GEOMETRY UTILITIES
+   ========================================================================== */
+function hex2rgb(h){h=h.replace('#','');if(h.length===3)h=h.split('').map(c=>c+c).join('');
+  return [parseInt(h.slice(0,2),16),parseInt(h.slice(2,4),16),parseInt(h.slice(4,6),16)];}
+function rgb2hex(a){return '#'+a.map(v=>Math.max(0,Math.min(255,Math.round(v))).toString(16).padStart(2,'0')).join('');}
+function mix(a,b,t){const A=hex2rgb(a),B=hex2rgb(b);return rgb2hex(A.map((v,i)=>v+(B[i]-v)*t));}
+function rgba(hex,al){const c=hex2rgb(hex);return `rgba(${c[0]},${c[1]},${c[2]},${al})`;}
+const light=(h,t)=>mix(h,'#ffffff',t);
+const dark =(h,t)=>mix(h,'#000000',t);
+
+const NS='http://www.w3.org/2000/svg';
+function S(tag,attrs){const e=document.createElementNS(NS,tag);for(const k in attrs)e.setAttribute(k,attrs[k]);return e;}
+const rad=d=>(d-90)*Math.PI/180;
+const px=(c,r,d)=>c+r*Math.cos(rad(d));
+const py=(c,r,d)=>c+r*Math.sin(rad(d));
+
+/* Apple-style arc: starts at 12 o'clock, sweeps clockwise. */
+function arc(cx,cy,r,a0,a1){
+  const sweep=Math.max(0.001,Math.min(359.98,a1-a0));
+  const L=sweep>180?1:0;
+  return `M${px(cx,r,a0).toFixed(2)} ${py(cy,r,a0).toFixed(2)} `+
+         `A${r} ${r} 0 ${L} 1 ${px(cx,r,a0+sweep).toFixed(2)} ${py(cy,r,a0+sweep).toFixed(2)}`;
+}
+
+/* ============================================================================
+   2. GLYPHS — tasteful 24px stroke iconography (Apple fitness language)
+   ========================================================================== */
+const GLYPH={
+  arrow :'<path d="M7 17 17.2 6.8"/><path d="M10.2 6.8h7v7"/>',
+  runner:'<circle cx="15.4" cy="4.6" r="1.8"/><path d="M14.6 8.6 11.3 10.8l2.2 2.4.8 4.5"/><path d="M14.6 8.6l3.1 1.7 1.7 3"/><path d="M13.5 13.2 9.5 15.4l-1.4 4.1"/><path d="M13.5 13.2l2.7 3.5-1.2 3.9"/>',
+  figure:'<circle cx="12" cy="4.4" r="1.9"/><path d="M12 8.2v5.9"/><path d="M8.6 10.6 12 9.2l3.4 1.4"/><path d="M12 14.1l-2.4 5.2"/><path d="M12 14.1l2.4 5.2"/>',
+  flame :'<path d="M12 2.8c3.1 3.6 5.1 6.1 5.1 9.1a5.1 5.1 0 0 1-10.2 0c0-2 1-3.6 2.6-5.1C10.9 5.4 12 4.3 12 2.8z"/><path d="M12 12.1c1.2 1.4 1.8 2.3 1.8 3.3a1.8 1.8 0 1 1-3.6 0c0-1 .6-1.9 1.8-3.3z"/>',
+  check :'<path d="M5 12.6 10 17.4 19.2 7"/>',
+  shield:'<path d="M12 3 19 5.9v5.6c0 4.2-2.8 7.3-7 9.3-4.2-2-7-5.1-7-9.3V5.9L12 3z"/><path d="M9.2 12.1l2.1 2.1 4.1-4.4"/>',
+  target:'<circle cx="12" cy="12" r="7.6"/><circle cx="12" cy="12" r="3.4"/><circle cx="12" cy="12" r=".9" fill="currentColor" stroke="none"/>',
+  bolt  :'<path d="M13.2 2.8 5.4 13.1h5.6l-.9 8.1 8.5-11h-5.6l.2-7.4z"/>',
+  moon  :'<path d="M20 14.4A8.6 8.6 0 0 1 9.6 4 8.6 8.6 0 1 0 20 14.4z"/>',
+  book  :'<path d="M4 5.2c2.6-1.2 5.3-1.2 8 .2 2.7-1.4 5.4-1.4 8-.2v13c-2.6-1.2-5.3-1.2-8 .2-2.7-1.4-5.4-1.4-8-.2v-13z"/><path d="M12 5.4v13"/>'
+};
+function glyph(name,size,opacity){
+  const d=GLYPH[name]||GLYPH.target;
+  return `<g opacity="${opacity==null?.92:opacity}" transform="scale(${(size/24).toFixed(4)}) translate(-12,-12)" fill="none" stroke="#fff" stroke-width="2.05" stroke-linecap="round" stroke-linejoin="round">${d}</g>`;
+}
+
+/* ============================================================================
+   3. RING ENGINE
+   ----------------------------------------------------------------------------
+   Apple geometry: band stack fills the ring box, hairline gaps between bands,
+   rounded caps, vertical gradient (deep at the base, hot at the tip), a small
+   white glyph riding the leading edge, and a second brighter arc drawn on top
+   from 12 o'clock when progress passes 100%.
+   ========================================================================== */
+let UID=0;
+function ringSVG(o){
+  const size=o.size, n=o.rings.length, cx=size/2, cy=size/2;
+  const pad =o.pad!=null?o.pad:size*0.03;
+  const Ro  =size/2-pad;
+  const w   =(o.strokeRatio||0.20)*Ro;
+  const gap =(o.gapRatio!=null?o.gapRatio:0.058)*Ro;
+  const id='R'+(++UID);
+  const svg=S('svg',{viewBox:`0 0 ${size} ${size}`,width:'100%',height:'100%',style:'overflow:visible'});
+  const defs=S('defs',{});
+  svg.appendChild(defs);
+
+  const glow=o.glow!==false;
+  if(glow){
+    const f=S('filter',{id:id+'gl',x:'-30%',y:'-30%',width:'160%',height:'160%'});
+    f.innerHTML='<feDropShadow dx="0" dy="0" stdDeviation="'+(size*0.014).toFixed(2)+'" flood-color="#000" flood-opacity="0.55"/>';
+    defs.appendChild(f);
+  }
+  const iconF=S('filter',{id:id+'ic',x:'-60%',y:'-60%',width:'220%',height:'220%'});
+  iconF.innerHTML='<feDropShadow dx="0" dy="0.6" stdDeviation="0.9" flood-color="#000" flood-opacity="0.55"/>';
+  defs.appendChild(iconF);
+
+  o.rings.forEach((ring,i)=>{
+    const r=Ro-w/2-i*(w+gap);
+    const c=ring.color;
+    const trackHex=o.track!==false?mix(c.mid,'#000000',o.dim?0.86:0.72):'none';
+    const gid=id+'g'+i, oid=id+'o'+i;
+    const mkGrad=(gidIn,stops)=>{
+      const g=S('linearGradient',{id:gidIn,gradientUnits:'userSpaceOnUse',
+        x1:cx-Ro*0.9,y1:cy+Ro*0.95,x2:cx+Ro*0.55,y2:cy-Ro*1.02});
+      stops.forEach(([off,col])=>{g.appendChild(S('stop',{offset:off,'stop-color':col}));});
+      return g;
+    };
+    defs.appendChild(mkGrad(gid,[[0,c.lo],[0.5,c.mid],[1,c.hi]]));
+    defs.appendChild(mkGrad(oid,[[0,light(c.mid,.22)],[0.4,light(c.hi,.30)],[1,light(c.hi,.62)]]));
+
+    const g=S('g',{});
+    svg.appendChild(g);
+
+    /* track */
+    if(trackHex!=='none'){
+      g.appendChild(S('circle',{cx,cy,r,fill:'none',stroke:trackHex,'stroke-width':w,class:'trackcircle'}));
+      g.appendChild(S('circle',{cx,cy,r:r+w/2-0.7,fill:'none',stroke:'rgba(255,255,255,.05)','stroke-width':1.1}));
+    }
+
+    const p=Math.max(0,Math.min(2,ring.p));
+    const layer=glow?S('g',{class:'glowlayer',filter:`url(#${id}gl)`}):S('g',{});
+    g.appendChild(layer);
+
+    const seg=o.segmented;
+    if(seg){
+      const cnt=seg.count, step=360/cnt, gd=seg.gap==null?1.2:seg.gap;
+      const base=Math.min(p,1), over=Math.max(0,p-1);
+      const fillN=Math.floor(base*cnt+1e-6), overN=Math.floor(over*cnt+1e-6);
+      for(let k=0;k<cnt;k++){
+        const a0=k*step+gd/2, a1=k*step+step-gd/2;
+        let stroke=null,op=1;
+        if(k<overN){stroke=`url(#${oid})`;}
+        else if(k<fillN){stroke=`url(#${gid})`;}
+        if(stroke) layer.appendChild(S('path',{d:arc(cx,cy,r,a0,a1),fill:'none',stroke,'stroke-width':w,'stroke-linecap':'round',opacity:op}));
+      }
+    } else {
+      if(p>0.0008){
+        if(p>=0.9992){
+          layer.appendChild(S('circle',{cx,cy,r,fill:'none',stroke:`url(#${gid})`,'stroke-width':w,'stroke-linecap':'round'}));
+        } else {
+          layer.appendChild(S('path',{d:arc(cx,cy,r,0,p*360),fill:'none',stroke:`url(#${gid})`,'stroke-width':w,'stroke-linecap':'round'}));
+        }
+      }
+      if(p>1.0008){
+        const sweep=Math.min(359.98,(p-1)*360);
+        const rr=r+(o.overlapOffset?w*0.14:0);
+        /* dark seam so the overflow arc reads as a second layer on top */
+        if(sweep<359.5){
+          layer.appendChild(S('path',{d:arc(cx,cy,rr,0,sweep),fill:'none',stroke:'rgba(2,2,4,.72)',
+            'stroke-width':w*1.14,'stroke-linecap':'round'}));
+        }
+        if(sweep>=359.5){
+          layer.appendChild(S('circle',{cx,cy,r:rr,fill:'none',stroke:`url(#${oid})`,'stroke-width':w,'stroke-linecap':'round',opacity:.97}));
+        } else {
+          layer.appendChild(S('path',{d:arc(cx,cy,rr,0,sweep),fill:'none',stroke:`url(#${oid})`,'stroke-width':w,'stroke-linecap':'round',opacity:.98}));
+        }
+      }
+    }
+
+    /* sheen (animated when motion is on) */
+    if(i===0&&o.sheen!==false){
+      layer.appendChild(S('circle',{cx,cy,r,fill:'none',stroke:'#fff','stroke-opacity':'.13',
+        'stroke-width':w*.42,'stroke-linecap':'round','stroke-dasharray':`${w*1.1} ${2*Math.PI*r}`,
+        class:'sheen','transform-origin':`${cx}px ${cy}px`}));
+    }
+
+    /* leading-edge glyph */
+    if(ring.icon&&o.icons!==false&&size>58){
+      const tip=p<=1?p*360:((p-1)*360);
+      const ix=px(cx,r,tip), iy=py(cy,r,tip);
+      const gs=Math.min(w*1.02,size*0.13);
+      const ig=S('g',{transform:`translate(${ix.toFixed(2)},${iy.toFixed(2)})`,filter:`url(#${id}ic)`});
+      ig.innerHTML=glyph(ring.icon,gs,ring.iconOpacity==null?0.95:ring.iconOpacity);
+      g.appendChild(ig);
+    }
+
+    /* xray guides */
+    if(o.xray){
+      const xg=S('g',{});
+      xg.appendChild(S('circle',{cx,cy,r,fill:'none',stroke:'rgba(255,45,110,.45)','stroke-width':.9,'stroke-dasharray':'3 3'}));
+      xg.appendChild(S('circle',{cx,cy,r:r+w/2,fill:'none',stroke:'rgba(255,255,255,.14)','stroke-width':.7}));
+      xg.appendChild(S('circle',{cx,cy,r:r-w/2,fill:'none',stroke:'rgba(255,255,255,.14)','stroke-width':.7}));
+      xg.appendChild(S('circle',{cx:px(cx,r,0),cy:py(cy,r,0),r:2.6,fill:'#34d399'}));
+      const tip=p<=1?p*360:((p-1)*360);
+      xg.appendChild(S('circle',{cx:px(cx,r,tip),cy:py(cy,r,tip),r:2.6,fill:'#FF3B30'}));
+      if(p>1){
+        xg.appendChild(S('path',{d:arc(cx,cy,r+(o.overlapOffset?w*0.10:0),0,Math.min(359.98,(p-1)*360)),
+          fill:'none',stroke:'#fff','stroke-width':.7,'stroke-dasharray':'2 4','stroke-opacity':.5}));
+      }
+      svg.appendChild(xg);
+    }
+  });
+  svg.appendChild(defs.parentNode===svg?defs:defs);
+  return svg;
+}
+
+/* ============================================================================
+   4. DATA MODEL — FocusLock metrics wearing Apple's Move / Exercise / Stand
+   ========================================================================== */
+const METRICS={
+  f:{label:'Focus',short:'Focus',unit:'MIN',goal:120,
+     color:{lo:'#9D0C35',mid:'#E0114C',hi:'#FF2E6E'},icon:'arrow'},
+  t:{label:'Tasks',short:'Tasks',unit:'TASKS',goal:7,
+     color:{lo:'#72A125',mid:'#A3E635',hi:'#DBFF7A'},icon:'runner'},
+  g:{label:'Guard',short:'Guard',unit:'',goal:100,
+     color:{lo:'#0D88A3',mid:'#12C2E9',hi:'#7DEBFF'},icon:'figure'}
+};
+const METRICS_BRAND={
+  f:{label:'Focus',short:'Focus',unit:'MIN',goal:120,
+     color:{lo:'#9C847F',mid:'#DFBDB6',hi:'#F6E2DD'},icon:'target'},
+  t:{label:'Tasks',short:'Tasks',unit:'TASKS',goal:7,
+     color:{lo:'#808E83',mid:'#B7CBBB',hi:'#DFF2E2'},icon:'check'},
+  g:{label:'Guard',short:'Guard',unit:'',goal:100,
+     color:{lo:'#8C8381',mid:'#C8BCB8',hi:'#E8DEDA'},icon:'shield'}
+};
+
+const STATE={f:1.28,t:1.14,g:1.44,xray:false,motion:false,track:true,overlapHi:true,grid:true,scale:.78};
+
+function rows(s,set){
+  const M=set||METRICS;
+  return ['f','t','g'].map(k=>({k,m:M[k],p:s[k],now:Math.round(s[k]*M[k].goal),goal:M[k].goal}));
+}
+
+/* paint every [data-ring] host inside root */
+function paintRings(root,s,opts){
+  opts=opts||{};
+  const palette=opts.brand?METRICS_BRAND:METRICS;
+  root.querySelectorAll('[data-ring]').forEach(node=>{
+    const size=parseFloat(node.dataset.ring);
+    const keys=(node.dataset.m||'f,t,g').split(',');
+    const fixed=node.dataset.p!=null?parseFloat(node.dataset.p):null;
+    const rings=keys.map(k=>{
+      const m=palette[k];
+      const p=fixed!=null?fixed:Math.max(0,Math.min(2,s[k]));
+      return {p,color:m.color,icon:m.icon,iconOpacity:opts.iconOpacity};
+    });
+    const o={
+      size,rings,
+      xray:opts.xray!=null?opts.xray:STATE.xray,
+      track:opts.track!=null?opts.track:STATE.track,
+      glow:opts.glow!==false,
+      segmented:node.dataset.seg?{count:+node.dataset.seg,gap:node.dataset.gap!=null?+node.dataset.gap:1.2}:null,
+      icons:node.dataset.icons!=='0',
+      strokeRatio:node.dataset.sw?+node.dataset.sw:undefined,
+      gapRatio:node.dataset.gapR?+node.dataset.gapR:undefined,
+      overlapOffset:opts.overlapOffset!==false&&STATE.overlapHi,
+      dim:opts.dim
+    };
+    node.innerHTML='';
+    node.appendChild(ringSVG(o));
+  });
+}
+
+/* ============================================================================
+   5. LITTLE SCREEN BUILDING BLOCKS
+   ========================================================================== */
+function sbIcons(){
+  return '<span class="ic">'+
+  '<svg width="18" height="12" viewBox="0 0 18 12" fill="currentColor"><rect x="0" y="8.4" width="3" height="3.6" rx="1"/><rect x="5" y="5.8" width="3" height="6.2" rx="1"/><rect x="10" y="3" width="3" height="9" rx="1"/><rect x="15" y="0" width="3" height="12" rx="1" opacity=".35"/></svg>'+
+  '<svg width="17" height="12" viewBox="0 0 17 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M1 4.1C3.2 2.2 5.8 1.2 8.4 1.2s5.2 1 7.4 2.9"/><path d="M3.6 7c1.4-1.2 3.1-1.9 4.8-1.9S11.8 5.8 13.2 7"/><path d="M6.2 9.5c.8-.6 1.5-.9 2.2-.9s1.4.3 2.2.9"/></svg>'+
+  '<svg width="26" height="13" viewBox="0 0 26 13"><rect x=".7" y=".7" width="22" height="11.6" rx="3.4" fill="none" stroke="currentColor" stroke-opacity=".45"/><rect x="2.4" y="2.4" width="15" height="8.2" rx="2" fill="currentColor"/><path d="M24.4 4.4v4.2c1-.3 1.4-1 1.4-2.1s-.4-1.8-1.4-2.1z" fill="currentColor" fill-opacity=".5"/></svg>'+
+  '</span>';
+}
+function statusbar(t){return '<div class="sb"><span>'+(t||'8:02')+'</span>'+sbIcons()+'</div>';}
+function gradText(a,b,txt,extra){return `<span class="grad" style="background-image:linear-gradient(168deg,${a},${b})${extra||''}">${txt}</span>`;}
+function bars(vals,c){
+  return '<div class="bars">'+vals.map((v,i)=>{
+    const op=i===vals.length-1?1:.9;
+    return `<i style="height:${Math.max(5,Math.round(v*100))}%;--a:${c[0]};--b:${c[1]};opacity:${op}"></i>`;}).join('')+'</div>';
+}
+const AXIS='<div class="axis"><span>12 AM</span><span>6 AM</span><span>12 PM</span><span>6 PM</span></div>';
+
+function metricRow(x,i){
+  const c=x.m.color;
+  return `<div class="mrow" style="margin-top:${i?12:0}px">
+    <span class="lab">${x.m.label}</span>
+    <span class="val">${gradText(c.mid,c.hi,x.now)}/${x.goal}${x.m.unit?'<small> '+x.m.unit+'</small>':''}</span>
+  </div>`;
+}
+
+/* ============================================================================
+   6. THE 10 VARIATIONS
+   ========================================================================== */
+function v01(){ /* Activity Classic — hero ring card, Apple Summary DNA */
+  return `
+  <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-top:10px">
+    <div><div class="h1">Activity</div><div class="h2">Thursday, Aug 27</div></div>
+    <div style="width:40px;height:40px;border-radius:50%;background:linear-gradient(150deg,#FF2E6E,#12C2E9);box-shadow:0 0 0 3px #1C1C1E;margin-bottom:4px"></div>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <div class="card-t" style="margin-bottom:14px">Activity Rings</div>
+    <div style="display:flex;gap:12px;align-items:center">
+      <div class="ringwrap" style="width:178px;height:178px;flex:0 0 178px">
+        <div style="width:100%;height:100%" data-ring="178" data-m="f,t,g"></div>
+      </div>
+      <div style="flex:1;min-width:0;display:flex;flex-direction:column;justify-content:center">
+        ${rows(STATE).map(metricRow).join('')}
+      </div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:12px;display:flex;align-items:center;gap:10px">
+    <span class="chip">${glyph('flame',15,.95)}<span class="grad" style="background-image:linear-gradient(168deg,#E0114C,#FF2E6E)">${rows(STATE).every(x=>x.p>1.001)?'All 3 rings closed':rows(STATE).filter(x=>x.p>1.001).length+' of 3 rings closed'}</span></span>
+    <span class="tiny" style="margin-left:auto">${rows(STATE).filter(x=>x.p>1.001).length} / 3 GOALS</span>
+  </div>
+  <div class="duo" style="margin-top:12px">
+    <div class="scard" style="padding:15px">
+      <div class="tiny" style="text-transform:none;letter-spacing:0;font-size:12.5px">Streak</div>
+      <div class="big" style="margin-top:10px;font-size:27px">14<small style="color:#8E8E93"> DAYS</small></div>
+      <div style="font-size:11.5px;color:#8E8E93;margin-top:6px">best 31 &middot; +2 this week</div>
+    </div>
+    <div class="scard" style="padding:15px">
+      <div class="tiny" style="text-transform:none;letter-spacing:0;font-size:12.5px">Credits</div>
+      <div class="big" style="margin-top:10px;font-size:27px">${gradText('#12C2E9','#7DEBFF','2,480')}</div>
+      <div style="font-size:11.5px;color:#8E8E93;margin-top:6px">earned today 120</div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:12px;padding:16px">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:13.5px;font-weight:600">Focus through the day</span>
+      <span class="chev" style="position:static;width:22px;height:22px;font-size:12px">&#8250;</span>
+    </div>
+    ${bars([.14,.2,.34,.28,.52,.4,.68,.44,.82,.5,.36,.58],['#FF2E6E','#7C0A2E'])}
+    ${AXIS}
+  </div>`;
+}
+
+function v02(){ /* Summary — literal reference layout + stat sub-cards */
+  return `
+  <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-top:10px">
+    <div><div class="h1">Summary</div><div class="h2">Thursday, Aug 27</div></div>
+    <div style="width:40px;height:40px;border-radius:50%;background:linear-gradient(150deg,#FF2E6E,#12C2E9);box-shadow:0 0 0 3px #1C1C1E;margin-bottom:4px"></div>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <div class="card-t" style="margin-bottom:12px">Activity Rings</div>
+    <div style="display:flex;gap:12px;align-items:center">
+      <div style="width:172px;height:172px;flex:0 0 172px"><div style="width:100%;height:100%" data-ring="172" data-m="f,t,g"></div></div>
+      <div style="flex:1;min-width:0">${rows(STATE).map(metricRow).join('')}</div>
+    </div>
+  </div>
+  <div class="duo" style="margin-top:12px">
+    <div class="scard">
+      <div class="chev">&#8250;</div>
+      <div class="tiny" style="text-transform:none;font-size:13px;color:#fff;font-weight:600">Focus blocks</div>
+      <div class="tiny" style="margin-top:10px;text-transform:none;letter-spacing:0">Today</div>
+      <div class="big" style="margin-top:2px">${gradText('#E0114C','#FF2E6E',Math.round(STATE.f*9))}</div>
+      ${bars([.22,.4,.18,.62,.31,.88,.47,.7,.35,.55,.26,.44],['#FF2E6E','#7C0A2E'])}
+      ${AXIS}
+    </div>
+    <div class="scard">
+      <div class="chev">&#8250;</div>
+      <div class="tiny" style="text-transform:none;font-size:13px;color:#fff;font-weight:600">Screen guard</div>
+      <div class="tiny" style="margin-top:10px;text-transform:none;letter-spacing:0">Today</div>
+      <div class="big" style="margin-top:2px">${gradText('#12C2E9','#7DEBFF',(2.1).toFixed(2))}<small> HRS</small></div>
+      ${bars([.3,.25,.5,.2,.72,.4,.9,.6,.33,.48,.28,.38],['#7DEBFF','#0B5A72'])}
+      ${AXIS}
+    </div>
+  </div>`;
+}
+
+function v03(){ /* Overlap Lab — the >100% behaviour, annotated */
+  const over=rows(STATE).filter(x=>x.p>1).length;
+  return `
+  <div style="margin-top:10px"><div class="h1" style="font-size:28px">Overlap Lab</div>
+  <div class="h2">${over} of 3 rings past goal</div></div>
+  <div class="card" style="margin-top:14px;padding:14px">
+    <div style="width:240px;height:240px;margin:0 auto"><div style="width:100%;height:100%" data-ring="240" data-m="f,t,g"></div></div>
+  </div>
+  ${rows(STATE).map(x=>{
+    const over=x.p>1.001;
+    return `<div style="margin-top:12px">
+      <div style="display:flex;justify-content:space-between;font-size:13px;font-weight:600">
+        <span style="color:${x.m.color.hi}">${x.m.label}</span>
+        <span style="font-variant-numeric:tabular-nums">${Math.round(x.p*100)}%</span>
+      </div>
+      <div style="position:relative;height:8px;border-radius:4px;background:#1C1C1E;margin-top:6px;overflow:hidden">
+        <div style="position:absolute;left:0;top:0;bottom:0;width:${Math.min(100,x.p*100/2)}%;background:linear-gradient(90deg,${x.m.color.mid},${x.m.color.hi});border-radius:4px"></div>
+        ${x.p>1?`<div style="position:absolute;left:50%;top:0;bottom:0;width:${Math.min(50,(x.p-1)*50)}%;background:linear-gradient(90deg,${light(x.m.color.hi,.16)},${light(x.m.color.hi,.4)});border-radius:4px;box-shadow:0 0 8px ${x.m.color.hi}"></div>`:''}
+        <div style="position:absolute;left:50%;top:-3px;bottom:-3px;width:1.5px;background:rgba(255,255,255,.65)"></div>
+      </div>
+      ${over?`<div style="font-size:10px;color:#FF2D6E;letter-spacing:.1em;margin-top:5px;font-family:var(--mono)">+${Math.round((x.p-1)*100)}% OVER · SECOND ARC DRAWN FROM 12 O'CLOCK</div>`
+            :`<div style="font-size:10px;color:#4d4d59;letter-spacing:.1em;margin-top:5px;font-family:var(--mono)">${Math.round((1-x.p)*100)}% TO GOAL</div>`}
+    </div>`;}).join('')}
+  <div style="font-size:10px;color:#4d4d59;letter-spacing:.08em;margin-top:14px;font-family:var(--mono)">SCALE 0 &rarr; 200% · WHITE LINE = 100% THRESHOLD</div>
+  <div class="card" style="margin-top:14px;padding:16px">
+    <div class="card-t" style="font-size:15px;margin-bottom:10px">How overflow is drawn</div>
+    <div style="font-family:var(--mono);font-size:9.5px;line-height:1.85;color:#8E8E93;letter-spacing:.04em">
+      1 &middot; BASE ARC FILLS TO 100%, ROUND CAPS<br>
+      2 &middot; REMAINDER RESTARTS AT 12 O'CLOCK<br>
+      3 &middot; DRAWN +14% WIDER RADIUS, DARK SEAM<br>
+      4 &middot; GRADIENT SHIFTS ONE STOP LIGHTER
+    </div>
+  </div>`;
+}
+
+function v04(){ /* Scale study — hero / medium / small */
+  return `
+  <div style="margin-top:10px"><div class="h1" style="font-size:28px">Scale Study</div>
+  <div class="h2">one geometry, three weights</div></div>
+  <div style="display:flex;align-items:center;gap:18px;margin-top:26px">
+    <div style="width:212px;height:212px"><div style="width:100%;height:100%" data-ring="212" data-m="f,t,g"></div></div>
+    <div style="flex:1;font-family:var(--mono);font-size:9.5px;color:#6E6E73;letter-spacing:.08em;line-height:1.7">
+      HERO<br><span style="color:#fff">212 pt &middot; band 21.2 &middot; gap 6.1</span><br>full glyphs &middot; glow on
+    </div>
+  </div>
+  <div style="display:flex;align-items:center;gap:16px;margin-top:26px">
+    <div style="width:132px;height:132px"><div style="width:100%;height:100%" data-ring="132" data-m="f,t,g"></div></div>
+    <div style="flex:1;font-family:var(--mono);font-size:9.5px;color:#6E6E73;letter-spacing:.08em;line-height:1.7">
+      MEDIUM<br><span style="color:#fff">132 pt &middot; band 13.2 &middot; gap 3.8</span><br>glyphs scaled to band
+    </div>
+  </div>
+  <div style="display:flex;align-items:center;gap:16px;margin-top:26px">
+    <div style="width:64px;height:64px"><div style="width:100%;height:100%" data-ring="64" data-m="f,t,g" data-icons="0"></div></div>
+    <div style="width:44px;height:44px"><div style="width:100%;height:100%" data-ring="44" data-m="f,t,g" data-icons="0"></div></div>
+    <div style="flex:1;font-family:var(--mono);font-size:9.5px;color:#6E6E73;letter-spacing:.08em;line-height:1.7">
+      SMALL / MINI<br><span style="color:#fff">64 &amp; 44 pt &middot; glyphs suppressed</span><br>still readable at a glance
+    </div>
+  </div>
+  <div class="card" style="margin-top:22px;padding:15px;display:flex;justify-content:space-between">
+    ${rows(STATE).map(x=>`<div style="text-align:center;flex:1">
+      <div style="font-size:11px;font-weight:700;color:${x.m.color.hi};letter-spacing:.02em">${x.m.label.toUpperCase()}</div>
+      <div style="font-size:19px;font-weight:800;letter-spacing:-.03em;margin-top:4px;color:${x.m.color.hi}">${Math.round(x.p*100)}<small style="font-size:11px">%</small></div>
+    </div>`).join('')}
+  </div>
+  <div style="font-family:var(--mono);font-size:9px;color:#4d4d59;letter-spacing:.13em;margin-top:14px">BAND 10% OF RADIUS &middot; GAP 5.8% &middot; SCALES LINEARLY</div>`;
+}
+
+function v05(){ /* Depth & glow — inner shadow, bevel, bloom */
+  return `
+  <div style="margin-top:12px;text-align:center">
+    <div class="tiny" style="text-transform:none;letter-spacing:.02em">Today</div>
+    <div class="h1" style="font-size:30px;margin-top:2px">Deep Focus</div>
+  </div>
+  <div style="display:flex;justify-content:center;margin-top:22px">
+    <div style="width:236px;height:236px;position:relative">
+      <div style="position:absolute;inset:-14%;border-radius:50%;background:radial-gradient(circle,rgba(224,17,76,.22),transparent 62%);filter:blur(10px)"></div>
+      <div style="position:absolute;inset:0"><div style="width:100%;height:100%" data-ring="236" data-m="f,t,g" data-gapR="0.05" data-sw="0.215"></div></div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:24px;background:linear-gradient(180deg,#232327,#17171a);border:1px solid rgba(255,255,255,.07)">
+    ${rows(STATE).map(metricRow).join('')}
+  </div>
+  <div style="text-align:center;font-family:var(--mono);font-size:9px;color:#4d4d59;letter-spacing:.14em;margin-top:14px">INNER-SHADOW TRACK &middot; BEVELED BAND &middot; RADIAL BLOOM</div>`;
+}
+
+function v06(){ /* Liquid glass over wallpaper */
+  return `
+  <div class="wall" style="position:absolute;left:0;right:0;top:calc(-1 * var(--sb));bottom:0">
+    <i style="width:220px;height:220px;background:#FF2D6E;left:-40px;top:60px"></i>
+    <i style="width:190px;height:190px;background:#12C2E9;right:-30px;top:20px"></i>
+    <i style="width:230px;height:230px;background:#A3E635;left:60px;bottom:-60px"></i>
+  </div>
+  <div style="position:relative">
+    <div style="margin-top:12px"><div class="h1" style="font-size:30px">Fitness</div><div class="h2">Thursday, Aug 27</div></div>
+    <div class="glass" style="border-radius:26px;padding:18px;margin-top:16px">
+      <div class="ringwrap" style="width:188px;height:188px;margin:0 auto"><div style="width:100%;height:100%" data-ring="188" data-m="f,t,g"></div></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:16px;text-align:center">
+        ${rows(STATE).map(x=>`<div>
+          <div style="font-size:11px;color:rgba(255,255,255,.72);font-weight:600">${x.m.label}</div>
+          <div style="font-size:16px;font-weight:800;letter-spacing:-.02em;margin-top:2px;color:${x.m.color.hi}">${Math.round(x.p*100)}%</div>
+        </div>`).join('')}
+      </div>
+    </div>
+    <div class="glass" style="border-radius:22px;padding:14px;margin-top:12px;display:flex;align-items:center;gap:12px">
+      <div style="width:34px;height:34px;border-radius:50%;background:linear-gradient(150deg,#FF2E6E,#A3E635)"></div>
+      <div style="flex:1">
+        <div style="font-size:13px;font-weight:700">Ring streak</div>
+        <div style="font-size:11px;color:rgba(255,255,255,.65)">14 days &middot; best 31</div>
+      </div>
+      <div style="font-size:20px;font-weight:800">14</div>
+    </div>
+  </div>`;
+}
+
+function v07(){ /* Widget row — watch-complication energy */
+  const r=rows(STATE);
+  return `
+  <div style="margin-top:12px"><div class="h1" style="font-size:30px">Widgets</div><div class="h2">glanceable rings</div></div>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:18px">
+    ${r.map(x=>`<div class="card" style="padding:12px 8px;text-align:center;border-radius:20px">
+      <div style="width:78px;height:78px;margin:0 auto"><div style="width:100%;height:100%" data-ring="78" data-m="${x.k}"></div></div>
+      <div style="font-size:11px;font-weight:700;margin-top:8px;color:${x.m.color.hi}">${x.m.label}</div>
+      <div style="font-size:12px;font-weight:700;letter-spacing:-.01em;margin-top:1px;font-variant-numeric:tabular-nums">${x.now}<span style="color:#8E8E93;font-weight:600">/${x.goal}</span></div>
+    </div>`).join('')}
+  </div>
+  <div class="card" style="margin-top:12px;display:flex;align-items:center;gap:14px">
+    <div style="width:96px;height:96px;flex:0 0 96px"><div style="width:100%;height:100%" data-ring="96" data-m="f,t,g" data-icons="0"></div></div>
+    <div style="flex:1">
+      <div style="font-size:14px;font-weight:700">All activity</div>
+      <div style="font-size:11.5px;color:#8E8E93;margin-top:2px">${r[0].now} focus min &middot; ${r[1].now}/${r[1].goal} tasks</div>
+    </div>
+    <div class="chev" style="position:static">&#8250;</div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px">
+    <div class="card" style="padding:14px">
+      <div class="tiny" style="text-transform:none;letter-spacing:0">Streak</div>
+      <div class="big" style="margin-top:8px;font-size:26px">14<small style="color:#8E8E93"> DAYS</small></div>
+    </div>
+    <div class="card" style="padding:14px">
+      <div class="tiny" style="text-transform:none;letter-spacing:0">Credits</div>
+      <div class="big" style="margin-top:8px;font-size:26px">${gradText('#12C2E9','#7DEBFF','2,480')}</div>
+    </div>
+  </div>`;
+}
+
+function v08(){ /* Segmented precision — Apple language, discretised */
+  return `
+  <div style="margin-top:12px"><div class="h1" style="font-size:30px">Precision</div>
+  <div class="h2">5-minute blocks &middot; 72 segments</div></div>
+  <div class="card" style="margin-top:16px;padding:16px">
+    <div style="width:222px;height:222px;margin:0 auto"><div style="width:100%;height:100%" data-ring="222" data-m="f,t,g" data-seg="72" data-gap="1.15"></div></div>
+    <div style="display:flex;justify-content:space-between;margin-top:16px;font-family:var(--mono);font-size:9.5px;color:#6E6E73;letter-spacing:.08em">
+      <span>SEG 5 MIN</span><span>ROUND CAPS</span><span>OVERFLOW = EXTRA SEGMENTS</span>
+    </div>
+  </div>
+  ${rows(STATE).map(x=>{
+    const filled=Math.floor(Math.min(x.p,1)*72), over=Math.floor(Math.max(0,x.p-1)*72);
+    return `<div style="display:flex;align-items:center;gap:10px;margin-top:12px">
+      <span style="font-size:13px;font-weight:600;width:52px;color:${x.m.color.hi}">${x.m.label}</span>
+      <span style="font-family:var(--mono);font-size:10.5px;color:#a1a1af;flex:1">${filled}/72${over?' +'+over+' OVER':''}</span>
+      <span style="font-size:14px;font-weight:800;font-variant-numeric:tabular-nums">${Math.round(x.p*100)}%</span>
+    </div>`;}).join('')}`;
+}
+
+function v09(){ /* FocusLock brand tint — Apple geometry, house palette */
+  return `
+  <div class="brandtheme" style="position:absolute;inset:0;padding:0 18px">
+    <div style="margin-top:12px"><div class="h1" style="font-size:30px;color:#EEE9E7">Today</div>
+    <div class="h2">Focus inside the app's own palette</div></div>
+    <div class="card" style="margin-top:16px">
+      <div style="display:flex;gap:14px;align-items:center">
+        <div style="width:186px;height:186px;flex:0 0 186px"><div style="width:100%;height:100%" data-ring="186" data-m="f,t,g"></div></div>
+        <div style="flex:1">
+          <div style="font-size:14px;font-weight:600;color:#DFBDB6">Focus <span style="float:right;font-weight:800;color:#EEE9E7">${Math.round(STATE.f*120)}</span></div>
+          <div style="font-size:11px;color:#817977;margin-bottom:12px">of 120 min</div>
+          <div style="font-size:14px;font-weight:600;color:#B7CBBB">Tasks <span style="float:right;font-weight:800;color:#EEE9E7">${Math.round(STATE.t*7)}</span></div>
+          <div style="font-size:11px;color:#817977;margin-bottom:12px">of 7 done</div>
+          <div style="font-size:14px;font-weight:600;color:#C8BCB8">Guard <span style="float:right;font-weight:800;color:#EEE9E7">${Math.round(STATE.g*100)}</span></div>
+          <div style="font-size:11px;color:#817977">of 100 budget</div>
+        </div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px;display:flex;align-items:center;gap:12px">
+      <span style="font-size:12px;color:#BBB4B1">Quiet, low-stimulus variant — same Apple band geometry, no neon.</span>
+    </div>
+    <div class="card" style="margin-top:14px;padding:16px">
+      <div style="font-size:13px;font-weight:600;color:#EEE9E7;display:flex;justify-content:space-between">
+        <span>Focus through the day</span><span style="color:#817977;font-size:11.5px">peak 10 AM</span>
+      </div>
+      <div class="bars" style="margin-top:12px">
+        ${[.14,.2,.34,.28,.52,.4,.68,.44,.82,.5,.36,.58].map(v=>`<i style="height:${Math.round(v*100)}%;background:linear-gradient(180deg,#DFBDB6,#6B4A43)"></i>`).join('')}
+      </div>
+      <div class="axis" style="color:#817977"><span>12 AM</span><span>6 AM</span><span>12 PM</span><span>6 PM</span></div>
+    </div>
+    <div class="card" style="margin-top:14px;padding:15px;display:flex;justify-content:space-between">
+      <div><div style="font-size:11px;color:#BBB4B1">Streak</div><div style="font-size:20px;font-weight:800;margin-top:4px">14</div></div>
+      <div><div style="font-size:11px;color:#BBB4B1">Credits</div><div style="font-size:20px;font-weight:800;margin-top:4px">2,480</div></div>
+      <div><div style="font-size:11px;color:#BBB4B1">Blocks</div><div style="font-size:20px;font-weight:800;margin-top:4px">27</div></div>
+    </div>
+  </div>`;
+}
+
+function v10(){ /* In context — ring hero inside the dashboard */
+  return `
+  <div style="margin-top:10px;display:flex;align-items:flex-end;justify-content:space-between">
+    <div><div class="h1" style="font-size:28px">Dashboard</div><div class="h2">Live rings in situ</div></div>
+    <div class="chip" style="padding:6px 10px">${glyph('bolt',13,.95)} Nuke</div>
+  </div>
+  <div class="card" style="margin-top:14px;display:flex;align-items:center;gap:14px">
+    <div style="width:158px;height:158px;flex:0 0 158px"><div style="width:100%;height:100%" data-ring="158" data-m="f,t,g"></div></div>
+    <div style="flex:1">
+      <div class="tiny" style="text-transform:none;letter-spacing:0;font-size:12px">Focus</div>
+      <div style="font-size:24px;font-weight:800;letter-spacing:-.03em;line-height:1.05">${gradText('#E0114C','#FF2E6E',Math.round(STATE.f*120))}<small style="font-size:12px;color:#8E8E93;font-weight:700"> /120 MIN</small></div>
+      <div style="height:1px;background:#2C2C2E;margin:10px 0"></div>
+      <div style="font-size:12.5px;color:#a1a1af">Tasks <b style="color:#fff;float:right">${Math.round(STATE.t*7)}/7</b></div>
+      <div style="font-size:12.5px;color:#a1a1af;margin-top:4px">Guard <b style="color:#fff;float:right">${Math.round(STATE.g*100)}/100</b></div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:12px;padding:16px">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <span style="font-size:13.5px;font-weight:600">Focus through the day</span>
+      <span class="chev" style="position:static;width:22px;height:22px;font-size:12px">&#8250;</span>
+    </div>
+    ${bars([.14,.2,.34,.28,.52,.4,.68,.44,.82,.5,.36,.58],['#FF2E6E','#7C0A2E'])}
+    ${AXIS}
+  </div>
+  <div class="duo" style="margin-top:12px">
+    <div class="scard" style="padding:14px">
+      <div class="tiny" style="text-transform:none;letter-spacing:0;font-size:12px">Top app</div>
+      <div style="font-size:15px;font-weight:700;margin-top:6px">Instagram</div>
+      <div style="font-size:12.5px;color:#8E8E93;margin-top:2px">1h 42m</div>
+    </div>
+    <div class="scard" style="padding:14px">
+      <div class="tiny" style="text-transform:none;letter-spacing:0;font-size:12px">Blocked</div>
+      <div style="font-size:15px;font-weight:700;margin-top:6px">27</div>
+      <div style="font-size:12.5px;color:#8E8E93;margin-top:2px">opens today</div>
+    </div>
+  </div>`;
+}
+
+/* ---- registry ---- */
+const VARIANTS=[
+  {n:'01',name:'Activity Classic',spec:'Ø208 · band 20.8 · gap 6.0 · round caps · tip glyphs',html:v01,brand:false},
+  {n:'02',name:'Summary Reference',spec:'Ø190 · hero card + stat sub-cards · gradient numerals',html:v02,brand:false},
+  {n:'03',name:'Overlap Lab',spec:'Ø240 · >100% second arc · 0–200% scale readout',html:v03,brand:false},
+  {n:'04',name:'Scale Study',spec:'212 / 132 / 64 / 44 pt · glyph suppression at small sizes',html:v04,brand:false},
+  {n:'05',name:'Depth & Glow',spec:'Ø236 · inner-shadow track · radial bloom · tighter gaps',html:v05,brand:false},
+  {n:'06',name:'Liquid Glass',spec:'Ø188 · frosted card over wallpaper · specular sheen',html:v06,brand:false},
+  {n:'07',name:'Widget Row',spec:'78 pt tri-ring widgets + 96 pt stack',html:v07,brand:false},
+  {n:'08',name:'Segmented Precision',spec:'Ø222 · 72 segments · overflow becomes extra segments',html:v08,brand:false},
+  {n:'09',name:'Brand Tint',spec:'FocusLock palette #DFBDB6 / #B7CBBB / #C8BCB8 · semantic glyphs',html:v09,brand:true},
+  {n:'10',name:'In Dashboard Context',spec:'Ø158 ring hero · day bars · top app + blocked cards',html:v10,brand:false}
+];
+
+/* ============================================================================
+   7. DEVICE FACTORY + RENDER
+   ========================================================================== */
+function isBrand(i){return !!VARIANTS[i].brand;}
+function buildScreen(i){
+  const v=VARIANTS[i];
+  const wrap=document.createElement('div');
+  wrap.className='screen'+(STATE.motion?' motion':'')+(STATE.track?'':' no-track');
+  wrap.dataset.variant=i;
+  wrap.innerHTML=(isBrand(i)?'':'')+statusbar()+
+    '<div class="ios">'+v.html()+'</div>'+
+    '<div class="home"></div>';
+  return wrap;
+}
+function buildDevice(i){
+  const d=document.createElement('div');
+  d.className='device';
+  d.innerHTML='<div class="bezel">'+
+    '<div class="side a"></div><div class="side b"></div><div class="side c"></div><div class="side d"></div>'+
+    '</div>';
+  d.querySelector('.bezel').appendChild(buildScreen(i));
+  return d;
+}
+
+function statusFor(x){
+  const over=x.p>1.001;
+  return `<span class="dot ${over?'over':''}"></span><b>${Math.round(x.p*100)}%</b>`+
+    (over?`<span class="ov">+${Math.round((x.p-1)*100)}%</span>`:`<span>${Math.round((1-x.p)*100)}% left</span>`);
+}
+
+const bench=document.getElementById('bench');
+let slots=[];
+function buildBench(){
+  bench.innerHTML='';
+  slots=[];
+  VARIANTS.forEach((v,i)=>{
+    const slot=document.createElement('div');
+    slot.className='slot';
+    slot.innerHTML=
+      '<div class="slot-head"><span class="num">'+v.n+'</span><b>'+v.name+'</b>'+
+      '<span class="ok">'+(isBrand(i)?'brand':'apple-dna')+'</span></div>'+
+      '<div class="slot-body"></div>'+
+      '<div class="slot-foot"></div>';
+    slot.querySelector('.slot-body').appendChild(buildDevice(i));
+    bench.appendChild(slot);
+    slots.push(slot);
+  });
+}
+
+function renderAll(){
+  document.querySelectorAll('.screen').forEach(scr=>{
+    const i=+scr.dataset.variant;
+    scr.classList.toggle('motion',STATE.motion);
+    scr.classList.toggle('no-track',!STATE.track);
+    const ios=scr.querySelector('.ios');
+    const host=ios.querySelector('[data-ios-host]')||ios;
+    ios.innerHTML=VARIANTS[i].html();
+    paintRings(scr,STATE,{brand:isBrand(i)});
+  });
+  /* per-slot readouts */
+  const r=rows(STATE);
+  slots.forEach((slot,i)=>{
+    const f=slot.querySelector('.slot-foot');
+    f.innerHTML=r.map(x=>`<span>${x.m.label.toUpperCase()[0]} ${statusFor(x)}</span>`).join('')+
+      `<span style="margin-left:auto">${VARIANTS[i].n}</span>`;
+  });
+  /* header readout */
+  document.getElementById('rf').textContent=r[0].now+'/'+r[0].goal;
+  document.getElementById('rt').textContent=r[1].now+'/'+r[1].goal;
+  document.getElementById('rg').textContent=r[2].now+'/'+r[2].goal;
+  const over=r.filter(x=>x.p>1.001).length;
+  const ro=document.getElementById('rov');
+  ro.textContent=over?('OVERLAP ACTIVE · '+over+' RING'+(over>1?'S':'')):'OVERLAP IDLE';
+  ro.style.opacity=over?1:.35;
+  /* slider labels */
+  document.getElementById('vf').textContent=Math.round(STATE.f*100)+'%';
+  document.getElementById('vt').textContent=Math.round(STATE.t*100)+'%';
+  document.getElementById('vg').textContent=Math.round(STATE.g*100)+'%';
+}
+
+/* ============================================================================
+   8. HARNESS — controls, zoom, keyboard, inspect modal
+   ========================================================================== */
+function bindSlider(id,key,vid){
+  const s=document.getElementById(id);
+  s.addEventListener('input',()=>{
+    STATE[key]=+s.value/100;
+    document.getElementById(vid).textContent=s.value+'%';
+    document.querySelectorAll('[data-preset]').forEach(p=>p.classList.remove('on'));
+    schedule();
+  });
+}
+let raf=0;
+function schedule(){ if(raf) return; raf=requestAnimationFrame(()=>{raf=0;renderAll();}); }
+
+bindSlider('sf','f','vf'); bindSlider('st','t','vt'); bindSlider('sg','g','vg');
+
+document.querySelectorAll('[data-preset]').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    const [f,t,g]=btn.dataset.preset.split(',').map(Number);
+    STATE.f=f;STATE.t=t;STATE.g=g;
+    document.getElementById('sf').value=f*100;
+    document.getElementById('st').value=t*100;
+    document.getElementById('sg').value=g*100;
+    document.querySelectorAll('[data-preset]').forEach(p=>p.classList.remove('on'));
+    btn.classList.add('on');
+    renderAll();
+  });
+});
+
+document.querySelectorAll('[data-tg]').forEach(btn=>{
+  btn.addEventListener('click',()=>{
+    const k=btn.dataset.tg;
+    STATE[k]=!STATE[k];
+    btn.classList.toggle('on',STATE[k]);
+    if(k==='grid') document.body.classList.toggle('no-grid',!STATE.grid);
+    renderAll();
+  });
+});
+
+document.getElementById('sz').addEventListener('input',e=>{
+  const v=+e.target.value; document.getElementById('vz').textContent=v+'%';
+  setScale(v/100);
+});
+function setScale(s){
+  STATE.scale=s;
+  document.documentElement.style.setProperty('--s',s);
+}
+
+/* click to inspect */
+bench.addEventListener('click',e=>{
+  const dev=e.target.closest('.device'); if(!dev) return;
+  openModal(+dev.querySelector('.screen').dataset.variant);
+});
+function openModal(i){
+  const v=VARIANTS[i];
+  const s=Math.min(1,(window.innerHeight-190)/862);
+  document.getElementById('mnum').textContent=v.n;
+  document.getElementById('mname').textContent=v.name;
+  document.getElementById('mspec').textContent=v.spec;
+  const body=document.getElementById('mbody');
+  body.innerHTML='';
+  body.style.transform='scale('+s+')';
+  body.style.height=(862*s)+'px';
+  body.appendChild(buildDevice(i).querySelector('.bezel'));
+  const scr=body.querySelector('.screen');
+  paintRings(scr,STATE,{brand:isBrand(i)});
+  document.getElementById('modal').hidden=false;
+}
+function closeModal(){document.getElementById('modal').hidden=true;}
+document.getElementById('mclose').addEventListener('click',closeModal);
+document.getElementById('modal').addEventListener('click',e=>{if(e.target.id==='modal')closeModal();});
+
+/* keyboard: J/K or arrows jump slot to slot */
+let cur=0;
+function focusSlot(i){
+  cur=(i+slots.length)%slots.length;
+  slots[cur].scrollIntoView({behavior:'smooth',block:'center'});
+  slots[cur].style.borderColor='#FF2D6E';
+  setTimeout(()=>{slots[cur].style.borderColor='';},900);
+}
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){closeModal();return;}
+  const k=e.key.toLowerCase();
+  if(k==='j'||e.key==='ArrowDown'){e.preventDefault();focusSlot(cur+1);}
+  if(k==='k'||e.key==='ArrowUp'){e.preventDefault();focusSlot(cur-1);}
+  if(e.key==='Enter'){openModal(cur);}
+});
+
+/* boot */
+buildBench();
+setScale(STATE.scale);
+renderAll();
+</script>
+</body>
+</html>

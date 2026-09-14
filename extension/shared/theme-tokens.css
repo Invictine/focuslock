@@ -1,0 +1,48 @@
+/* Generated from design/theme.json. Run npm run theme:generate at the repo root. */
+:root {
+  color-scheme: dark;
+  --fl-primary: #dfbdb6;
+  --fl-on-primary: #30201d;
+  --fl-primary-container: #40302d;
+  --fl-on-primary-container: #f4dcd6;
+  --fl-secondary: #c8bcb8;
+  --fl-on-secondary: #2d2523;
+  --fl-secondary-container: #332b29;
+  --fl-on-secondary-container: #eee0dc;
+  --fl-tertiary: #b7cbbb;
+  --fl-on-tertiary: #1f2d23;
+  --fl-tertiary-container: #29392e;
+  --fl-on-tertiary-container: #d4e9d8;
+  --fl-background: #0d0d0f;
+  --fl-on-background: #eee9e7;
+  --fl-surface: #0d0d0f;
+  --fl-on-surface: #eee9e7;
+  --fl-surface-variant: #353235;
+  --fl-on-surface-variant: #bbb4b1;
+  --fl-surface-dim: #0d0d0f;
+  --fl-surface-bright: #353235;
+  --fl-surface-container-lowest: #09090b;
+  --fl-surface-container-low: #141416;
+  --fl-surface-container: #1b1b1e;
+  --fl-surface-container-high: #232326;
+  --fl-surface-container-highest: #2d2d31;
+  --fl-outline: #817977;
+  --fl-outline-variant: #353235;
+  --fl-error: #f2b2ad;
+  --fl-on-error: #421c1a;
+  --fl-error-container: #482725;
+  --fl-on-error-container: #ffdad6;
+  --fl-success: #b7cbbb;
+  --fl-success-container: #29392e;
+  --fl-warning: #e5c58f;
+  --fl-warning-container: #3e3320;
+  --fl-inverse-surface: #eee9e7;
+  --fl-inverse-on-surface: #302d2e;
+  --fl-inverse-primary: #77534c;
+  --fl-scrim: #000000;
+  --fl-radius-small: 8px;
+  --fl-radius-medium: 12px;
+  --fl-radius-large: 20px;
+  --fl-radius-extra-large: 24px;
+  --fl-font-family: "Segoe UI", Roboto, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+}

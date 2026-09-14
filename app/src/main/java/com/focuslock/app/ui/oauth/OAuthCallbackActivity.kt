@@ -6,6 +6,7 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.SystemBarStyle
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -22,6 +23,7 @@ import com.focuslock.app.service.TickTickApiClient
 import com.focuslock.app.service.TickTickAuthConfig
 import com.focuslock.app.ui.MainActivity
 import com.focuslock.app.ui.theme.FocusLockTheme
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class OAuthCallbackActivity : ComponentActivity() {
@@ -30,7 +32,10 @@ class OAuthCallbackActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+        )
 
         val data = intent.data
         val isLoopback = data?.scheme == "http" && data.host == "127.0.0.1"
@@ -83,7 +88,17 @@ class OAuthCallbackActivity : ComponentActivity() {
     private fun handleAuthorizationCode(code: String, state: String?) {
         lifecycleScope.launch {
             val settings = FocusLockApplication.instance.settingsRepository
+            val alreadyLoggedIn = settings.tickTickTokenFlow.first().isNotBlank()
             if (!settings.consumeTickTickState(state)) {
+                if (alreadyLoggedIn) {
+                    Toast.makeText(this@OAuthCallbackActivity, "TickTick connected successfully!", Toast.LENGTH_SHORT).show()
+                    val mainIntent = Intent(this@OAuthCallbackActivity, MainActivity::class.java).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                    }
+                    startActivity(mainIntent)
+                    finish()
+                    return@launch
+                }
                 Toast.makeText(this@OAuthCallbackActivity, "Login expired or could not be verified. Connect again from Settings.", Toast.LENGTH_LONG).show()
                 finish()
                 return@launch
