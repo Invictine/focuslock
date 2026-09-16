@@ -5,6 +5,7 @@ import { ConvexProviderWithClerk } from "convex/react-clerk";
 import { ConvexProvider, ConvexReactClient } from "convex/react";
 import App from "./App";
 import { ClerkWebAuthProvider, DesktopBrowserAuthProvider } from "./auth";
+import { ErrorBoundary } from "./ErrorBoundary";
 import "./bootstrap.css";
 
 const convexUrl = (import.meta.env.VITE_CONVEX_URL as string | undefined)?.trim();
@@ -48,7 +49,7 @@ if (missing.length > 0 || !clerkKey || !isValidConvexUrl(convexUrl)) {
   root.render(isDesktop ? (
     <React.StrictMode>
       <ConvexProvider client={convex}>
-        <DesktopBrowserAuthProvider client={convex}><App /></DesktopBrowserAuthProvider>
+        <DesktopBrowserAuthProvider client={convex}><ErrorBoundary><App /></ErrorBoundary></DesktopBrowserAuthProvider>
       </ConvexProvider>
     </React.StrictMode>
   ) : (
@@ -60,7 +61,7 @@ if (missing.length > 0 || !clerkKey || !isValidConvexUrl(convexUrl)) {
         afterSignOutUrl="/"
       >
         <ConvexProviderWithClerk client={convex} useAuth={useAuth}>
-          <ClerkWebAuthProvider><App /></ClerkWebAuthProvider>
+          <ClerkWebAuthProvider><ErrorBoundary><App /></ErrorBoundary></ClerkWebAuthProvider>
         </ConvexProviderWithClerk>
       </ClerkProvider>
     </React.StrictMode>

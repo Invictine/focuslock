@@ -17,6 +17,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
@@ -111,9 +112,15 @@ class SettingsRepository(private val context: Context) {
         val FOCUS_GOAL_MINUTES = intPreferencesKey("focus_goal_minutes")
         val DAILY_TASKS_GOAL = intPreferencesKey("daily_tasks_goal")
 
+        // Focus-tab home variation key (see FocusHomeStyle in ui.dashboard.home).
+        val FOCUS_HOME_STYLE = stringPreferencesKey("focus_home_style")
+
         // Daily reminder notification
         val DAILY_REMINDER_ENABLED = booleanPreferencesKey("daily_reminder_enabled")
         val DAILY_REMINDER_MINUTE_OF_DAY = intPreferencesKey("daily_reminder_minute_of_day")
+
+        // Sign-in screen "Continue in Offline Mode" choice; persisted so cold starts skip the gate.
+        val OFFLINE_MODE = booleanPreferencesKey("offline_mode")
     }
 
     // Apps Flow
@@ -150,15 +157,108 @@ class SettingsRepository(private val context: Context) {
         }
 
     private fun decodeBlockedApps(raw: String?): List<BlockedApp> = try {
-        if (raw.isNullOrBlank()) BlockedApp.DEFAULT_DOOMSCROLL_APPS else json.decodeFromString(raw)
+        (if (raw.isNullOrBlank()) BlockedApp.DEFAULT_DOOMSCROLL_APPS else json.decodeFromString(raw))
+            .distinctBy { it.packageName }
     } catch (_: Exception) {
         BlockedApp.DEFAULT_DOOMSCROLL_APPS
     }
 
     private fun decodeBlockedWebsites(raw: String?): List<BlockedWebsite> = try {
-        if (raw.isNullOrBlank()) BlockedWebsite.DEFAULT_BLOCKED_WEBSITES else json.decodeFromString(raw)
+        (if (raw.isNullOrBlank()) BlockedWebsite.DEFAULT_BLOCKED_WEBSITES else json.decodeFromString(raw))
+            .distinctBy { it.domain.lowercase() }
     } catch (_: Exception) {
         BlockedWebsite.DEFAULT_BLOCKED_WEBSITES
+    }
+
+    /**
+     * Result of a Strict-Mode block-preserving merge. [forcedLocalBlock] is true when the
+     * incoming list tried to remove a block (it dropped a locally blocked entry or sent it
+     * with `isBlocked = false`) and the merge had to keep/re-add it. Callers then re-stamp
+     * the list updated_at to now so the stricter local state wins the next LWW sync round.
+     */
+    private data class BlockMergeResult<T>(
+        val items: List<T>,
+        val forcedLocalBlock: Boolean,
+    )
+
+    /**
+     * Canonical lockdown read from a DataStore edit snapshot. Mirrors [lockdownModeFlow]'s
+     * canonical/legacy fallback. Must be used inside `edit {}` transforms (never the cached
+     * flow) so the freeze flag is read atomically with the write it guards.
+     */
+    private fun isLockdownActiveIn(preferences: Preferences): Boolean =
+        if (preferences.contains(PreferencesKeys.LOCKDOWN_MODE)) {
+            preferences[PreferencesKeys.LOCKDOWN_MODE] ?: false
+        } else {
+            preferences[PreferencesKeys.STRICT_MODE] ?: false
+        }
+
+    /**
+     * Strict-Mode merge for blocked apps: [incoming] may add blocks and refresh metadata,
+     * but an app blocked in [existing] can never be unblocked or dropped. Matched entries
+     * take incoming metadata while preserving the local `isPermanent` flag (the same rule
+     * [applyRemoteBlockedApps] always used); local-only blocked entries are re-added as-is.
+     */
+    private fun mergePreservingBlockedApps(
+        existing: List<BlockedApp>,
+        incoming: List<BlockedApp>,
+    ): BlockMergeResult<BlockedApp> {
+        val localByPkg = existing.associateBy { it.packageName }
+        val emitted = HashSet<String>(incoming.size * 2)
+        var forced = false
+        val merged = ArrayList<BlockedApp>(incoming.size + existing.size)
+        for (remote in incoming) {
+            // Duplicate keys would crash the pickers' keyed LazyColumn; first occurrence wins.
+            if (!emitted.add(remote.packageName)) continue
+            val local = localByPkg[remote.packageName]
+            if (local?.isBlocked == true && !remote.isBlocked) forced = true
+            merged += remote.copy(
+                isBlocked = remote.isBlocked || local?.isBlocked == true,
+                isPermanent = local?.isPermanent ?: false,
+            )
+        }
+        for (local in existing) {
+            if (local.isBlocked && local.packageName !in emitted) {
+                merged += local
+                emitted += local.packageName
+                forced = true
+            }
+        }
+        return BlockMergeResult(merged, forced)
+    }
+
+    /**
+     * Strict-Mode merge for blocked websites: same contract as [mergePreservingBlockedApps],
+     * with domains matched case-insensitively (consistent with the rest of domain handling).
+     */
+    private fun mergePreservingBlockedWebsites(
+        existing: List<BlockedWebsite>,
+        incoming: List<BlockedWebsite>,
+    ): BlockMergeResult<BlockedWebsite> {
+        val localByDomain = existing.associateBy { it.domain.lowercase() }
+        val emitted = HashSet<String>(incoming.size * 2)
+        var forced = false
+        val merged = ArrayList<BlockedWebsite>(incoming.size + existing.size)
+        for (remote in incoming) {
+            val key = remote.domain.lowercase()
+            // Duplicate keys would crash the pickers' keyed LazyColumn; first occurrence wins.
+            if (!emitted.add(key)) continue
+            val local = localByDomain[key]
+            if (local?.isBlocked == true && !remote.isBlocked) forced = true
+            merged += remote.copy(
+                isBlocked = remote.isBlocked || local?.isBlocked == true,
+                isPermanent = local?.isPermanent ?: false,
+            )
+        }
+        for (local in existing) {
+            val key = local.domain.lowercase()
+            if (local.isBlocked && key !in emitted) {
+                merged += local
+                emitted += key
+                forced = true
+            }
+        }
+        return BlockMergeResult(merged, forced)
     }
 
     // Scalar flows: every map is wrapped with a corruption fallback so a single bad
@@ -207,6 +307,14 @@ class SettingsRepository(private val context: Context) {
             .coerceIn(MIN_DAILY_TASKS_GOAL, MAX_DAILY_TASKS_GOAL)
     }.catchInt(DEFAULT_DAILY_TASKS_GOAL)
 
+    /**
+     * Focus-tab home variation key (see FocusHomeStyle). Unknown/blank values are
+     * tolerated here; the UI maps anything unrecognized back to rings.
+     */
+    val focusHomeStyleFlow: Flow<String> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.FOCUS_HOME_STYLE] ?: DEFAULT_FOCUS_HOME_STYLE
+    }.catchString(DEFAULT_FOCUS_HOME_STYLE)
+
     val tickTickTokenFlow: Flow<String> = context.dataStore.data.map { preferences ->
         preferences[PreferencesKeys.TICKTICK_ACCESS_TOKEN] ?: ""
     }.catchString("")
@@ -247,6 +355,11 @@ class SettingsRepository(private val context: Context) {
             .coerceIn(0, 1439)
     }.catchInt(DEFAULT_DAILY_REMINDER_MINUTE_OF_DAY)
 
+    /** Persisted "Continue in Offline Mode" choice; true skips the sign-in gate on startup. */
+    val offlineModeFlow: Flow<Boolean> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.OFFLINE_MODE] ?: false
+    }.catchBoolean(false)
+
     /** Canonical lockdown flag. Reads `lockdown_mode`, falling back to legacy `strict_mode` pre-migration. */
     val lockdownModeFlow: Flow<Boolean> = context.dataStore.data
         .map { preferences ->
@@ -283,6 +396,36 @@ class SettingsRepository(private val context: Context) {
         preferences[PreferencesKeys.BOUNDARIES_LOCK] ?: false
     }.catchBoolean(false)
 
+    /**
+     * Single source of truth for "an existing block cannot be removed right now": true while
+     * either the user-set Boundaries Lock or Strict Mode (lockdown) is active. Adding new
+     * blocks is never frozen.
+     */
+    val boundariesFrozenFlow: Flow<Boolean> = combine(
+        boundariesLockFlow,
+        lockdownModeFlow
+    ) { locked, lockdown -> locked || lockdown }
+
+    /**
+     * Defense-in-depth gate for removal paths (see [boundariesFrozenFlow]). Strict Mode
+     * freezes already-blocked boundaries until it ends; blocking (adding) stays allowed.
+     * No-ops log and return false when reads fail so a read hiccup can't block a write.
+     */
+    private suspend fun isUnblockRefusedByStrictMode(): Boolean {
+        val lockdown = try {
+            isLockdownModeEnabled()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w("SettingsRepo", "Strict Mode check failed; allowing boundary change", e)
+            false
+        }
+        if (lockdown) {
+            Log.w("SettingsRepo", "Boundary unblock refused: Strict Mode is active")
+        }
+        return lockdown
+    }
+
     val nukeActiveFlow: Flow<Boolean> = context.dataStore.data
         .map { preferences -> preferences[PreferencesKeys.NUKE_ACTIVE] ?: false }
         .onEach { active ->
@@ -317,13 +460,36 @@ class SettingsRepository(private val context: Context) {
     suspend fun getBlockedApps(): List<BlockedApp> =
         if (blockedAppsLoaded.value) _blockedApps.value else blockedAppsFlow.first()
 
+    /**
+     * Whole-list writer (backup import path). Outside Strict Mode this replaces the list
+     * exactly as before. While Strict Mode is active the incoming list is merged inside the
+     * edit so it can add blocks/refresh metadata but never unblock or drop a local block
+     * (see [mergePreservingBlockedApps]); a merge that forced a local block to stay also
+     * re-stamps [PreferencesKeys.BLOCKED_APPS_UPDATED_AT] so the next LWW round keeps it.
+     */
     suspend fun updateBlockedApps(apps: List<BlockedApp>, markLocalChange: Boolean = true) {
+        var written: List<BlockedApp>? = null
         val committed = editSettings { preferences ->
-            preferences[PreferencesKeys.BLOCKED_APPS_JSON] = json.encodeToString(apps)
-            if (markLocalChange) preferences[PreferencesKeys.BLOCKED_APPS_UPDATED_AT] = System.currentTimeMillis()
+            val merged = if (isLockdownActiveIn(preferences)) {
+                mergePreservingBlockedApps(
+                    decodeBlockedApps(preferences[PreferencesKeys.BLOCKED_APPS_JSON]),
+                    apps,
+                )
+            } else {
+                BlockMergeResult(apps, forcedLocalBlock = false)
+            }
+            preferences[PreferencesKeys.BLOCKED_APPS_JSON] = json.encodeToString(merged.items)
+            if (merged.forcedLocalBlock) {
+                // Stricter local state survived: stamp now so it outranks the incoming list
+                // on the next sync instead of flapping back to the weaker remote state.
+                preferences[PreferencesKeys.BLOCKED_APPS_UPDATED_AT] = System.currentTimeMillis()
+            } else if (markLocalChange) {
+                preferences[PreferencesKeys.BLOCKED_APPS_UPDATED_AT] = System.currentTimeMillis()
+            }
+            written = merged.items
         }
         if (committed) {
-            _blockedApps.value = apps
+            _blockedApps.value = written ?: apps
             blockedAppsLoaded.value = true
         }
     }
@@ -396,18 +562,32 @@ class SettingsRepository(private val context: Context) {
         // so a sync can't wipe a permanent block. Unmatched entries stay non-permanent.
         // The local list is read INSIDE the edit transform so the merge basis is atomic
         // with the write (race fix, item 6). Mirror cache updates after the commit.
+        // Strict Mode freeze (defense-in-depth): while lockdown is active, the remote list
+        // may add blocks/refresh metadata but can never unblock or drop a local block; the
+        // lockdown flag is read from the same edit snapshot (never the cached flow).
         var merged: List<BlockedApp>? = null
         editSettings { preferences ->
-            val localPermanentByPkg = decodeBlockedApps(preferences[PreferencesKeys.BLOCKED_APPS_JSON])
-                .associateBy { it.packageName }
-            val mergedList = apps.map { remote ->
-                val local = localPermanentByPkg[remote.packageName]
-                if (local != null) remote.copy(isPermanent = local.isPermanent)
-                else remote.copy(isPermanent = false)
+            val local = decodeBlockedApps(preferences[PreferencesKeys.BLOCKED_APPS_JSON])
+            val result = if (isLockdownActiveIn(preferences)) {
+                mergePreservingBlockedApps(local, apps)
+            } else {
+                val localPermanentByPkg = local.associateBy { it.packageName }
+                BlockMergeResult(
+                    apps.map { remote ->
+                        val localEntry = localPermanentByPkg[remote.packageName]
+                        if (localEntry != null) remote.copy(isPermanent = localEntry.isPermanent)
+                        else remote.copy(isPermanent = false)
+                    },
+                    forcedLocalBlock = false,
+                )
             }
-            preferences[PreferencesKeys.BLOCKED_APPS_JSON] = json.encodeToString(mergedList)
-            preferences[PreferencesKeys.BLOCKED_APPS_UPDATED_AT] = updatedAt
-            merged = mergedList
+            preferences[PreferencesKeys.BLOCKED_APPS_JSON] = json.encodeToString(result.items)
+            // A preserved local block means the local list is stricter than the incoming
+            // timestamp claims: re-stamp to now so the next LWW round pushes the corrected
+            // list instead of letting the remote unblock flap back.
+            preferences[PreferencesKeys.BLOCKED_APPS_UPDATED_AT] =
+                if (result.forcedLocalBlock) maxOf(updatedAt, System.currentTimeMillis()) else updatedAt
+            merged = result.items
         }
         merged?.let {
             _blockedApps.value = it
@@ -416,6 +596,7 @@ class SettingsRepository(private val context: Context) {
     }
 
     suspend fun setAppBlocked(packageName: String, blocked: Boolean) {
+        if (!blocked && isUnblockRefusedByStrictMode()) return
         editAppsAtomically { current ->
             val index = current.indexOfFirst { it.packageName == packageName }
             if (index != -1) {
@@ -428,6 +609,7 @@ class SettingsRepository(private val context: Context) {
     }
 
     suspend fun setAppBlockedFull(packageName: String, appName: String, category: String, blocked: Boolean) {
+        if (!blocked && isUnblockRefusedByStrictMode()) return
         editAppsAtomically { current ->
             val index = current.indexOfFirst { it.packageName == packageName }
             if (index != -1) {
@@ -449,9 +631,12 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setAppsBlockedFullBatch(updates: List<AppBlockUpdate>) {
         if (updates.isEmpty()) return
+        // Strict Mode freeze (defense-in-depth): drop unblock entries, keep all block entries.
+        val allowed = if (isUnblockRefusedByStrictMode()) updates.filter { it.isBlocked } else updates
+        if (allowed.isEmpty()) return
         editAppsAtomically { current ->
             val indexByPkg = current.mapIndexed { i, app -> app.packageName to i }.toMap().toMutableMap()
-            for (u in updates) {
+            for (u in allowed) {
                 val index = indexByPkg[u.packageName]
                 if (index != null) {
                     current[index] = current[index].copy(
@@ -476,17 +661,20 @@ class SettingsRepository(private val context: Context) {
     /** Single JSON rewrite for bulk blocked-flag flips when metadata is already stored. */
     suspend fun setAppsBlockedBatch(states: Map<String, Boolean>) {
         if (states.isEmpty()) return
+        // Strict Mode freeze (defense-in-depth): false = unblock and is dropped; true passes.
+        val allowedStates = if (isUnblockRefusedByStrictMode()) states.filterValues { it } else states
+        if (allowedStates.isEmpty()) return
         editAppsAtomically { current ->
             var changed = false
             for (i in current.indices) {
-                val next = states[current[i].packageName]
+                val next = allowedStates[current[i].packageName]
                 if (next != null && current[i].isBlocked != next) {
                     current[i] = current[i].copy(isBlocked = next)
                     changed = true
                 }
             }
             // Add unknown packages as blocked entries so bulk-block never silently drops.
-            for ((pkg, blocked) in states) {
+            for ((pkg, blocked) in allowedStates) {
                 if (current.none { it.packageName == pkg }) {
                     current.add(BlockedApp(packageName = pkg, appName = pkg, isBlocked = blocked))
                     changed = true
@@ -499,11 +687,14 @@ class SettingsRepository(private val context: Context) {
     /** Single JSON rewrite for bulk website block/unblock presets. */
     suspend fun setWebsitesBlockedBatch(states: Map<String, Boolean>) {
         if (states.isEmpty()) return
+        // Strict Mode freeze (defense-in-depth): false = unblock and is dropped; true passes.
+        val allowedStates = if (isUnblockRefusedByStrictMode()) states.filterValues { it } else states
+        if (allowedStates.isEmpty()) return
         editWebsitesAtomically { current ->
             var changed = false
             for (i in current.indices) {
                 val key = current[i].domain.lowercase()
-                val next = states[key] ?: states[current[i].domain]
+                val next = allowedStates[key] ?: allowedStates[current[i].domain]
                 if (next != null && current[i].isBlocked != next) {
                     current[i] = current[i].copy(isBlocked = next)
                     changed = true
@@ -554,13 +745,36 @@ class SettingsRepository(private val context: Context) {
     suspend fun getBlockedWebsites(): List<BlockedWebsite> =
         if (blockedWebsitesLoaded.value) _blockedWebsites.value else blockedWebsitesFlow.first()
 
+    /**
+     * Whole-list writer (backup import path). Outside Strict Mode this replaces the list
+     * exactly as before. While Strict Mode is active the incoming list is merged inside the
+     * edit so it can add blocks/refresh metadata but never unblock or drop a local block
+     * (see [mergePreservingBlockedWebsites]); a merge that forced a local block to stay also
+     * re-stamps [PreferencesKeys.BLOCKED_WEBSITES_UPDATED_AT] so the next LWW round keeps it.
+     */
     suspend fun updateBlockedWebsites(websites: List<BlockedWebsite>, markLocalChange: Boolean = true) {
+        var written: List<BlockedWebsite>? = null
         val committed = editSettings { preferences ->
-            preferences[PreferencesKeys.BLOCKED_WEBSITES_JSON] = json.encodeToString(websites)
-            if (markLocalChange) preferences[PreferencesKeys.BLOCKED_WEBSITES_UPDATED_AT] = System.currentTimeMillis()
+            val merged = if (isLockdownActiveIn(preferences)) {
+                mergePreservingBlockedWebsites(
+                    decodeBlockedWebsites(preferences[PreferencesKeys.BLOCKED_WEBSITES_JSON]),
+                    websites,
+                )
+            } else {
+                BlockMergeResult(websites, forcedLocalBlock = false)
+            }
+            preferences[PreferencesKeys.BLOCKED_WEBSITES_JSON] = json.encodeToString(merged.items)
+            if (merged.forcedLocalBlock) {
+                // Stricter local state survived: stamp now so it outranks the incoming list
+                // on the next sync instead of flapping back to the weaker remote state.
+                preferences[PreferencesKeys.BLOCKED_WEBSITES_UPDATED_AT] = System.currentTimeMillis()
+            } else if (markLocalChange) {
+                preferences[PreferencesKeys.BLOCKED_WEBSITES_UPDATED_AT] = System.currentTimeMillis()
+            }
+            written = merged.items
         }
         if (committed) {
-            _blockedWebsites.value = websites
+            _blockedWebsites.value = written ?: websites
             blockedWebsitesLoaded.value = true
         }
     }
@@ -572,18 +786,32 @@ class SettingsRepository(private val context: Context) {
         // Remote clients never send isPermanent; keep the local flag for matching domains
         // so a sync can't wipe a permanent block. Unmatched entries stay non-permanent.
         // The local list is read INSIDE the edit transform (atomic merge basis, item 6).
+        // Strict Mode freeze (defense-in-depth): while lockdown is active, the remote list
+        // may add blocks/refresh metadata but can never unblock or drop a local block; the
+        // lockdown flag is read from the same edit snapshot (never the cached flow).
         var merged: List<BlockedWebsite>? = null
         editSettings { preferences ->
-            val localPermanentByDomain = decodeBlockedWebsites(preferences[PreferencesKeys.BLOCKED_WEBSITES_JSON])
-                .associateBy { it.domain.lowercase() }
-            val mergedList = websites.map { remote ->
-                val local = localPermanentByDomain[remote.domain.lowercase()]
-                if (local != null) remote.copy(isPermanent = local.isPermanent)
-                else remote.copy(isPermanent = false)
+            val local = decodeBlockedWebsites(preferences[PreferencesKeys.BLOCKED_WEBSITES_JSON])
+            val result = if (isLockdownActiveIn(preferences)) {
+                mergePreservingBlockedWebsites(local, websites)
+            } else {
+                val localPermanentByDomain = local.associateBy { it.domain.lowercase() }
+                BlockMergeResult(
+                    websites.map { remote ->
+                        val localEntry = localPermanentByDomain[remote.domain.lowercase()]
+                        if (localEntry != null) remote.copy(isPermanent = localEntry.isPermanent)
+                        else remote.copy(isPermanent = false)
+                    },
+                    forcedLocalBlock = false,
+                )
             }
-            preferences[PreferencesKeys.BLOCKED_WEBSITES_JSON] = json.encodeToString(mergedList)
-            preferences[PreferencesKeys.BLOCKED_WEBSITES_UPDATED_AT] = updatedAt
-            merged = mergedList
+            preferences[PreferencesKeys.BLOCKED_WEBSITES_JSON] = json.encodeToString(result.items)
+            // A preserved local block means the local list is stricter than the incoming
+            // timestamp claims: re-stamp to now so the next LWW round pushes the corrected
+            // list instead of letting the remote unblock flap back.
+            preferences[PreferencesKeys.BLOCKED_WEBSITES_UPDATED_AT] =
+                if (result.forcedLocalBlock) maxOf(updatedAt, System.currentTimeMillis()) else updatedAt
+            merged = result.items
         }
         merged?.let {
             _blockedWebsites.value = it
@@ -592,6 +820,7 @@ class SettingsRepository(private val context: Context) {
     }
 
     suspend fun setWebsiteBlocked(domain: String, blocked: Boolean) {
+        if (!blocked && isUnblockRefusedByStrictMode()) return
         editWebsitesAtomically { current ->
             val index = current.indexOfFirst { it.domain.equals(domain, ignoreCase = true) }
             if (index != -1) {
@@ -620,7 +849,12 @@ class SettingsRepository(private val context: Context) {
         return committed != null && added
     }
 
+    /**
+     * Deletes a custom website entirely. Removing a custom site is an unblock path, so
+     * Strict Mode freezes it (defense-in-depth; the UI refuses it too).
+     */
     suspend fun removeCustomWebsite(domain: String) {
+        if (isUnblockRefusedByStrictMode()) return
         editWebsitesAtomically { current ->
             var changed = false
             val kept = current.filterNot { it.domain.equals(domain, ignoreCase = true) && it.isCustom }
@@ -759,6 +993,14 @@ class SettingsRepository(private val context: Context) {
         }
     }
 
+    /** Persists the Focus-tab home variation key (see FocusHomeStyle.key). */
+    suspend fun setFocusHomeStyle(style: String) {
+        editSettings { preferences ->
+            preferences[PreferencesKeys.FOCUS_HOME_STYLE] =
+                style.ifBlank { DEFAULT_FOCUS_HOME_STYLE }
+        }
+    }
+
     // TickTick OAuth Operations
     suspend fun beginTickTickLogin(): String {
         val state = java.util.UUID.randomUUID().toString()
@@ -865,6 +1107,13 @@ class SettingsRepository(private val context: Context) {
     suspend fun setDailyReminderMinuteOfDay(minuteOfDay: Int) {
         editSettings { preferences ->
             preferences[PreferencesKeys.DAILY_REMINDER_MINUTE_OF_DAY] = minuteOfDay.coerceIn(0, 1439)
+        }
+    }
+
+    /** Persists the sign-in screen's "Continue in Offline Mode" choice across cold starts. */
+    suspend fun setOfflineMode(enabled: Boolean) {
+        editSettings { preferences ->
+            preferences[PreferencesKeys.OFFLINE_MODE] = enabled
         }
     }
 
@@ -1042,6 +1291,9 @@ class SettingsRepository(private val context: Context) {
         const val MAX_FOCUS_GOAL_MINUTES = 720
         const val MIN_DAILY_TASKS_GOAL = 1
         const val MAX_DAILY_TASKS_GOAL = 50
+
+        /** Default Focus-tab home variation key (see FocusHomeStyle.RINGS). */
+        const val DEFAULT_FOCUS_HOME_STYLE = "rings"
 
         /** Default daily reminder time: 09:00 local. */
         const val DEFAULT_DAILY_REMINDER_MINUTE_OF_DAY = 9 * 60

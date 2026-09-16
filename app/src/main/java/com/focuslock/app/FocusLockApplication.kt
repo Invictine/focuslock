@@ -9,6 +9,7 @@ import com.focuslock.app.data.repository.AppLimitsRepository
 import com.focuslock.app.data.repository.BlockLogRepository
 import com.focuslock.app.data.repository.BlockSchedulesRepository
 import com.focuslock.app.data.repository.CreditBankRepository
+import com.focuslock.app.data.repository.FrogRepository
 import com.focuslock.app.data.repository.SettingsRepository
 import com.focuslock.app.sync.FocusSyncManager
 import com.focuslock.app.work.DailyReminderScheduler
@@ -35,6 +36,9 @@ class FocusLockApplication : Application() {
     lateinit var blockLogRepository: BlockLogRepository
         private set
 
+    lateinit var frogRepository: FrogRepository
+        private set
+
     lateinit var syncManager: FocusSyncManager
         private set
 
@@ -49,6 +53,7 @@ class FocusLockApplication : Application() {
         appLimitsRepository = AppLimitsRepository(applicationContext)
         blockSchedulesRepository = BlockSchedulesRepository(applicationContext)
         blockLogRepository = BlockLogRepository(applicationContext)
+        frogRepository = FrogRepository(applicationContext)
         syncManager = FocusSyncManager(applicationContext, creditBankRepository, settingsRepository)
 
         // Clerk auth (optional until configured). Key comes from BuildConfig via

@@ -94,8 +94,13 @@ class ConfigBackupManager(
             )
         }
 
-        // Boundaries: replace wholesale.
-        val apps = payload.blockedApps.filter { it.packageName.isNotBlank() }
+        // Boundaries: replace wholesale. Dedupe by key first: the pickers key their
+        // LazyColumn on packageName/domain, and cleanDomain collapses hosts such as
+        // "m.youtube.com" into "youtube.com", which used to produce duplicate keys
+        // (and a hard crash) after round-tripping an exported file.
+        val apps = payload.blockedApps
+            .filter { it.packageName.isNotBlank() }
+            .distinctBy { it.packageName }
         settingsRepository.updateBlockedApps(apps)
 
         val websites = payload.blockedWebsites
@@ -104,6 +109,7 @@ class ConfigBackupManager(
                 val cleaned = SettingsRepository.cleanDomain(site.domain)
                 if (cleaned.isBlank()) site else site.copy(domain = cleaned)
             }
+            .distinctBy { it.domain.lowercase() }
         settingsRepository.updateBlockedWebsites(websites)
 
         // App limits: replace, dropping local limits that are absent from the backup.

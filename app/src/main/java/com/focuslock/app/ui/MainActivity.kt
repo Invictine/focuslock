@@ -18,6 +18,12 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.activity.viewModels
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -25,13 +31,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Computer
-import androidx.compose.material.icons.filled.Language
-import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Person
+import androidx.compose.material.icons.rounded.PhoneAndroid
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -44,6 +50,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -61,6 +68,7 @@ import com.focuslock.app.sync.DeviceInfo
 import com.focuslock.app.sync.SyncStatus
 import com.focuslock.app.sync.UsageSummary
 import com.focuslock.app.ui.apps.BoundariesScreen
+import com.focuslock.app.ui.components.SectionHeader
 import com.focuslock.app.ui.dashboard.DashboardScreen
 import com.focuslock.app.ui.debug.DebugDataScreen
 import com.focuslock.app.ui.permissions.PermissionHelper
@@ -118,8 +126,17 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge(
-            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
-            navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+            // auto() lets the system pick bar-icon appearance from the active light/dark
+            // mode; the previous forced SystemBarStyle.dark() drew white (light) status
+            // icons on the light app background, making the clock/battery unreadable.
+            statusBarStyle = SystemBarStyle.auto(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT
+            ),
+            navigationBarStyle = SystemBarStyle.auto(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT
+            )
         )
 
         // Start protection only once the core permissions exist. POST_NOTIFICATIONS is
@@ -130,14 +147,23 @@ class MainActivity : ComponentActivity() {
             FocusLockTheme {
                 val authViewModel: AuthViewModel by viewModels()
                 val authState by authViewModel.state.collectAsStateWithLifecycle()
-                var offlineMode by rememberSaveable { mutableStateOf(false) }
 
-                // Auto-sync lifecycle: start when signed in, stop otherwise. Leave offline
-                // mode as soon as auth resolves/signs in so a sign-out shows the gate again.
                 val app = application as FocusLockApplication
+                // Offline mode is a persisted preference chosen on the auth gate; the
+                // nullable override only carries the in-session flip until DataStore emits.
+                val persistedOfflineMode by app.settingsRepository.offlineModeFlow
+                    .collectAsStateWithLifecycle(initialValue = false)
+                var offlineOverride by rememberSaveable { mutableStateOf<Boolean?>(null) }
+                val offlineMode = offlineOverride ?: persistedOfflineMode
+
+                // Auto-sync lifecycle: start when signed in, stop otherwise. Signing in
+                // clears the persisted offline choice so a later sign-out shows the gate;
+                // Loading/SignedOut never clear it (doing so resurrected the gate on every
+                // cold start of an offline user).
                 LaunchedEffect(authState) {
-                    if (authState != FocusAuthState.SignedOut) offlineMode = false
                     if (authState == FocusAuthState.SignedIn) {
+                        offlineOverride = false
+                        app.settingsRepository.setOfflineMode(false)
                         app.syncManager.startAutoSync(authViewModel)
                         app.syncManager.syncNowAsync(authViewModel)
                     } else {
@@ -185,7 +211,13 @@ class MainActivity : ComponentActivity() {
                 }
 
                 if (authState == FocusAuthState.SignedOut && !offlineMode) {
-                    FocusAuthGate(state = authState, onContinueOffline = { offlineMode = true }) { }
+                    FocusAuthGate(
+                        state = authState,
+                        onContinueOffline = {
+                            offlineOverride = true
+                            lifecycleScope.launch { app.settingsRepository.setOfflineMode(true) }
+                        }
+                    ) { }
                 } else {
                     var currentTab by rememberSaveable { mutableStateOf(NavigationItem.DASHBOARD) }
                     var showDebug by rememberSaveable { mutableStateOf(false) }
@@ -213,7 +245,10 @@ class MainActivity : ComponentActivity() {
                                 title = {
                                     Text(
                                         text = if (showDebug) "Debug data" else currentTab.title,
-                                        fontWeight = FontWeight.SemiBold
+                                        style = MaterialTheme.typography.titleLarge.copy(
+                                            fontWeight = FontWeight.SemiBold,
+                                            letterSpacing = (-0.2).sp
+                                        )
                                     )
                                 },
                                 navigationIcon = {
@@ -285,7 +320,23 @@ class MainActivity : ComponentActivity() {
                         if (showDebug) {
                             DebugDataScreen(onBack = { showDebug = false })
                         } else {
-                        when (currentTab) {
+                        // Bottom-nav tabs crossfade with a subtle slide; the tab enum,
+                        // back handling, and screen wiring below are unchanged.
+                        AnimatedContent(
+                            targetState = currentTab,
+                            transitionSpec = {
+                                (fadeIn(
+                                    animationSpec = spring(dampingRatio = 1f, stiffness = 1600f)
+                                ) + slideInVertically(
+                                    animationSpec = spring(dampingRatio = 0.8f, stiffness = 380f),
+                                    initialOffsetY = { it / 12 }
+                                )) togetherWith fadeOut(
+                                    animationSpec = spring(dampingRatio = 1f, stiffness = 1600f)
+                                )
+                            },
+                            label = "bottomNavTabs"
+                        ) { tab ->
+                        when (tab) {
                             NavigationItem.DASHBOARD -> DashboardScreen(
                                 onOpenTickTick = { openTickTick() },
                                 onNavigatePermissions = { currentTab = NavigationItem.SETTINGS },
@@ -304,12 +355,14 @@ class MainActivity : ComponentActivity() {
                                 syncStatusFlow = app.syncManager.status,
                                 onSyncNow = { app.syncManager.syncNowAsync(authViewModel) },
                                 onSignOut = {
-                                    offlineMode = false
+                                    offlineOverride = false
+                                    lifecycleScope.launch { app.settingsRepository.setOfflineMode(false) }
                                     authViewModel.signOut()
                                 },
                                 authViewModel = authViewModel,
                             )
                         }
+                        } // AnimatedContent
                         }
                         }
                     }
@@ -478,11 +531,7 @@ class MainActivity : ComponentActivity() {
         modifier: Modifier = Modifier
     ) {
         Column(modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text(
-                "Devices",
-                style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                color = MaterialTheme.colorScheme.onSurface
-            )
+            SectionHeader(title = "Devices")
             when (state) {
                 is CrossDeviceState.Loading -> Box(
                     Modifier
@@ -688,7 +737,7 @@ class MainActivity : ComponentActivity() {
                     if (isThisDevice) {
                         Surface(
                             color = MaterialTheme.colorScheme.secondaryContainer,
-                            shape = RoundedCornerShape(50)
+                            shape = RoundedCornerShape(10.dp)
                         ) {
                             Text(
                                 "This device",
@@ -710,7 +759,7 @@ class MainActivity : ComponentActivity() {
                 "active" -> MaterialTheme.colorScheme.primary to "Tracking"
                 "paused" -> MaterialTheme.colorScheme.tertiary to "Paused"
                 "permission_required" -> MaterialTheme.colorScheme.error to "Permission"
-                else -> MaterialTheme.colorScheme.outline to "Error"
+                else -> MaterialTheme.colorScheme.error to "Error"
             }
             Text(
                 statusLabel,
@@ -728,9 +777,9 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun platformIcon(platform: String?): ImageVector = when (platform?.lowercase()) {
-        "windows" -> Icons.Filled.Computer
-        "browser" -> Icons.Filled.Language
-        else -> Icons.Filled.PhoneAndroid
+        "windows" -> Icons.Rounded.Computer
+        "browser" -> Icons.Rounded.Language
+        else -> Icons.Rounded.PhoneAndroid
     }
 
     private fun formatDuration(seconds: Long): String {

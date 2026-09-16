@@ -1,5 +1,6 @@
 package com.focuslock.app.ui.permissions
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -19,15 +20,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Accessibility
-import androidx.compose.material.icons.filled.Analytics
-import androidx.compose.material.icons.filled.BatteryChargingFull
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Layers
-import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -37,8 +30,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -56,6 +51,8 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import com.focuslock.app.ui.components.IconBadge
+import com.focuslock.app.ui.components.StaggeredFadeSlide
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -75,7 +72,7 @@ fun permissionCopy(kind: PermissionKind): PermissionCopy = when (kind) {
             "2. Find FocusLock and turn it ON",
             "3. Confirm with Allow when asked"
         ),
-        icon = Icons.Filled.Accessibility
+        icon = Icons.Rounded.Accessibility
     )
     PermissionKind.USAGE -> PermissionCopy(
         title = "Usage access",
@@ -85,7 +82,7 @@ fun permissionCopy(kind: PermissionKind): PermissionCopy = when (kind) {
             "2. Open Usage access / Screen time permission",
             "3. Allow access for FocusLock"
         ),
-        icon = Icons.Filled.Analytics
+        icon = Icons.Rounded.Analytics
     )
     PermissionKind.OVERLAY -> PermissionCopy(
         title = "Display over other apps",
@@ -95,7 +92,7 @@ fun permissionCopy(kind: PermissionKind): PermissionCopy = when (kind) {
             "2. Turn ON Allow display over other apps",
             "3. Go back to FocusLock"
         ),
-        icon = Icons.Filled.Layers
+        icon = Icons.Rounded.Layers
     )
     PermissionKind.NOTIFICATION_LISTENER -> PermissionCopy(
         title = "Notification access",
@@ -105,7 +102,7 @@ fun permissionCopy(kind: PermissionKind): PermissionCopy = when (kind) {
             "2. Find FocusLock and turn it ON",
             "3. Confirm with Allow when asked"
         ),
-        icon = Icons.Filled.Notifications
+        icon = Icons.Rounded.Notifications
     )
     PermissionKind.BATTERY -> PermissionCopy(
         title = "Ignore battery optimizations",
@@ -115,7 +112,7 @@ fun permissionCopy(kind: PermissionKind): PermissionCopy = when (kind) {
             "2. Choose Allow / Don't optimize",
             "3. Go back to FocusLock"
         ),
-        icon = Icons.Filled.BatteryChargingFull
+        icon = Icons.Rounded.BatteryChargingFull
     )
     PermissionKind.DEVICE_ADMIN -> PermissionCopy(
         title = "Prevent uninstall",
@@ -125,7 +122,7 @@ fun permissionCopy(kind: PermissionKind): PermissionCopy = when (kind) {
             "2. Tap Activate this device admin app",
             "3. To remove later: Settings > Disable admin, then uninstall"
         ),
-        icon = Icons.Filled.Security
+        icon = Icons.Rounded.Security
     )
     PermissionKind.POST_NOTIFICATIONS -> PermissionCopy(
         title = "App notifications",
@@ -135,7 +132,7 @@ fun permissionCopy(kind: PermissionKind): PermissionCopy = when (kind) {
             "2. Turn ON notifications for FocusLock",
             "3. Go back to FocusLock"
         ),
-        icon = Icons.Filled.Warning
+        icon = Icons.Rounded.Warning
     )
 }
 
@@ -192,6 +189,11 @@ fun PermissionOnboardingDialog(
 
     val isLast = safeIndex >= missing.size - 1
 
+    // One-shot subtle enter for the card content (no delay, single fade+slide) that
+    // never fights the dialog window animation and never replays when the step changes.
+    var entered by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { entered = true }
+
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -221,26 +223,19 @@ fun PermissionOnboardingDialog(
                         onClick = {}
                     )
             ) {
-                Column(
-                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally
-                ) {
+                StaggeredFadeSlide(visible = entered, index = 0) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
                     // ---- Centered header: icon badge, title, progress, status pill ----
 
-                    Surface(
-                        shape = CircleShape,
-                        color = MaterialTheme.colorScheme.secondaryContainer,
-                        modifier = Modifier.size(48.dp)
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = copy.icon,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                                modifier = Modifier.size(24.dp)
-                            )
-                        }
-                    }
+                    IconBadge(
+                        icon = copy.icon,
+                        size = 48.dp,
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
                         text = "Step ${safeIndex + 1} of ${missing.size}: ${copy.title}",
@@ -266,7 +261,7 @@ fun PermissionOnboardingDialog(
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
                         text = copy.why,
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         textAlign = TextAlign.Start,
                         modifier = Modifier.fillMaxWidth()
@@ -318,6 +313,7 @@ fun PermissionOnboardingDialog(
                             modifier = Modifier.weight(1f)
                         ) { Text("Skip all") }
                     }
+                    }
                 }
             }
         }
@@ -327,7 +323,7 @@ fun PermissionOnboardingDialog(
 /** Matches a leading "1. " / "1) " enumerator so the step row can show the number in a badge. */
 private val STEP_NUMBER_PREFIX = Regex("^\\s*\\d+[.)]\\s*")
 
-/** One numbered how-to step: tonal number badge + short left-aligned instruction. */
+/** One numbered how-to step: tonal squircle number badge + short left-aligned instruction. */
 @Composable
 private fun StepRow(number: Int, text: String) {
     Row(
@@ -336,18 +332,18 @@ private fun StepRow(number: Int, text: String) {
             .heightIn(min = 48.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Surface(
-            shape = CircleShape,
-            color = MaterialTheme.colorScheme.secondaryContainer,
-            modifier = Modifier.size(28.dp)
+        Box(
+            modifier = Modifier
+                .size(28.dp)
+                .clip(RoundedCornerShape(9.dp))
+                .background(MaterialTheme.colorScheme.secondaryContainer),
+            contentAlignment = Alignment.Center
         ) {
-            Box(contentAlignment = Alignment.Center) {
-                Text(
-                    text = number.toString(),
-                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
-                    color = MaterialTheme.colorScheme.onSecondaryContainer
-                )
-            }
+            Text(
+                text = number.toString(),
+                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold),
+                color = MaterialTheme.colorScheme.onSecondaryContainer
+            )
         }
         Spacer(modifier = Modifier.width(12.dp))
         Text(
@@ -374,7 +370,7 @@ private fun StatusPill(granted: Boolean) {
             verticalAlignment = Alignment.CenterVertically
         ) {
             Icon(
-                imageVector = if (granted) Icons.Default.CheckCircle else Icons.Default.Info,
+                imageVector = if (granted) Icons.Rounded.CheckCircle else Icons.Rounded.Info,
                 contentDescription = null,
                 tint = if (granted) {
                     MaterialTheme.colorScheme.onTertiaryContainer

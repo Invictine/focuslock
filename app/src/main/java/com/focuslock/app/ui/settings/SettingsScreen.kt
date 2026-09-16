@@ -61,7 +61,9 @@ import com.focuslock.app.FocusLockApplication
 import com.focuslock.app.auth.AuthViewModel
 import com.focuslock.app.data.backup.ConfigBackupManager
 import com.focuslock.app.data.repository.BlockSchedule
+import com.focuslock.app.data.repository.FrogRepository
 import com.focuslock.app.data.repository.SettingsRepository
+import com.focuslock.app.ui.dashboard.home.FocusHomeStyle
 import com.focuslock.app.service.TickTickApiClient
 import com.focuslock.app.service.TickTickAuthConfig
 import com.focuslock.app.service.TickTickOAuthLoopbackServer
@@ -96,6 +98,10 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
     val tickTickClientSecret by settings.tickTickClientSecretFlow.collectAsStateWithLifecycle(initialValue = "")
     val notificationEnabled by settings.tickTickNotificationEnabledFlow.collectAsStateWithLifecycle(initialValue = true)
     val boundariesLock by settings.boundariesLockFlow.collectAsStateWithLifecycle(initialValue = false)
+    val focusHomeStyleKey by settings.focusHomeStyleFlow.collectAsStateWithLifecycle(
+        initialValue = SettingsRepository.DEFAULT_FOCUS_HOME_STYLE
+    )
+    var showHomeStyleDialog by remember { mutableStateOf(false) }
 
     var showOAuthCredentialsDialog by remember { mutableStateOf(false) }
     var showTokenField by remember { mutableStateOf(false) }
@@ -454,6 +460,75 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
 
         // 2. Daily Goals Card — collects its own flows and draft state inside.
         DailyGoalsCard()
+
+        // 2b. Appearance Card — Focus home style switcher (which front page the
+        // Focus tab shows). Owns only the dialog flag; the current key is collected above.
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceContainer
+            ),
+            shape = MaterialTheme.shapes.large,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            Icons.Default.Tune,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(
+                        text = "Appearance",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                }
+
+                val currentStyle = FocusHomeStyle.entries.firstOrNull { it.key == focusHomeStyleKey }
+                    ?: FocusHomeStyle.RINGS
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(onClick = { showHomeStyleDialog = true })
+                        .padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Focus home style",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "${currentStyle.title} — ${currentStyle.blurb}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Text(
+                        text = "›",
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        // 2c. Eat the Frog Card — hard-lock toggle, required focus minutes, wake hour.
+        FrogSettingsCard()
 
         // 3. Block Schedules Card — owns its flow, editor state and dialogs.
         BlockSchedulesCard()
@@ -884,8 +959,60 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
         )
     }
 
-    if (showOAuthCredentialsDialog) {
+    if (showHomeStyleDialog) {
         AlertDialog(
+            onDismissRequest = { showHomeStyleDialog = false },
+            title = {
+                Text(
+                    "Focus home style",
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    FocusHomeStyle.entries.forEach { style ->
+                        val selected = style.key == focusHomeStyleKey
+                        fun pick() {
+                            scope.launch { settings.setFocusHomeStyle(style.key) }
+                            showHomeStyleDialog = false
+                        }
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .clickable(onClick = ::pick)
+                                .padding(horizontal = 4.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = selected,
+                                onClick = ::pick
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = style.title,
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = style.blurb,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showHomeStyleDialog = false }) { Text("Done") }
+            },
+            shape = MaterialTheme.shapes.large
+        )
+    }
+
+    if (showOAuthCredentialsDialog) {        AlertDialog(
             onDismissRequest = { showOAuthCredentialsDialog = false },
             title = {
                 Text(
@@ -2032,5 +2159,142 @@ private fun DailyReminderCard() {
                 }
             }
         )
+    }
+}
+
+/** "Eat the Frog" hard-lock settings: toggle, required focus minutes and wake hour. */
+@Composable
+private fun FrogSettingsCard() {
+    val frog = FocusLockApplication.instance.frogRepository
+    val scope = rememberCoroutineScope()
+    val enabled by frog.enabledFlow.collectAsStateWithLifecycle(initialValue = FrogRepository.DEFAULT_ENABLED)
+    val requiredMinutes by frog.requiredMinutesFlow.collectAsStateWithLifecycle(
+        initialValue = FrogRepository.DEFAULT_REQUIRED_MINUTES
+    )
+    val wakeHour by frog.wakeHourFlow.collectAsStateWithLifecycle(initialValue = FrogRepository.DEFAULT_WAKE_HOUR)
+    var editMinutes by remember(requiredMinutes) { mutableStateOf(requiredMinutes.toString()) }
+    var editWakeHour by remember(wakeHour) { mutableStateOf(wakeHour.toString()) }
+
+    fun commitMinutes() {
+        val parsed = editMinutes.toIntOrNull()
+        val value = (parsed ?: requiredMinutes)
+            .coerceIn(FrogRepository.MIN_REQUIRED_MINUTES, FrogRepository.MAX_REQUIRED_MINUTES)
+        editMinutes = value.toString()
+        scope.launch { frog.setRequiredMinutes(value) }
+    }
+
+    fun commitWakeHour() {
+        val parsed = editWakeHour.toIntOrNull()
+        val value = (parsed ?: wakeHour)
+            .coerceIn(FrogRepository.MIN_WAKE_HOUR, FrogRepository.MAX_WAKE_HOUR)
+        editWakeHour = value.toString()
+        scope.launch { frog.setWakeHour(value) }
+    }
+
+    val wakeLabel = wakeHour.coerceIn(0, 23).toString().padStart(2, '0') + ":00"
+
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer
+        ),
+        shape = MaterialTheme.shapes.large,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(
+            modifier = Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.Default.Lock,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Eat the Frog",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "Hard-lock boundary apps until today's frog is done.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = enabled,
+                    onCheckedChange = { checked ->
+                        scope.launch { frog.setEnabled(checked) }
+                    }
+                )
+            }
+
+            if (enabled) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceContainerHighest)
+
+                OutlinedTextField(
+                    value = editMinutes,
+                    onValueChange = { input -> editMinutes = input.filter { it.isDigit() }.take(3) },
+                    label = { Text("Focus minutes required") },
+                    supportingText = { Text("Tracked focus on the selected frog (1–480)") },
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { commitMinutes() }),
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onFocusChanged { if (!it.isFocused) commitMinutes() }
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Wake hour",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "24-hour clock (5 = 05:00). The lock arms on the first unlock at/after it.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    OutlinedTextField(
+                        value = editWakeHour,
+                        onValueChange = { input -> editWakeHour = input.filter { it.isDigit() }.take(2) },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = { commitWakeHour() }),
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier
+                            .width(96.dp)
+                            .onFocusChanged { if (!it.isFocused) commitWakeHour() }
+                    )
+                }
+
+                Text(
+                    text = "On the first unlock after $wakeLabel, every boundary app locks " +
+                        "until today's frog is ticked off and $requiredMinutes minutes of focus " +
+                        "are tracked. Progress resets at the next $wakeLabel.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
     }
 }

@@ -9,6 +9,7 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.focuslock.app.FocusLockApplication
 import com.focuslock.app.data.model.TickTickWorkRecord
 import com.focuslock.app.data.model.UserStats
 import com.focuslock.app.data.model.WorkRecordSource
@@ -154,6 +155,10 @@ class CreditBankRepository(private val context: Context) {
                 }
                 balanceLoaded = true
                 _workHistory.value = decodeHistory(prefs[Keys.WORK_HISTORY_JSON])
+                // DataStore.data never completes, so onCompletion below never fires:
+                // latch on the FIRST emission instead, or workHistoryFlow collectors
+                // (focus hero, sessions) would wait forever on a fresh install.
+                historyLoaded.complete(Unit)
             }
             .onCompletion { historyLoaded.complete(Unit) }
             .catch { e -> android.util.Log.w("CreditBank", "history collector failed", e) }
@@ -436,6 +441,19 @@ class CreditBankRepository(private val context: Context) {
             if (!committed) credited = false
         }
 
+        // Best-effort "eat the frog" progress: a focus record also advances the day's
+        // frog, but ONLY when this call actually committed the credit (deduped/retried
+        // records must never add frog minutes without banking credit). Runs OUTSIDE
+        // stateMutex so frog DataStore I/O can never slow the credit path;
+        // FrogRepository.addTrackedSeconds itself no-ops unless the frog is armed and
+        // not yet complete. Never fails this call.
+        if (credited && isFocusRecord(record.source, record.durationMinutes) && record.durationMinutes > 0) {
+            try {
+                FocusLockApplication.instance?.frogRepository?.addTrackedSeconds(record.durationMinutes * 60)
+            } catch (_: Throwable) {
+            }
+        }
+
         return if (credited) totalEarnedMinutes else 0
     }
 
@@ -454,8 +472,10 @@ class CreditBankRepository(private val context: Context) {
 
         var totalEarned = 0
         var newCount = 0
+        // Focus seconds of the committed batch, for the frog hook below (0 until then).
+        var frogSeconds = 0L
         // stateMutex (lost-update fix): same pairing with the sync decision as recordWorkCredit.
-        stateMutex.withLock {
+        val committed = stateMutex.withLock {
             checkAndResetDailyStats()
             editBankPrefs { prefs ->
                 val credited: MutableSet<String> = try {
@@ -482,6 +502,7 @@ class CreditBankRepository(private val context: Context) {
                 if (newRecords.isEmpty()) return@editBankPrefs
 
                 newCount = newRecords.size
+                frogSeconds = workSeconds
                 val newBalance = (prefs[Keys.CREDIT_BALANCE_SECONDS] ?: 0L) + earnedSeconds
                 prefs[Keys.CREDIT_BALANCE_SECONDS] = newBalance
                 prefs[Keys.STATE_UPDATED_AT] = System.currentTimeMillis()
@@ -496,6 +517,16 @@ class CreditBankRepository(private val context: Context) {
                 _liveBalanceSeconds.value = effectiveBalance(newBalance)
                 balanceLoaded = true
                 _workHistory.value = history
+            }
+        }
+        // Best-effort "eat the frog" progress, ONLY for a committed batch with new focus
+        // records: a deduped/retried batch must never advance the frog without banking
+        // credit. Runs OUTSIDE stateMutex; never fails this call.
+        if (committed && newCount > 0 && frogSeconds > 0L) {
+            try {
+                FocusLockApplication.instance?.frogRepository
+                    ?.addTrackedSeconds(frogSeconds.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+            } catch (_: Throwable) {
             }
         }
         return Pair(newCount, totalEarned)

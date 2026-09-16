@@ -30,6 +30,12 @@ struct StoredSession {
     access_token: String,
     refresh_token: String,
     expires_at_ms: u64,
+    // Clerk OIDC id_token (RS256 JWT) — the only token shape Convex's Clerk
+    // provider can verify; the access token is opaque ("oat_…").
+    #[serde(default)]
+    id_token: Option<String>,
+    #[serde(default)]
+    id_token_exp_ms: Option<u64>,
     profile: AuthProfile,
 }
 
@@ -44,6 +50,8 @@ pub struct AuthState {
 struct TokenResponse {
     access_token: String,
     refresh_token: Option<String>,
+    #[serde(default)]
+    id_token: Option<String>,
     expires_in: u64,
 }
 
@@ -59,6 +67,9 @@ pub struct BrowserAuthRuntime {
     path: PathBuf,
     session: Mutex<Option<StoredSession>>,
     flow_running: Mutex<bool>,
+    // Serializes refresh_token grants: Clerk refresh tokens are single-use and
+    // rotating — concurrent exchanges would revoke the whole token family.
+    refresh_lock: Mutex<()>,
 }
 
 impl BrowserAuthRuntime {
@@ -66,7 +77,12 @@ impl BrowserAuthRuntime {
         let session = fs::read_to_string(&path)
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok());
-        Self { path, session: Mutex::new(session), flow_running: Mutex::new(false) }
+        Self {
+            path,
+            session: Mutex::new(session),
+            flow_running: Mutex::new(false),
+            refresh_lock: Mutex::new(()),
+        }
     }
 
     fn save(&self, session: Option<StoredSession>) -> Result<(), String> {
@@ -120,20 +136,51 @@ fn fetch_profile(access_token: &str) -> Result<AuthProfile, String> {
     Ok(AuthProfile { name: info.name.unwrap_or_else(|| email.clone()), email, image_url: info.picture })
 }
 
-fn refresh_if_needed(runtime: &BrowserAuthRuntime) -> Result<Option<StoredSession>, String> {
-    let current = runtime.session.lock().map_err(|_| "Auth session lock failed".to_string())?.clone();
-    let Some(mut session) = current else { return Ok(None) };
-    if session.expires_at_ms > now_ms() + 60_000 {
-        return Ok(Some(session));
-    }
-    let response = exchange(&[
-        ("grant_type", "refresh_token"),
-        ("refresh_token", &session.refresh_token),
-        ("client_id", CLIENT_ID),
-    ])?;
+fn decode_jwt_exp(token: &str) -> Option<u64> {
+    let payload = token.split('.').nth(1)?;
+    let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    claims.get("exp").and_then(|value| value.as_u64())
+}
+
+fn apply_token_response(session: &mut StoredSession, response: TokenResponse) {
     session.access_token = response.access_token;
     if let Some(refresh_token) = response.refresh_token { session.refresh_token = refresh_token; }
     session.expires_at_ms = now_ms() + response.expires_in * 1000;
+    if let Some(id_token) = response.id_token {
+        session.id_token_exp_ms = decode_jwt_exp(&id_token);
+        session.id_token = Some(id_token);
+    }
+}
+
+fn refresh_if_needed(runtime: &BrowserAuthRuntime) -> Result<Option<StoredSession>, String> {
+    // Hold the refresh lock across the whole decision+exchange so concurrent
+    // callers never reuse an already-rotated refresh token.
+    let _guard = runtime.refresh_lock.lock().map_err(|_| "Auth refresh lock failed".to_string())?;
+    let current = runtime.session.lock().map_err(|_| "Auth session lock failed".to_string())?.clone();
+    let Some(mut session) = current else { return Ok(None) };
+    let now = now_ms();
+    let access_fresh = session.expires_at_ms > now + 60_000;
+    let id_fresh = session.id_token_exp_ms.map(|exp| exp > now + 60_000).unwrap_or(false);
+    if access_fresh && id_fresh { return Ok(Some(session)); }
+    let response = match exchange(&[
+        ("grant_type", "refresh_token"),
+        ("refresh_token", &session.refresh_token),
+        ("client_id", CLIENT_ID),
+    ]) {
+        Ok(response) => response,
+        Err(error) => {
+            // A permanently rejected grant (revoked/expired family) can never
+            // recover — drop the session so the app returns to the sign-in
+            // screen instead of hammering Clerk forever.
+            if error.contains("invalid_grant") {
+                runtime.save(None)?;
+                return Ok(None);
+            }
+            return Err(error);
+        }
+    };
+    apply_token_response(&mut session, response);
     runtime.save(Some(session.clone()))?;
     Ok(Some(session))
 }
@@ -146,7 +193,9 @@ pub async fn get_browser_auth_state(runtime: State<'_, BrowserAuthRuntime>) -> R
 
 #[tauri::command]
 pub async fn get_browser_auth_token(runtime: State<'_, BrowserAuthRuntime>) -> Result<Option<String>, String> {
-    Ok(refresh_if_needed(&runtime)?.map(|value| value.access_token))
+    // Convex's Clerk provider verifies RS256 JWTs; the opaque OAuth access
+    // token can never authenticate, so hand back the OIDC id_token.
+    Ok(refresh_if_needed(&runtime)?.and_then(|value| value.id_token))
 }
 
 #[tauri::command]
@@ -218,12 +267,19 @@ fn wait_for_callback(listener: TcpListener, redirect_uri: &str, verifier: &str, 
                         ("code_verifier", verifier),
                     ])?;
                     let profile = fetch_profile(&tokens.access_token)?;
-                    Ok(StoredSession {
+                    let mut session = StoredSession {
                         access_token: tokens.access_token,
                         refresh_token: tokens.refresh_token.ok_or("Clerk did not return a refresh token")?,
                         expires_at_ms: now_ms() + tokens.expires_in * 1000,
+                        id_token: None,
+                        id_token_exp_ms: None,
                         profile,
-                    })
+                    };
+                    if let Some(id_token) = tokens.id_token {
+                        session.id_token_exp_ms = decode_jwt_exp(&id_token);
+                        session.id_token = Some(id_token);
+                    }
+                    Ok(session)
                 };
                 let (status, body) = if response.is_ok() {
                     ("200 OK", "<h1>FocusLock is connected</h1><p>You can close this tab and return to the desktop app.</p>")

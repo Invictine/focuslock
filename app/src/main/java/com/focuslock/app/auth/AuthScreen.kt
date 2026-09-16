@@ -18,8 +18,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.*
-import androidx.compose.material.icons.outlined.*
+import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -33,12 +32,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.clerk.api.Clerk
 import com.clerk.api.auth.HostedAuthMode
 import com.clerk.api.network.serialization.onFailure
 import com.clerk.api.network.serialization.onSuccess
 import com.clerk.ui.auth.AuthView
 import com.clerk.ui.userbutton.UserButton
+import com.focuslock.app.ui.components.IconBadge
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -97,10 +98,11 @@ fun SignInScreen(onContinueOffline: () -> Unit) {
         if (showInAppAuth) {
             // Auth form mode: bounded full-height column so Clerk's AuthView keeps the
             // weight-based height it had before; the root still owns safe-drawing insets.
+            // Vertical breathing room stays minimal so content starts just under the bar.
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(horizontal = 24.dp, vertical = 16.dp),
+                    .padding(horizontal = 24.dp, vertical = 8.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 StaggeredEnter(visible = entered, index = 0) { HeroEmblem(compact = true) }
@@ -120,7 +122,7 @@ fun SignInScreen(onContinueOffline: () -> Unit) {
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Icon(
-                                Icons.Default.Warning,
+                                Icons.Rounded.Warning,
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.onErrorContainer,
                                 modifier = Modifier.size(18.dp)
@@ -149,11 +151,12 @@ fun SignInScreen(onContinueOffline: () -> Unit) {
         } else {
             // Centering + scroll safety: a wrap-height Column aligned to Center scrolls once it
             // exceeds the viewport (short screens) and stays optically centered when it doesn't.
+            // Vertical breathing room stays minimal; safe-drawing insets are owned by the root.
             Column(
                 modifier = Modifier
                     .align(Alignment.Center)
                     .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 24.dp, vertical = 16.dp),
+                    .padding(horizontal = 24.dp, vertical = 8.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 StaggeredEnter(visible = entered, index = 0) { HeroEmblem() }
@@ -175,17 +178,17 @@ fun SignInScreen(onContinueOffline: () -> Unit) {
                             verticalArrangement = Arrangement.spacedBy(14.dp)
                         ) {
                             PriorityFeatureRow(
-                                icon = Icons.Outlined.Lock,
+                                icon = Icons.Rounded.Lock,
                                 title = "Multi-Device Nuke Lock",
                                 description = "Desktop companion & phone lock together during focus."
                             )
                             PriorityFeatureRow(
-                                icon = Icons.Outlined.CloudSync,
+                                icon = Icons.Rounded.CloudSync,
                                 title = "Real-Time Cloud Sync",
                                 description = "Focus credits & daily habits sync seamlessly via Convex cloud."
                             )
                             PriorityFeatureRow(
-                                icon = Icons.Outlined.Laptop,
+                                icon = Icons.Rounded.Laptop,
                                 title = "Desktop Companion",
                                 description = "Enforce boundaries across macOS, Windows, and browsers."
                             )
@@ -229,7 +232,7 @@ fun SignInScreen(onContinueOffline: () -> Unit) {
                                     modifier = Modifier.size(18.dp)
                                 )
                             } else {
-                                Icon(Icons.Default.Login, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Icon(Icons.Rounded.Login, contentDescription = null, modifier = Modifier.size(18.dp))
                             }
                             Spacer(Modifier.width(8.dp))
                             Text(
@@ -251,7 +254,7 @@ fun SignInScreen(onContinueOffline: () -> Unit) {
                             ),
                             modifier = Modifier.fillMaxWidth().height(52.dp)
                         ) {
-                            Icon(Icons.Outlined.Mail, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Icon(Icons.Rounded.Mail, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(8.dp))
                             Text("Sign in with email form")
                         }
@@ -317,7 +320,10 @@ private fun SignInHeadline(visible: Boolean) {
         StaggeredEnter(visible = visible, index = 1) {
             Text(
                 "FocusLock Priority Account",
-                style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Bold),
+                style = MaterialTheme.typography.headlineMedium.copy(
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = (-0.4).sp
+                ),
                 color = MaterialTheme.colorScheme.onSurface,
                 textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth(),
@@ -438,7 +444,7 @@ private fun HeroEmblem(compact: Boolean = false) {
             contentAlignment = Alignment.Center
         ) {
             Icon(
-                imageVector = Icons.Default.Shield,
+                imageVector = Icons.Rounded.Shield,
                 contentDescription = null,
                 tint = onPrimary,
                 modifier = Modifier.size(iconSize)
@@ -525,7 +531,10 @@ fun AccountScreen(
     ) {
         Text(
             "Account",
-            style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Bold),
+            style = MaterialTheme.typography.headlineMedium.copy(
+                fontWeight = FontWeight.Bold,
+                letterSpacing = (-0.4).sp
+            ),
             color = MaterialTheme.colorScheme.onSurface
         )
 
@@ -579,7 +588,7 @@ fun AccountScreen(
                                 horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
                                 Icon(
-                                    Icons.Default.Verified,
+                                    Icons.Rounded.Verified,
                                     contentDescription = null,
                                     tint = MaterialTheme.colorScheme.onPrimaryContainer,
                                     modifier = Modifier.size(14.dp)
@@ -624,7 +633,7 @@ fun AccountScreen(
                                     modifier = Modifier.size(16.dp)
                                 )
                             } else {
-                                Icon(Icons.Outlined.Sync, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Icon(Icons.Rounded.Sync, contentDescription = null, modifier = Modifier.size(16.dp))
                             }
                             Spacer(Modifier.width(6.dp))
                             Text(if (isSyncing) "Syncing…" else "Sync Now")
@@ -666,7 +675,7 @@ fun AccountScreen(
                 ),
                 modifier = Modifier.fillMaxWidth()
             ) {
-                Icon(Icons.Default.Logout, contentDescription = null, modifier = Modifier.size(16.dp))
+                Icon(Icons.Rounded.Logout, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(8.dp))
                 Text("Sign Out")
             }
@@ -692,12 +701,12 @@ fun AccountScreen(
                                 .size(48.dp)
                                 .background(
                                     brush = accountGradient,
-                                    shape = CircleShape
+                                    shape = RoundedCornerShape(14.dp)
                                 ),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Shield,
+                                imageVector = Icons.Rounded.Shield,
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.onPrimary,
                                 modifier = Modifier.size(24.dp)
@@ -721,17 +730,17 @@ fun AccountScreen(
                     HorizontalDivider(color = MaterialTheme.colorScheme.surfaceContainerHighest)
 
                     PriorityFeatureRow(
-                        icon = Icons.Outlined.Lock,
+                        icon = Icons.Rounded.Lock,
                         title = "Multi-Device Nuke Lock",
                         description = "Locking on mobile locks desktop companion & browser."
                     )
                     PriorityFeatureRow(
-                        icon = Icons.Outlined.CloudSync,
+                        icon = Icons.Rounded.CloudSync,
                         title = "Real-Time Cloud Sync",
                         description = "Credits, task records, and boundaries sync across devices."
                     )
                     PriorityFeatureRow(
-                        icon = Icons.Outlined.Computer,
+                        icon = Icons.Rounded.Computer,
                         title = "Desktop Companion",
                         description = "Connects with the macOS/Windows desktop companion app."
                     )
@@ -751,7 +760,7 @@ fun AccountScreen(
                         ),
                         modifier = Modifier.fillMaxWidth().height(50.dp)
                     ) {
-                        Icon(Icons.Default.Stars, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Icon(Icons.Rounded.Stars, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
                         Text(
                             "Sign In to Priority Account",
@@ -773,7 +782,7 @@ fun AccountScreen(
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Icon(
-                        Icons.Outlined.Info,
+                        Icons.Rounded.Info,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(20.dp)
@@ -831,19 +840,12 @@ private fun PriorityFeatureRow(
         verticalAlignment = Alignment.Top,
         horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Box(
-            modifier = Modifier
-                .size(36.dp)
-                .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f), CircleShape),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(18.dp)
-            )
-        }
+        IconBadge(
+            icon = icon,
+            size = 40.dp,
+            containerColor = MaterialTheme.colorScheme.primaryContainer,
+            contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+        )
 
         Column(modifier = Modifier.weight(1f)) {
             Text(

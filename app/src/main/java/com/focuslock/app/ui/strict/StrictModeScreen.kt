@@ -1,9 +1,13 @@
 package com.focuslock.app.ui.strict
 
 import android.widget.Toast
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -14,7 +18,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Block
@@ -40,7 +43,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -51,6 +53,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
 import com.focuslock.app.FocusLockApplication
 import com.focuslock.app.data.repository.SettingsRepository
+import com.focuslock.app.ui.components.IconBadge
+import com.focuslock.app.ui.components.MotionTokens
+import com.focuslock.app.ui.components.ScreenHeader
+import com.focuslock.app.ui.components.StaggeredFadeSlide
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -71,6 +77,10 @@ fun StrictModeScreen() {
 
     var showEnableDialog by remember { mutableStateOf(false) }
     var showDisableDialog by remember { mutableStateOf(false) }
+    // One-shot entrance cascade (header -> intro -> hero -> rules); remembered so it
+    // runs on first composition only and never replays on scroll or state flips.
+    var entered by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { entered = true }
 
     Column(
         modifier = Modifier
@@ -78,53 +88,73 @@ fun StrictModeScreen() {
             .background(MaterialTheme.colorScheme.background)
             .verticalScroll(rememberScrollState())
             .padding(horizontal = 16.dp)
-            .padding(top = 16.dp, bottom = 32.dp),
+            .padding(bottom = 32.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Text(
-            text = "Strict Mode",
-            style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.SemiBold),
-            color = MaterialTheme.colorScheme.onSurface
-        )
-        Text(
-            text = "A 24-hour commitment: turn it on and FocusLock refuses every unlock " +
-                "until the day is up — no switching off, no emergency exit, no earned-credit bypass.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-
-        if (strictMode) {
-            StrictActiveCard(
-                settings = settings,
-                onDisableClick = {
-                    scope.launch {
-                        val canDisable = try {
-                            settings.canDisableLockdownMode()
-                        } catch (_: Exception) {
-                            true
-                        }
-                        if (!canDisable) {
-                            val remaining = try {
-                                settings.lockdownCooldownRemainingMs()
-                            } catch (_: Exception) {
-                                0L
-                            }
-                            Toast.makeText(
-                                context,
-                                "Strict Mode locked: ${formatStrictRemaining(remaining)} remaining",
-                                Toast.LENGTH_LONG
-                            ).show()
-                        } else {
-                            showDisableDialog = true
-                        }
-                    }
-                }
+        // ScreenHeader's subtitle slot is capped at two ellipsized lines; this commitment
+        // copy is longer, so it stays a full body paragraph under the shared title.
+        // No extra top padding here: the Scaffold insets own the status-bar protection
+        // and ScreenHeader bakes in only a minimal 4dp rhythm gap.
+        StaggeredFadeSlide(visible = entered, index = 0) {
+            ScreenHeader(title = "Strict Mode")
+        }
+        StaggeredFadeSlide(visible = entered, index = 1) {
+            Text(
+                text = "A 24-hour commitment: turn it on and FocusLock refuses every unlock " +
+                    "until the day is up — no switching off, no emergency exit, no earned-credit bypass.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-        } else {
-            StrictOffCard(onEnableClick = { showEnableDialog = true })
         }
 
-        StrictRulesCard()
+        StaggeredFadeSlide(visible = entered, index = 2, modifier = Modifier.fillMaxWidth()) {
+            AnimatedContent(
+                targetState = strictMode,
+                transitionSpec = {
+                    (fadeIn(animationSpec = MotionTokens.FadeFloat) +
+                        slideInVertically(
+                            animationSpec = MotionTokens.SpatialOffset,
+                            initialOffsetY = { it / 12 }
+                        )) togetherWith fadeOut(animationSpec = MotionTokens.FadeFloat)
+                },
+                label = "strictHero"
+            ) { active ->
+                if (active) {
+                    StrictActiveCard(
+                        settings = settings,
+                        onDisableClick = {
+                            scope.launch {
+                                val canDisable = try {
+                                    settings.canDisableLockdownMode()
+                                } catch (_: Exception) {
+                                    true
+                                }
+                                if (!canDisable) {
+                                    val remaining = try {
+                                        settings.lockdownCooldownRemainingMs()
+                                    } catch (_: Exception) {
+                                        0L
+                                    }
+                                    Toast.makeText(
+                                        context,
+                                        "Strict Mode locked: ${formatLockdownRemaining(remaining)} remaining",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                } else {
+                                    showDisableDialog = true
+                                }
+                            }
+                        }
+                    )
+                } else {
+                    StrictOffCard(onEnableClick = { showEnableDialog = true })
+                }
+            }
+        }
+
+        StaggeredFadeSlide(visible = entered, index = 3, modifier = Modifier.fillMaxWidth()) {
+            StrictRulesCard(visible = entered)
+        }
 
         if (showEnableDialog) {
             AlertDialog(
@@ -285,7 +315,7 @@ private fun StrictActiveCard(settings: SettingsRepository, onDisableClick: () ->
 
 /** Short list of consequences, each stated from actual enforcement code paths. */
 @Composable
-private fun StrictRulesCard() {
+private fun StrictRulesCard(visible: Boolean) {
     Card(
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceContainer
@@ -302,30 +332,44 @@ private fun StrictRulesCard() {
                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                 color = MaterialTheme.colorScheme.onSurface
             )
-            StrictRuleRow(
-                icon = Icons.Rounded.Lock,
-                title = "No early exit",
-                body = "The Disable button stays locked for 24 hours after enabling — " +
-                    "nothing in the app can turn Strict Mode off sooner."
+            // Rule rows cascade in after the card, capped so the tail settles fast.
+            val rules = listOf(
+                Triple(
+                    Icons.Rounded.Lock,
+                    "No early exit",
+                    "The Disable button stays locked for 24 hours after enabling — " +
+                        "nothing in the app can turn Strict Mode off sooner."
+                ),
+                Triple(
+                    Icons.Rounded.Block,
+                    "No unlock paths",
+                    "Emergency unlocks and earned-credit unlocks are refused. Credits are " +
+                        "still banked, they just can't open a blocked app."
+                ),
+                Triple(
+                    Icons.Rounded.Shield,
+                    "Boundaries stay locked",
+                    "Blocked apps and websites can't be unblocked until Strict Mode ends — " +
+                        "you can still add new blocks."
+                ),
+                Triple(
+                    Icons.Rounded.Timer,
+                    "No grace period",
+                    "Blocked apps and sites open the blocker immediately, even while you " +
+                        "still have leisure balance."
+                ),
+                Triple(
+                    Icons.Rounded.Sync,
+                    "Carries across devices",
+                    "When you're signed in, the commitment syncs so switching devices " +
+                        "won't dodge the lock."
+                )
             )
-            StrictRuleRow(
-                icon = Icons.Rounded.Block,
-                title = "No unlock paths",
-                body = "Emergency unlocks and earned-credit unlocks are refused. Credits are " +
-                    "still banked, they just can't open a blocked app."
-            )
-            StrictRuleRow(
-                icon = Icons.Rounded.Timer,
-                title = "No grace period",
-                body = "Blocked apps and sites open the blocker immediately, even while you " +
-                    "still have leisure balance."
-            )
-            StrictRuleRow(
-                icon = Icons.Rounded.Sync,
-                title = "Carries across devices",
-                body = "When you're signed in, the commitment syncs so switching devices " +
-                    "won't dodge the lock."
-            )
+            rules.forEachIndexed { index, (icon, title, body) ->
+                StaggeredFadeSlide(visible = visible, index = 4 + minOf(index, 2)) {
+                    StrictRuleRow(icon = icon, title = title, body = body)
+                }
+            }
         }
     }
 }
@@ -333,19 +377,12 @@ private fun StrictRulesCard() {
 @Composable
 private fun StrictRuleRow(icon: ImageVector, title: String, body: String) {
     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        Box(
-            modifier = Modifier
-                .size(36.dp)
-                .background(MaterialTheme.colorScheme.tertiaryContainer, CircleShape),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onTertiaryContainer,
-                modifier = Modifier.size(18.dp)
-            )
-        }
+        IconBadge(
+            icon = icon,
+            size = 36.dp,
+            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+            contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+        )
         Column(
             modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(2.dp)
@@ -365,23 +402,6 @@ private fun StrictRuleRow(icon: ImageVector, title: String, body: String) {
 }
 
 @Composable
-private fun IconBadge(icon: ImageVector, containerColor: Color, contentColor: Color) {
-    Box(
-        modifier = Modifier
-            .size(48.dp)
-            .background(containerColor, CircleShape),
-        contentAlignment = Alignment.Center
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = contentColor,
-            modifier = Modifier.size(24.dp)
-        )
-    }
-}
-
-@Composable
 private fun StrictCooldownText(settings: SettingsRepository) {
     var cooldownText by remember { mutableStateOf("") }
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -395,7 +415,7 @@ private fun StrictCooldownText(settings: SettingsRepository) {
                     0L
                 }
                 cooldownText = if (remaining > 0L) {
-                    "Unlock available in ${formatStrictRemaining(remaining)}"
+                    "Unlock available in ${formatLockdownRemaining(remaining)}"
                 } else {
                     "Unlock available now"
                 }
@@ -412,7 +432,11 @@ private fun StrictCooldownText(settings: SettingsRepository) {
     }
 }
 
-private fun formatStrictRemaining(ms: Long): String {
+/**
+ * Formats a cooldown remaining time as "Xh Ym". Internal so the Boundaries screens can
+ * reuse the exact same formatter in Strict Mode refusal copy.
+ */
+internal fun formatLockdownRemaining(ms: Long): String {
     val h = ms / 3_600_000L
     val m = (ms % 3_600_000L) / 60_000L
     return "${h}h ${m}m"

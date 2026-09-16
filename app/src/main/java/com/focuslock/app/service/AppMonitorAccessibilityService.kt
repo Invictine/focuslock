@@ -1,19 +1,27 @@
 package com.focuslock.app.service
 
 import android.accessibilityservice.AccessibilityService
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.os.Build
 import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Toast
+import androidx.core.content.ContextCompat
 import com.focuslock.app.FocusLockApplication
+import com.focuslock.app.data.repository.FrogRepository
 import com.focuslock.app.data.repository.SettingsRepository
+import com.focuslock.app.data.repository.frogCycleDate
 import com.focuslock.app.ui.blocker.BlockerActivity
 import com.focuslock.app.ui.permissions.PermissionHelper
 import com.focuslock.app.ui.permissions.PermissionReturnWatcher
+import java.time.LocalTime
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -21,6 +29,8 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -71,6 +81,42 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     private var permissionReturnJob: Job? = null
     private val scheduleRefreshMutex = Mutex()
 
+    // "Eat the frog" lock cache: kept current off the event path by a frogStateFlow +
+    // wakeHourFlow collector started in onServiceConnected, so the per-package path
+    // never suspends on DataStore. Falls back to false before the first emission
+    // ("fail open"). The same collector mirrors the fields the event path needs to
+    // decide whether to arm the day's frog in-memory (see maybeArmFrogOnForeground).
+    @Volatile
+    private var frogLocked: Boolean = false
+
+    @Volatile
+    private var frogEnabled: Boolean = true
+
+    @Volatile
+    private var frogArmed: Boolean = false
+
+    @Volatile
+    private var frogStoredCycleDate: String = ""
+
+    @Volatile
+    private var frogWakeHour: Int = FrogRepository.DEFAULT_WAKE_HOUR
+
+    // Per-cycle guard: at most one arm attempt per cycle from the event path, so
+    // repeated foreground changes cannot hammer DataStore.
+    @Volatile
+    private var frogArmAttemptedCycle: String? = null
+
+    private var frogLockJob: Job? = null
+    private var frogWakeReceiver: BroadcastReceiver? = null
+
+    // Default launcher / IME packages for the frog gate's brick mitigation (F7):
+    // resolved lazily and cached; null = not resolved (yet).
+    @Volatile
+    private var defaultLauncherPackage: String? = null
+
+    @Volatile
+    private var defaultImePackage: String? = null
+
     // Cached PowerManager for the doomscroll countdown's screen-state gate (local read,
     // checked per tick — no IPC).
     private val powerManager: PowerManager? by lazy {
@@ -118,6 +164,9 @@ class AppMonitorAccessibilityService : AccessibilityService() {
 
         private const val SCHEDULE_REFRESH_INTERVAL_MS = 30_000L
         private const val ADMIN_STATE_TTL_MS = 60_000L
+
+        /** TickTick foreground is where the frog gets done — never frog-blocked. */
+        private const val TICKTICK_PACKAGE = "com.ticktick.task"
         // Last-resort traversal for browsers whose URL bar matches none of the known view
         // IDs. Depth-capped to keep the binder-call count bounded.
         private const val MAX_URL_SEARCH_DEPTH = 6
@@ -236,6 +285,36 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         // the user is in Android Settings (safe to start activities from a service).
         permissionReturnJob?.cancel()
         permissionReturnJob = PermissionReturnWatcher.watch(this, serviceScope)
+
+        // "Eat the frog": mirror the lock flag AND the fields the event path needs to
+        // decide whether to arm in-memory (enabled/armed/cycle date/wake hour), so the
+        // per-package path never suspends on DataStore.
+        frogLockJob?.cancel()
+        frogLockJob = serviceScope.launch {
+            try {
+                combine(
+                    FocusLockApplication.instance.frogRepository.frogStateFlow,
+                    FocusLockApplication.instance.frogRepository.wakeHourFlow
+                ) { state, wakeHour -> state to wakeHour }
+                    .collect { (state, wakeHour) ->
+                        frogLocked = state.locked
+                        frogEnabled = state.enabled
+                        frogArmed = state.armed
+                        frogStoredCycleDate = state.cycleDate
+                        frogWakeHour = wakeHour
+                    }
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                Log.w(TAG, "frog lock collector failed", e)
+            }
+        }
+        // First service connect after the wake hour: arm the day once. A screen kept on
+        // across the wake hour never fires USER_PRESENT/SCREEN_ON, so without this the
+        // frog would stay unarmed until an app switch (see maybeArmFrogOnForeground).
+        serviceScope.launch { armAndHandleFrog() }
+        // Runtime wake/unlock delivery: the manifest receiver covers boot/package
+        // replace only (USER_PRESENT/SCREEN_ON are not reliably manifest-delivered).
+        registerFrogWakeReceiver()
     }
 
     /**
@@ -381,6 +460,12 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     }
 
     private fun handleForegroundPackageChanged(packageName: String, previousPackage: String?) {
+        // In-memory-only arm check (F1): a user who keeps the screen on across the wake
+        // hour never fires USER_PRESENT/SCREEN_ON, so the first app open after the wake
+        // hour must be able to arm the day. This path only reads volatiles; the actual
+        // DataStore work is launched off-thread by maybeArmFrogOnForeground.
+        maybeArmFrogOnForeground()
+
         stopTrackingForPreviousPackage(previousPackage)
 
         // Intercept uninstallation attempts if uninstall protection is active
@@ -404,8 +489,21 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             } catch (_: Exception) { }
 
             // 1. TickTick active time tracking
-            if (packageName == "com.ticktick.task") {
+            if (packageName == TICKTICK_PACKAGE) {
                 startTickTickActiveTracking()
+                return@launch
+            }
+
+            // 1a. FROG LOCK — hard gate before limits/schedule/permanent/grace: while
+            // today's frog is unfinished, a boundary app is blocked outright and never
+            // starts a doomscroll countdown (no credits earned for that day). TickTick,
+            // the default launcher and the current IME are exempt (see
+            // isFrogGateExemptPackage): blocking the launcher/IME can compound-brick
+            // the device (no way home, no keyboard for the lock screen itself).
+            if (isFrogLockActive() && !isFrogGateExemptPackage(packageName) && settings.isAppBlocked(packageName)) {
+                Log.w(TAG, "Frog lock active — blocking $packageName")
+                recordBlock(packageName, FrogCoordinator.REASON_FROG)
+                triggerBlocker(packageName, website = null, reason = FrogCoordinator.REASON_FROG)
                 return@launch
             }
 
@@ -526,6 +624,199 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             Log.w(TAG, "Schedule enforcement failed for $packageName", e)
+        }
+    }
+
+    /**
+     * Non-suspending read of the cached "eat the frog" lock flag; the flag is kept
+     * fresh off the event path (frogStateFlow collector + FROG_ARMED handling).
+     */
+    private fun isFrogLockActive(): Boolean = frogLocked
+
+    /**
+     * Frog-gate-only brick mitigation (F7): exempt the current default launcher and the
+     * current default IME in addition to TickTick. Blocking either of these can
+     * compound-brick the device (no way home / no keyboard to satisfy the lock), so
+     * resolution is lazy + cached and FAILS OPEN: when it fails, the package is not
+     * frog-blocked.
+     */
+    private fun isFrogGateExemptPackage(packageName: String): Boolean {
+        if (packageName == TICKTICK_PACKAGE) return true
+        val launcher = resolveDefaultLauncherPackage()
+        val ime = resolveDefaultImePackage()
+        if (launcher == null || ime == null) return true
+        return packageName == launcher || packageName == ime
+    }
+
+    /** Cached default-launcher package; null while unresolved / on failure (fail open). */
+    private fun resolveDefaultLauncherPackage(): String? {
+        defaultLauncherPackage?.let { return it }
+        return try {
+            val homeIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+            val resolved = packageManager
+                .resolveActivity(homeIntent, PackageManager.MATCH_DEFAULT_ONLY)
+                ?.activityInfo?.packageName
+            if (resolved.isNullOrBlank()) {
+                null
+            } else {
+                defaultLauncherPackage = resolved
+                resolved
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** Cached default-IME package (before the "/"), null on failure (fail open). */
+    private fun resolveDefaultImePackage(): String? {
+        defaultImePackage?.let { return it }
+        return try {
+            val component = Settings.Secure.getString(contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)
+            val resolved = component?.substringBefore('/')?.takeIf { it.isNotBlank() }
+            if (resolved == null) {
+                null
+            } else {
+                defaultImePackage = resolved
+                resolved
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Cheap in-memory arming trigger for the "first app open after the wake hour" case
+     * (F1). The accessibility event path must stay free of disk/DataStore/suspend work:
+     * this only reads the volatile mirrors and, at most once per cycle, launches the
+     * repository's idempotent [FrogRepository.armIfDue] onto [serviceScope].
+     */
+    private fun maybeArmFrogOnForeground() {
+        if (!frogEnabled || frogArmed) return
+        val now = System.currentTimeMillis()
+        val wakeHour = frogWakeHour
+        if (LocalTime.now().hour < wakeHour) return
+        val cycle = frogCycleDate(now, wakeHour)
+        // Fail open (F3): a stored cycle date NEWER than the computed one means the
+        // clock moved back / wake hour moved forward — never arm or re-lock that day.
+        if (frogStoredCycleDate.isNotEmpty() && frogStoredCycleDate > cycle) return
+        // At most one arm attempt per cycle from the event path.
+        if (frogArmAttemptedCycle == cycle) return
+        frogArmAttemptedCycle = cycle
+        serviceScope.launch {
+            try {
+                if (FocusLockApplication.instance.frogRepository.armIfDue(now)) handleFrogArmed()
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                Log.w(TAG, "frog foreground arm attempt failed", e)
+            }
+        }
+    }
+
+    /** Fresh DataStore read of the frog lock; keeps the cached value on failure. */
+    private suspend fun refreshFrogLock() {
+        frogLocked = try {
+            FocusLockApplication.instance.frogRepository.currentState().locked
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            frogLocked
+        }
+    }
+
+    /**
+     * Registers the runtime frog wake receiver (belt-and-braces next to the manifest
+     * [FrogWakeReceiver]): USER_PRESENT/SCREEN_ON arm the day's frog, FROG_ARMED
+     * re-evaluates the current foreground immediately. Never crashes the service.
+     */
+    private fun registerFrogWakeReceiver() {
+        if (frogWakeReceiver != null) return
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                when (intent?.action) {
+                    Intent.ACTION_USER_PRESENT, Intent.ACTION_SCREEN_ON ->
+                        serviceScope.launch { armAndHandleFrog() }
+                    FrogCoordinator.ACTION_FROG_ARMED ->
+                        serviceScope.launch { handleFrogArmed() }
+                }
+            }
+        }
+        try {
+            ContextCompat.registerReceiver(
+                this,
+                receiver,
+                IntentFilter().apply {
+                    addAction(Intent.ACTION_USER_PRESENT)
+                    addAction(Intent.ACTION_SCREEN_ON)
+                    addAction(FrogCoordinator.ACTION_FROG_ARMED)
+                },
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            frogWakeReceiver = receiver
+        } catch (e: Exception) {
+            Log.w(TAG, "frog wake receiver registration failed", e)
+        }
+    }
+
+    /** Unregisters the runtime frog receiver; safe to call more than once. */
+    private fun unregisterFrogWakeReceiver() {
+        val receiver = frogWakeReceiver ?: return
+        frogWakeReceiver = null
+        try {
+            unregisterReceiver(receiver)
+        } catch (e: Exception) {
+            Log.w(TAG, "frog wake receiver unregistration failed", e)
+        }
+    }
+
+    /** Arms today's frog when due, then runs the shared FROG_ARMED handling. */
+    private suspend fun armAndHandleFrog() {
+        try {
+            FocusLockApplication.instance.frogRepository.armIfDue()
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            Log.w(TAG, "frog arm attempt failed", e)
+        }
+        handleFrogArmed()
+    }
+
+    /**
+     * Shared post-arm handling: refresh the cached lock flag, re-evaluate the current
+     * foreground when locked, and warm the open-task cache when it is empty.
+     */
+    private suspend fun handleFrogArmed() {
+        refreshFrogLock()
+        if (isFrogLockActive()) {
+            enforceFrogOnCurrentForeground()
+        }
+        val openTasksEmpty = try {
+            FocusLockApplication.instance.frogRepository.currentState().openTasks.isEmpty()
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            false
+        }
+        if (openTasksEmpty) {
+            FrogCoordinator.refreshOpenTasks(applicationContext, force = true)
+        }
+    }
+
+    /**
+     * Re-evaluates the package already in the foreground when the frog lock turns on
+     * (mirrors [enforceScheduleOnCurrentForeground], incl. the screen-state gate).
+     */
+    private suspend fun enforceFrogOnCurrentForeground() {
+        val packageName = currentForegroundPackage ?: return
+        if (packageName == applicationContext.packageName) return
+        // Same brick-mitigation exemptions as the per-package gate (TickTick, launcher, IME).
+        if (isFrogGateExemptPackage(packageName)) return
+        if (!isScreenInteractive()) return
+        try {
+            val settings = FocusLockApplication.instance.settingsRepository
+            if (!settings.isAppBlocked(packageName)) return
+            Log.w(TAG, "Frog lock active — blocking $packageName (already foreground)")
+            recordBlock(packageName, FrogCoordinator.REASON_FROG)
+            triggerBlocker(packageName, website = null, reason = FrogCoordinator.REASON_FROG)
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            Log.w(TAG, "Frog enforcement failed for $packageName", e)
         }
     }
 
@@ -861,6 +1152,9 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         scheduleTickerJob = null
         permissionReturnJob?.cancel()
         permissionReturnJob = null
+        frogLockJob?.cancel()
+        frogLockJob = null
+        unregisterFrogWakeReceiver()
         countdownJob?.cancel()
         tickTickSessionJob?.cancel()
         // Persist any batched scroll seconds before the scope dies. The flush launches on

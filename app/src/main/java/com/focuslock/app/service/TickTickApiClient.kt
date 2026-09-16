@@ -2,6 +2,7 @@ package com.focuslock.app.service
 
 import android.net.Uri
 import android.util.Log
+import com.focuslock.app.FocusLockApplication
 import com.focuslock.app.data.model.TickTickWorkRecord
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -13,6 +14,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.ConnectionPool
 import okhttp3.Credentials
 import okhttp3.FormBody
@@ -185,6 +189,77 @@ class TickTickApiClient {
                 return trimmed to null
             }
             return null
+        }
+
+        /** Tolerant reader for [parseProjectTasksJson] (instance JSON stays in [json]). */
+        private val parserJson = Json { ignoreUnknownKeys = true }
+
+        /** JSON string field; null for absent, JSON-null, or non-string values. */
+        private fun JsonObject.stringField(key: String): String? {
+            val primitive = this[key] as? JsonPrimitive ?: return null
+            return if (primitive.isString) primitive.content else null
+        }
+
+        /** JSON int field; tolerates numeric strings, null for absent/JSON-null/other. */
+        private fun JsonObject.intField(key: String): Int? {
+            val primitive = this[key] as? JsonPrimitive ?: return null
+            return primitive.content.toIntOrNull()
+        }
+
+        /**
+         * Single tolerant parser for the `/open/v1/project/{id}/data` payload, shared
+         * by [fetchCompletedTaskTitlesToday] and [fetchOpenTasks]:
+         *
+         * {
+         *   "project": { "id": "p1", "name": "Work" },
+         *   "tasks": [
+         *     { "id": "t1", "projectId": "p1", "title": "Ship it", "status": 0,
+         *       "dueDate": "2026-09-15T18:00:00.000+0000" }
+         *   ]
+         * }
+         *
+         * Rules (never throws for malformed input):
+         *  - blank body / invalid JSON / non-object root / absent-or-non-array `tasks` → empty list
+         *  - non-object array entries are skipped
+         *  - entries with a blank or missing `id` are skipped (cannot be identified/picked)
+         *  - blank or missing `title` → "TickTick Task"
+         *  - blank or missing `projectId` → enclosing `project.id`, else ""
+         *  - missing/unparseable `status` → 0; `status == 2` (completed) entries are skipped
+         *  - absent `dueDate` / `startDate` / `completedTime` stay null
+         */
+        internal fun parseProjectTasksJson(body: String): List<TickTickTaskItem> {
+            if (body.isBlank()) return emptyList()
+            val root = try {
+                parserJson.parseToJsonElement(body) as? JsonObject
+            } catch (_: Exception) {
+                null
+            } ?: return emptyList()
+
+            val fallbackProjectId = (root["project"] as? JsonObject)?.stringField("id").orEmpty()
+            val tasks = root["tasks"] as? JsonArray ?: return emptyList()
+
+            val parsed = ArrayList<TickTickTaskItem>(tasks.size)
+            for (element in tasks) {
+                val obj = element as? JsonObject ?: continue
+                val id = obj.stringField("id")
+                if (id.isNullOrBlank()) continue
+                val status = obj.intField("status") ?: 0
+                if (status == 2) continue // Completed: not open, not actionable.
+                parsed.add(
+                    TickTickTaskItem(
+                        id = id,
+                        projectId = obj.stringField("projectId")?.takeIf { it.isNotBlank() }
+                            ?: fallbackProjectId,
+                        title = obj.stringField("title")?.takeIf { it.isNotBlank() }
+                            ?: "TickTick Task",
+                        status = status,
+                        completedTime = obj.stringField("completedTime"),
+                        startDate = obj.stringField("startDate"),
+                        dueDate = obj.stringField("dueDate")
+                    )
+                )
+            }
+            return parsed
         }
     }
 
@@ -359,6 +434,54 @@ class TickTickApiClient {
     }
 
     /**
+     * OPEN tasks (`status != 2`) across all of the user's non-closed projects, for the
+     * "Eat the Frog" picker: a list the user can choose one task from.
+     *
+     * Resolves the stored TickTick token itself (including OAuth refresh via
+     * [TickTickAuthConfig.getValidAccessToken]), so callers need no settings access.
+     * Returns an empty list — never throws, never crashes — when the user is not
+     * connected/logged in, when the project list fails, or on any network error.
+     * Results keep project order (project list order, then task order per project);
+     * completed tasks are dropped by [parseProjectTasksJson], NOT filtered here.
+     *
+     * Display/action only: open tasks carry ZERO focus minutes and must NEVER be
+     * passed to CreditBankRepository.recordWorkCredit as work.
+     */
+    suspend fun fetchOpenTasks(): List<TickTickTaskItem> = withContext(Dispatchers.IO) {
+        try {
+            val settings = FocusLockApplication.instance.settingsRepository
+            val token = TickTickAuthConfig.getValidAccessToken(settings, this@TickTickApiClient)
+            if (token.isNullOrBlank()) return@withContext emptyList()
+            fetchOpenTasks(token)
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            Log.e(TAG, "Could not fetch open TickTick tasks")
+            emptyList()
+        }
+    }
+
+    /**
+     * Network path of [fetchOpenTasks] for callers that already hold a valid token.
+     * Returns an empty list on any failure (blank token, unreachable project list,
+     * per-request transport error); never throws except cancellation. Reuses the same
+     * project listing, 30-project cap, capped-parallel fan-out and tolerance as
+     * [fetchCompletedTaskTitlesToday], and the one shared [parseProjectTasksJson].
+     */
+    internal suspend fun fetchOpenTasks(token: String): List<TickTickTaskItem> =
+        withContext(Dispatchers.IO) {
+            if (token.isBlank()) return@withContext emptyList()
+            try {
+                val projectBodies = fetchProjectDataBodies(token) ?: return@withContext emptyList()
+                // Parser already drops status == 2; project order is preserved.
+                projectBodies.flatMap { (_, body) -> parseProjectTasksJson(body) }
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                Log.e(TAG, "Could not fetch open TickTick tasks", e)
+                emptyList()
+            }
+        }
+
+    /**
      * Network path of [fetchCompletedTaskTitlesToday]. Returns null when the request
      * failed outright (project list unreachable/unparseable) so callers don't cache it;
      * per-project failures are tolerated and yield a valid partial result, exactly as
@@ -366,23 +489,60 @@ class TickTickApiClient {
      */
     private suspend fun fetchCompletedTaskTitlesTodayUncached(token: String): List<Pair<String, String>>? =
         withContext(Dispatchers.IO) {
-            val results = mutableListOf<PendingCompletedTask>()
-            // Device-TZ day boundary; must agree with CreditBankRepository.startOfTodayMillis().
-            val startOfToday = java.util.Calendar.getInstance().apply {
-                set(java.util.Calendar.HOUR_OF_DAY, 0)
-                set(java.util.Calendar.MINUTE, 0)
-                set(java.util.Calendar.SECOND, 0)
-                set(java.util.Calendar.MILLISECOND, 0)
-            }.timeInMillis
-            val now = System.currentTimeMillis()
-
             try {
+                // Device-TZ day boundary; must agree with CreditBankRepository.startOfTodayMillis().
+                val startOfToday = java.util.Calendar.getInstance().apply {
+                    set(java.util.Calendar.HOUR_OF_DAY, 0)
+                    set(java.util.Calendar.MINUTE, 0)
+                    set(java.util.Calendar.SECOND, 0)
+                    set(java.util.Calendar.MILLISECOND, 0)
+                }.timeInMillis
+                val now = System.currentTimeMillis()
+
+                val projectBodies = fetchProjectDataBodies(token) ?: return@withContext null
+                val results = mutableListOf<PendingCompletedTask>()
+                for ((project, body) in projectBodies) {
+                    for (task in parseProjectTasksJson(body)) {
+                        // Guard: dueDate/startDate are never consulted; only completedTime counts.
+                        if (task.status != 2) continue
+                        val completedMillis = parseCompletedMillis(task.completedTime) ?: continue
+                        if (completedMillis in startOfToday..now) {
+                            // Display only: 0 focus minutes. Never creditable.
+                            results.add(
+                                PendingCompletedTask(
+                                    task.title.ifBlank { "TickTick Task" },
+                                    project.name,
+                                    completedMillis
+                                )
+                            )
+                        }
+                    }
+                }
+                results.sortedByDescending { it.completedMillis }.map { it.title to it.project }
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                Log.e(TAG, "Error syncing TickTick tasks", e)
+                null
+            }
+        }
+
+    /**
+     * Project list + per-project `/data` bodies shared by the completed-today and
+     * open-task paths. Returns null when the project list request/parse fails;
+     * individual project failures contribute nothing (their body is dropped), exactly
+     * like the old sequential loop. Closed projects are ignored, at most 30 projects
+     * are queried, and at most [MAX_PARALLEL_PROJECT_REQUESTS] run concurrently while
+     * project order is preserved.
+     */
+    private suspend fun fetchProjectDataBodies(token: String): List<Pair<TickTickProject, String>>? =
+        withContext(Dispatchers.IO) {
+            val projects = try {
                 val projectRequest = Request.Builder()
                     .url("https://api.ticktick.com/open/v1/project")
                     .header("Authorization", "Bearer $token")
                     .build()
 
-                val projects = sharedHttpClient.newCall(projectRequest).execute().use { response ->
+                sharedHttpClient.newCall(projectRequest).execute().use { response ->
                     if (!response.isSuccessful) {
                         Log.w(TAG, "Project list failed: ${response.code}")
                         return@withContext null
@@ -395,78 +555,51 @@ class TickTickApiClient {
                         return@withContext null
                     }
                 }
-
-                // Per-project data fetches run in parallel, capped by a semaphore; map +
-                // awaitAll preserve project order, so the collected content is identical
-                // to the old sequential loop (final sort is newest-first anyway).
-                val projectSemaphore = Semaphore(MAX_PARALLEL_PROJECT_REQUESTS)
-                val perProjectResults = coroutineScope {
-                    projects.filterNot { it.closed }.take(30).map { project ->
-                        async {
-                            projectSemaphore.withPermit {
-                                fetchProjectCompletedToday(token, project, startOfToday, now)
-                            }
-                        }
-                    }.awaitAll()
-                }
-                for (projectResults in perProjectResults) {
-                    results.addAll(projectResults)
-                }
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
-                Log.e(TAG, "Error syncing TickTick tasks", e)
+                Log.e(TAG, "Error fetching TickTick projects", e)
                 return@withContext null
             }
 
-            results.sortedByDescending { it.completedMillis }.map { it.title to it.project }
+            // Per-project data fetches run in parallel, capped by a semaphore; map +
+            // awaitAll preserve project order, so the collected content is identical
+            // to the old sequential loop.
+            val projectSemaphore = Semaphore(MAX_PARALLEL_PROJECT_REQUESTS)
+            coroutineScope {
+                projects.filterNot { it.closed }.take(30).map { project ->
+                    async {
+                        projectSemaphore.withPermit {
+                            project to fetchProjectDataBody(token, project.id)
+                        }
+                    }
+                }.awaitAll().mapNotNull { (project, body) -> body?.let { project to it } }
+            }
         }
 
     /**
-     * Completed-today entries for ONE project. Failures (HTTP error, parse error,
-     * exception) contribute nothing — same tolerance as the old sequential loop.
+     * Raw JSON body of ONE project's `/data` response, or null when the request failed
+     * (non-2xx or transport error). Never throws except cancellation, so one bad
+     * project can only drop its own tasks.
      */
-    private fun fetchProjectCompletedToday(
-        token: String,
-        project: TickTickProject,
-        startOfToday: Long,
-        now: Long
-    ): List<PendingCompletedTask> {
-        val found = mutableListOf<PendingCompletedTask>()
-        try {
+    private fun fetchProjectDataBody(token: String, projectId: String): String? {
+        return try {
             val dataRequest = Request.Builder()
-                .url("https://api.ticktick.com/open/v1/project/${project.id}/data")
+                .url("https://api.ticktick.com/open/v1/project/$projectId/data")
                 .header("Authorization", "Bearer $token")
                 .build()
 
             sharedHttpClient.newCall(dataRequest).execute().use { response ->
-                if (!response.isSuccessful) return found
-                val body = response.body?.string().orEmpty()
-                val data = try {
-                    json.decodeFromString<TickTickProjectData>(body)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to parse project ${project.id}", e)
-                    return found
+                if (!response.isSuccessful) {
+                    Log.w(TAG, "Project data failed: ${response.code}")
+                    return null
                 }
-                for (task in data.tasks) {
-                    // Guard: dueDate/startDate are never consulted; only completedTime counts.
-                    if (task.status != 2) continue
-                    val completedMillis = parseCompletedMillis(task.completedTime) ?: continue
-                    if (completedMillis in startOfToday..now) {
-                        // Display only: 0 focus minutes. Never creditable.
-                        found.add(
-                            PendingCompletedTask(
-                                task.title.ifBlank { "TickTick Task" },
-                                project.name,
-                                completedMillis
-                            )
-                        )
-                    }
-                }
+                response.body?.string().orEmpty()
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error syncing project ${project.id}", e)
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            Log.e(TAG, "Error syncing project $projectId", e)
+            null
         }
-        return found
     }
 
     /**

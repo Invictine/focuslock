@@ -1,10 +1,18 @@
 package com.focuslock.app.ui.apps
 
 import android.widget.Toast
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.foundation.Image
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -35,7 +43,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.focuslock.app.FocusLockApplication
 import com.focuslock.app.data.model.BlockedApp
@@ -45,6 +55,12 @@ import com.focuslock.app.data.repository.SettingsRepository
 import com.focuslock.app.service.InstalledApp
 import com.focuslock.app.service.InstalledAppsRepository
 import com.focuslock.app.service.UsageStatsRepository
+import com.focuslock.app.ui.components.AppIconTileForPackage
+import com.focuslock.app.ui.components.IconBadge
+import com.focuslock.app.ui.components.MotionTokens
+import com.focuslock.app.ui.components.StaggeredFadeSlide
+import com.focuslock.app.ui.components.UiTokens
+import com.focuslock.app.ui.components.pressScaleModifier
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
@@ -199,8 +215,42 @@ internal fun AppPickerScreen(
     // as if it were the user's saved state.
     val storedApps by settings.blockedAppsFlow.collectAsStateWithLifecycle(initialValue = null)
     val storedWebsites by settings.blockedWebsitesFlow.collectAsStateWithLifecycle(initialValue = null)
-    val boundariesLocked by settings.boundariesLockFlow.collectAsStateWithLifecycle(initialValue = false)
+    // Combined freeze: Boundaries Lock OR Strict Mode (single source of truth).
+    val boundariesFrozen by settings.boundariesFrozenFlow.collectAsStateWithLifecycle(initialValue = false)
+    val lockdownMode by settings.lockdownModeFlow.collectAsStateWithLifecycle(initialValue = false)
     val limits by appLimits.limitsFlow.collectAsStateWithLifecycle(initialValue = emptyMap())
+
+    // Live Strict Mode cooldown for accurate refusal copy; polls only while it is active.
+    var lockdownRemainingMs by remember { mutableStateOf(0L) }
+    LaunchedEffect(lockdownMode) {
+        if (!lockdownMode) {
+            lockdownRemainingMs = 0L
+        } else {
+            while (true) {
+                lockdownRemainingMs = try {
+                    settings.lockdownCooldownRemainingMs()
+                } catch (_: Exception) {
+                    0L
+                }
+                delay(30_000)
+            }
+        }
+    }
+    val removalLockedMessage = boundariesFrozenMessage(
+        lockdownActive = lockdownMode,
+        lockdownRemainingMs = lockdownRemainingMs,
+        boundariesLockSuffix = "turn it off in Settings to remove"
+    )
+    val limitLockedMessage = boundariesFrozenMessage(
+        lockdownActive = lockdownMode,
+        lockdownRemainingMs = lockdownRemainingMs,
+        boundariesLockSuffix = "turn it off in Settings to change limits."
+    )
+    val deleteLockedMessage = boundariesFrozenMessage(
+        lockdownActive = lockdownMode,
+        lockdownRemainingMs = lockdownRemainingMs,
+        boundariesLockSuffix = "turn it off in Settings to remove websites."
+    )
 
     val blockedApps = storedApps.orEmpty()
     val blockedWebsites = storedWebsites.orEmpty()
@@ -222,6 +272,11 @@ internal fun AppPickerScreen(
     var limitTarget by remember { mutableStateOf<AppRowItem?>(null) }
 
     val snackbarHostState = remember { SnackbarHostState() }
+    // One-shot entrance cascade for the persistent chrome (top bar -> tabs -> presets);
+    // remembered so it runs on first composition only. Tab bodies animate via
+    // AnimatedContent + animateItem instead, so tab switches never replay the cascade.
+    var entered by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { entered = true }
     val appOverrides = remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
     val websiteOverrides = remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
     val appPermanentOverrides = remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
@@ -374,14 +429,24 @@ internal fun AppPickerScreen(
             }
         }
     }
-    val onWebsiteDeleteRequest: (BlockedWebsite) -> Unit = remember {
-        { site -> pendingDeleteSite = site }
+    val onWebsiteDeleteRequest: (BlockedWebsite) -> Unit = remember(
+        boundariesFrozen, deleteLockedMessage, scope, snackbarHostState
+    ) {
+        { site ->
+            if (boundariesFrozen) {
+                scope.launch { snackbarHostState.showSnackbar(deleteLockedMessage) }
+            } else {
+                pendingDeleteSite = site
+            }
+        }
     }
-    val onLimitClick: (AppRowItem) -> Unit = remember(boundariesLocked, scope, snackbarHostState) {
+    val onLimitClick: (AppRowItem) -> Unit = remember(
+        boundariesFrozen, limitLockedMessage, scope, snackbarHostState
+    ) {
         { app ->
-            if (boundariesLocked && app.isBlocked) {
+            if (boundariesFrozen && app.isBlocked) {
                 scope.launch {
-                    snackbarHostState.showSnackbar("Boundaries Lock is ON — turn it off in Settings to change limits.")
+                    snackbarHostState.showSnackbar(limitLockedMessage)
                 }
             } else {
                 limitTarget = app
@@ -640,32 +705,37 @@ internal fun AppPickerScreen(
     }
 
     val unblockAllApps: () -> Unit = {
-        val targets = blockedApps.filter { it.isBlocked }
-        if (targets.isEmpty()) {
-            scope.launch { snackbarHostState.showSnackbar("No blocked apps to unblock.") }
+        if (boundariesFrozen) {
+            // Chip is disabled while frozen; this is defense-in-depth for programmatic calls.
+            scope.launch { snackbarHostState.showSnackbar(removalLockedMessage) }
         } else {
-            pendingBulk = BulkAction(
-                title = "Unblock all apps?",
-                message = "This unblocks ${targets.size} app(s): ${summarizeNames(targets.map { it.appName })}. They will be usable immediately.",
-                confirmLabel = "Unblock ${targets.size}",
-                isDestructive = true,
-                onConfirm = {
-                    scope.launch {
-                        val ok = try {
-                            settings.setAppsBlockedBatch(
-                                targets.associate { it.packageName to false }
+            val targets = blockedApps.filter { it.isBlocked }
+            if (targets.isEmpty()) {
+                scope.launch { snackbarHostState.showSnackbar("No blocked apps to unblock.") }
+            } else {
+                pendingBulk = BulkAction(
+                    title = "Unblock all apps?",
+                    message = "This unblocks ${targets.size} app(s): ${summarizeNames(targets.map { it.appName })}. They will be usable immediately.",
+                    confirmLabel = "Unblock ${targets.size}",
+                    isDestructive = true,
+                    onConfirm = {
+                        scope.launch {
+                            val ok = try {
+                                settings.setAppsBlockedBatch(
+                                    targets.associate { it.packageName to false }
+                                )
+                                true
+                            } catch (_: Exception) {
+                                false
+                            }
+                            snackbarHostState.showSnackbar(
+                                if (ok) "Unblocked ${targets.size} app(s)."
+                                else "Couldn't unblock those apps. Nothing changed."
                             )
-                            true
-                        } catch (_: Exception) {
-                            false
                         }
-                        snackbarHostState.showSnackbar(
-                            if (ok) "Unblocked ${targets.size} app(s)."
-                            else "Couldn't unblock those apps. Nothing changed."
-                        )
                     }
-                }
-            )
+                )
+            }
         }
     }
 
@@ -736,30 +806,35 @@ internal fun AppPickerScreen(
     }
 
     val unblockAllSites: () -> Unit = {
-        val targets = blockedWebsites.filter { it.isBlocked }
-        if (targets.isEmpty()) {
-            scope.launch { snackbarHostState.showSnackbar("No blocked websites to unblock.") }
+        if (boundariesFrozen) {
+            // Chip is disabled while frozen; this is defense-in-depth for programmatic calls.
+            scope.launch { snackbarHostState.showSnackbar(removalLockedMessage) }
         } else {
-            pendingBulk = BulkAction(
-                title = "Unblock all websites?",
-                message = "This unblocks ${targets.size} site(s): ${summarizeNames(targets.map { it.domain })}.",
-                confirmLabel = "Unblock ${targets.size}",
-                isDestructive = true,
-                onConfirm = {
-                    scope.launch {
-                        val ok = try {
-                            settings.setWebsitesBlockedBatch(targets.associate { it.domain to false })
-                            true
-                        } catch (_: Exception) {
-                            false
+            val targets = blockedWebsites.filter { it.isBlocked }
+            if (targets.isEmpty()) {
+                scope.launch { snackbarHostState.showSnackbar("No blocked websites to unblock.") }
+            } else {
+                pendingBulk = BulkAction(
+                    title = "Unblock all websites?",
+                    message = "This unblocks ${targets.size} site(s): ${summarizeNames(targets.map { it.domain })}.",
+                    confirmLabel = "Unblock ${targets.size}",
+                    isDestructive = true,
+                    onConfirm = {
+                        scope.launch {
+                            val ok = try {
+                                settings.setWebsitesBlockedBatch(targets.associate { it.domain to false })
+                                true
+                            } catch (_: Exception) {
+                                false
+                            }
+                            snackbarHostState.showSnackbar(
+                                if (ok) "Unblocked ${targets.size} site(s)."
+                                else "Couldn't unblock those sites. Nothing changed."
+                            )
                         }
-                        snackbarHostState.showSnackbar(
-                            if (ok) "Unblocked ${targets.size} site(s)."
-                            else "Couldn't unblock those sites. Nothing changed."
-                        )
                     }
-                }
-            )
+                )
+            }
         }
     }
 
@@ -771,42 +846,44 @@ internal fun AppPickerScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 16.dp)
+                .padding(horizontal = UiTokens.ScreenPadding)
         ) {
             Spacer(Modifier.height(4.dp))
 
             // TopAppBar-style header: back arrow + title + search action.
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(min = 56.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = onBack) {
-                    Icon(
-                        Icons.AutoMirrored.Rounded.ArrowBack,
-                        contentDescription = "Back to boundaries",
-                        tint = MaterialTheme.colorScheme.onSurface
-                    )
-                }
-                Text(
-                    text = if (selectedTab == PickerTab.APPLICATIONS) "Applications" else "Websites",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    modifier = Modifier.weight(1f)
-                )
-                IconButton(
-                    onClick = {
-                        searchActive = !searchActive
-                        if (!searchActive) clearAppSearch()
-                    }
+            StaggeredFadeSlide(visible = entered, index = 0) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 56.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Icon(
-                        imageVector = if (searchActive) Icons.Rounded.Close else Icons.Rounded.Search,
-                        contentDescription = if (searchActive) "Close search" else "Search",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            Icons.AutoMirrored.Rounded.ArrowBack,
+                            contentDescription = "Back to boundaries",
+                            tint = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                    Text(
+                        text = if (selectedTab == PickerTab.APPLICATIONS) "Applications" else "Websites",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f)
                     )
+                    IconButton(
+                        onClick = {
+                            searchActive = !searchActive
+                            if (!searchActive) clearAppSearch()
+                        }
+                    ) {
+                        Icon(
+                            imageVector = if (searchActive) Icons.Rounded.Close else Icons.Rounded.Search,
+                            contentDescription = if (searchActive) "Close search" else "Search",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
 
@@ -826,59 +903,86 @@ internal fun AppPickerScreen(
             }
 
             // Seamless M3 tabs (no segmented pills, no divider line).
-            PrimaryTabRow(
-                selectedTabIndex = if (selectedTab == PickerTab.APPLICATIONS) 0 else 1,
-                containerColor = Color.Transparent,
-                divider = {}
-            ) {
-                Tab(
-                    selected = selectedTab == PickerTab.APPLICATIONS,
-                    onClick = { onTabChange(PickerTab.APPLICATIONS) },
-                    text = { Text("Applications") }
-                )
-                Tab(
-                    selected = selectedTab == PickerTab.WEBSITES,
-                    onClick = { onTabChange(PickerTab.WEBSITES) },
-                    text = { Text("Websites") }
-                )
+            StaggeredFadeSlide(visible = entered, index = 1) {
+                PrimaryTabRow(
+                    selectedTabIndex = if (selectedTab == PickerTab.APPLICATIONS) 0 else 1,
+                    containerColor = Color.Transparent,
+                    divider = {}
+                ) {
+                    Tab(
+                        selected = selectedTab == PickerTab.APPLICATIONS,
+                        onClick = { onTabChange(PickerTab.APPLICATIONS) },
+                        text = { Text("Applications") }
+                    )
+                    Tab(
+                        selected = selectedTab == PickerTab.WEBSITES,
+                        onClick = { onTabChange(PickerTab.WEBSITES) },
+                        text = { Text("Websites") }
+                    )
+                }
             }
 
-            when (selectedTab) {
+            // Tab bodies crossfade with a subtle slide; hoisted list states survive
+            // the transition, so scroll position is preserved across tab switches.
+            AnimatedContent(
+                targetState = selectedTab,
+                transitionSpec = {
+                    (fadeIn(animationSpec = MotionTokens.FadeFloat) +
+                        slideInVertically(
+                            animationSpec = MotionTokens.SpatialOffset,
+                            initialOffsetY = { it / 12 }
+                        )) togetherWith fadeOut(animationSpec = MotionTokens.FadeFloat)
+                },
+                label = "pickerTabs"
+            ) { tab ->
+                when (tab) {
                 PickerTab.APPLICATIONS -> {
+                    // Single Column child: AnimatedContent stacks multiple top-level children
+                    // like a Box, so presets + count + list must share one Column. The chips
+                    // strip stays pinned above the list with an opaque background.
+                    Column(modifier = Modifier.fillMaxSize()) {
                     Spacer(Modifier.height(12.dp))
 
                     // Quick presets in a horizontally scrollable row (filled tonal, no borders).
+                    // The parent owns the 16dp start alignment; the end padding lets the last
+                    // chip scroll fully into view instead of vanishing under the parent edge.
+                    // Opaque background so scrolling content never shows through the strip.
                     LazyRow(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.background),
+                        contentPadding = PaddingValues(end = 16.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         item {
                             TonalActionChip(
-                                label = "Block All Social",
+                                label = "Block social",
                                 icon = Icons.Rounded.Share,
-                                containerColor = MaterialTheme.colorScheme.primaryContainer,
-                                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                                onClick = blockAllSocialApps
+                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                onClick = blockAllSocialApps,
+                                modifier = Modifier.animateItem()
                             )
                         }
                         item {
                             TonalActionChip(
-                                label = "Block All Video",
+                                label = "Block video",
                                 icon = Icons.Rounded.PlayArrow,
                                 containerColor = MaterialTheme.colorScheme.secondaryContainer,
                                 contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                                onClick = blockAllVideoApps
+                                onClick = blockAllVideoApps,
+                                modifier = Modifier.animateItem()
                             )
                         }
                         item {
                             TonalActionChip(
-                                label = "Unblock All",
+                                label = "Unblock all",
                                 icon = Icons.Rounded.LockOpen,
                                 containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
                                 contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                                enabled = !boundariesLocked,
-                                onClick = unblockAllApps
+                                enabled = !boundariesFrozen,
+                                onClick = unblockAllApps,
+                                modifier = Modifier.animateItem()
                             )
                         }
                     }
@@ -887,7 +991,9 @@ internal fun AppPickerScreen(
 
                     val loadState = appsLoadState
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .animateContentSize(animationSpec = MotionTokens.SpatialIntSize),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -902,14 +1008,15 @@ internal fun AppPickerScreen(
                                 }
                                 else -> "Loading boundaries…"
                             },
-                            style = MaterialTheme.typography.labelMedium,
+                            style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f)
                         )
                         Text(
                             "System",
-                            style = MaterialTheme.typography.labelMedium,
+                            style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Spacer(Modifier.width(4.dp))
@@ -922,6 +1029,13 @@ internal fun AppPickerScreen(
 
                     Spacer(Modifier.height(8.dp))
 
+                    // Weighted box owns the remaining space: loading/error/empty states and
+                    // the list all fill exactly this region, never the chips strip above.
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                    ) {
                     when {
                         loadState is AppsLoadState.Loading -> {
                             LoadingState("Loading installed apps…")
@@ -937,10 +1051,11 @@ internal fun AppPickerScreen(
                             )
                         }
                         else -> {
+                            Column(modifier = Modifier.fillMaxSize()) {
                             if (staleUninstalledBlockedCount > 0) {
                                 Text(
                                     text = "$staleUninstalledBlockedCount blocked app(s) not currently installed — hidden from this list.",
-                                    style = MaterialTheme.typography.labelSmall,
+                                    style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.padding(bottom = 4.dp)
                                 )
@@ -955,9 +1070,9 @@ internal fun AppPickerScreen(
                                 val isSearching = debouncedQuery.isNotBlank()
                                 LazyColumn(
                                     state = appsListState,
-                                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(UiTokens.ItemGap),
                                     contentPadding = PaddingValues(bottom = 24.dp),
-                                    modifier = Modifier.fillMaxSize()
+                                    modifier = Modifier.weight(1f).fillMaxWidth()
                                 ) {
                                     groups.forEach { group ->
                                         // During search every matching category is expanded;
@@ -974,6 +1089,7 @@ internal fun AppPickerScreen(
                                                 group = group,
                                                 expanded = expanded,
                                                 isSearching = isSearching,
+                                                modifier = Modifier.animateItem(),
                                                 onToggle = {
                                                     categoryExpansion.value =
                                                         categoryExpansion.value +
@@ -1012,22 +1128,31 @@ internal fun AppPickerScreen(
                                                     },
                                                     onLimitClick = onLimitClick,
                                                     modifier = Modifier.animateItem(),
-                                                    boundariesLocked = boundariesLocked
+                                                    boundariesFrozen = boundariesFrozen,
+                                                    lockedMessage = removalLockedMessage
                                                 )
                                             }
                                         }
                                     }
                                 }
-                            }
-                        }
-                    }
+                            } // else (list)
+                            } // Column (stale note + list)
+                        } // else -> (content ready)
+                    } // when (load state)
+                    } // Box (weighted content region)
+                    } // Column (tab body)
                 }
 
                 PickerTab.WEBSITES -> {
+                    // Same single-Column treatment as APPLICATIONS: AnimatedContent stacks
+                    // siblings, so the header/presets/list share one Column here too.
+                    Column(modifier = Modifier.fillMaxSize()) {
                     Spacer(Modifier.height(12.dp))
 
                     Row(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .animateContentSize(animationSpec = MotionTokens.SpatialIntSize),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -1041,69 +1166,77 @@ internal fun AppPickerScreen(
                             } else {
                                 "Loading website boundaries…"
                             },
-                            style = MaterialTheme.typography.labelMedium,
+                            style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f)
                         )
-                        FilledTonalButton(
+                        TonalActionChip(
+                            label = "Add website",
+                            icon = Icons.Rounded.Add,
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
                             onClick = {
                                 websiteInputError = null
                                 showAddWebsiteDialog = true
-                            },
-                            shape = MaterialTheme.shapes.medium,
-                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp)
-                        ) {
-                            Icon(
-                                Icons.Rounded.Add,
-                                contentDescription = null,
-                                modifier = Modifier.size(16.dp)
-                            )
-                            Spacer(Modifier.width(6.dp))
-                            Text("Add website", style = MaterialTheme.typography.labelLarge)
-                        }
+                            }
+                        )
                     }
 
                     Spacer(Modifier.height(12.dp))
 
-                    // Website presets (filled tonal, no borders).
+                    // Website presets (filled tonal, no borders). Same end padding as the
+                    // apps preset row so the trailing chip scrolls fully into view.
+                    // Opaque background so scrolling content never shows through the strip.
                     LazyRow(
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.background),
+                        contentPadding = PaddingValues(end = 16.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         item {
                             TonalActionChip(
-                                label = "Block Social Sites",
+                                label = "Block social",
                                 icon = Icons.Rounded.Share,
-                                containerColor = MaterialTheme.colorScheme.primaryContainer,
-                                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                                onClick = blockSocialSites
+                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                onClick = blockSocialSites,
+                                modifier = Modifier.animateItem()
                             )
                         }
                         item {
                             TonalActionChip(
-                                label = "Block Video Sites",
+                                label = "Block video",
                                 icon = Icons.Rounded.PlayArrow,
                                 containerColor = MaterialTheme.colorScheme.secondaryContainer,
                                 contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                                onClick = blockVideoSites
+                                onClick = blockVideoSites,
+                                modifier = Modifier.animateItem()
                             )
                         }
                         item {
                             TonalActionChip(
-                                label = "Unblock All",
+                                label = "Unblock all",
                                 icon = Icons.Rounded.LockOpen,
                                 containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
                                 contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                                enabled = !boundariesLocked,
-                                onClick = unblockAllSites
+                                enabled = !boundariesFrozen,
+                                onClick = unblockAllSites,
+                                modifier = Modifier.animateItem()
                             )
                         }
                     }
 
                     Spacer(Modifier.height(12.dp))
 
+                    // Weighted box owns the remaining space (same as APPLICATIONS above).
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                    ) {
                     when {
                         !websitesStorageLoaded -> LoadingState("Loading website boundaries…")
                         visibleWebsites.isEmpty() -> ListStateMessage(
@@ -1121,7 +1254,7 @@ internal fun AppPickerScreen(
                         )
                         else -> LazyColumn(
                             state = websitesListState,
-                            verticalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(UiTokens.ItemGap),
                             contentPadding = PaddingValues(bottom = 24.dp),
                             modifier = Modifier.fillMaxSize()
                         ) {
@@ -1134,13 +1267,17 @@ internal fun AppPickerScreen(
                                     },
                                     onDeleteRequest = onWebsiteDeleteRequest,
                                     modifier = Modifier.animateItem(),
-                                    boundariesLocked = boundariesLocked
+                                    boundariesFrozen = boundariesFrozen,
+                                    lockedMessage = removalLockedMessage
                                 )
                             }
                         }
-                    }
+                    } // when (websites load state)
+                    } // Box (weighted content region)
+                    } // Column (tab body)
                 }
-            }
+            } // when(tab)
+        } // AnimatedContent
         }
 
         SnackbarHost(
@@ -1168,7 +1305,7 @@ internal fun AppPickerScreen(
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
                         "Enter the domain or URL you want to block in Chrome, Brave, Samsung Internet, and other browsers:",
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                     OutlinedTextField(
@@ -1181,14 +1318,16 @@ internal fun AppPickerScreen(
                         singleLine = true,
                         isError = websiteInputError != null,
                         supportingText = {
-                            websiteInputError?.let { Text(it) }
+                            websiteInputError?.let {
+                                Text(it, style = MaterialTheme.typography.bodyMedium)
+                            }
                         },
                         shape = RoundedCornerShape(14.dp),
                         modifier = Modifier.fillMaxWidth()
                     )
                     Text(
                         "Only the hostname is saved — schemes, paths, and ports are trimmed.",
-                        style = MaterialTheme.typography.labelSmall,
+                        style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
@@ -1405,7 +1544,7 @@ private fun LoadingState(message: String) {
             CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
             Text(
                 message,
-                style = MaterialTheme.typography.bodySmall,
+                style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
         }
@@ -1438,7 +1577,7 @@ private fun AppsErrorState(message: String, onRetry: () -> Unit) {
             )
             Text(
                 message,
-                style = MaterialTheme.typography.bodySmall,
+                style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
             )
@@ -1480,69 +1619,96 @@ private fun ListStateMessage(
 }
 
 /**
- * Collapsible category section header: rotating chevron, name, and a count that shows
- * "X of Y" while searching or "N blocked" when the category has blocked apps.
+ * Collapsible category section header. Styled like the shared SectionHeader (small
+ * semibold onSurfaceVariant label) but it owns a 48dp tap target, a rotating chevron
+ * and the count that shows "X of Y" while searching or "N blocked" when the category
+ * has blocked apps. The extra 16dp top padding spaces groups apart without inflating
+ * the 10dp gap between rows inside a group.
  */
 @Composable
 private fun CategoryHeader(
     group: CategoryGroup,
     expanded: Boolean,
     isSearching: Boolean,
-    onToggle: () -> Unit
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     val chevronRotation by animateFloatAsState(
         targetValue = if (expanded) 0f else -90f,
         label = "categoryChevron"
     )
-    Row(
-        modifier = Modifier
+    val pressInteraction = remember { MutableInteractionSource() }
+    Column(
+        modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .clickable(role = Role.Button, onClick = onToggle)
-            .padding(horizontal = 8.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .padding(top = 16.dp)
     ) {
-        Icon(
-            imageVector = Icons.Rounded.ExpandMore,
-            contentDescription = if (expanded) {
-                "Collapse ${group.category}"
-            } else {
-                "Expand ${group.category}"
-            },
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        Row(
             modifier = Modifier
-                .size(20.dp)
-                .rotate(chevronRotation)
-        )
-        Spacer(Modifier.width(8.dp))
-        Text(
-            text = group.category,
-            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
-            color = MaterialTheme.colorScheme.onSurface,
-            maxLines = 1,
-            modifier = Modifier.weight(1f)
-        )
-        Text(
-            text = when {
-                isSearching -> "${group.apps.size} of ${group.totalCount}"
-                group.blockedCount == 1 -> "1 blocked"
-                group.blockedCount > 1 -> "${group.blockedCount} blocked"
-                group.totalCount == 1 -> "1 app"
-                else -> "${group.totalCount} apps"
-            },
-            style = MaterialTheme.typography.labelMedium,
-            color = if (group.blockedCount > 0) {
-                MaterialTheme.colorScheme.primary
-            } else {
-                MaterialTheme.colorScheme.onSurfaceVariant
-            }
-        )
+                .fillMaxWidth()
+                .then(pressScaleModifier(pressInteraction))
+                .clip(RoundedCornerShape(10.dp))
+                .clickable(
+                    interactionSource = pressInteraction,
+                    indication = LocalIndication.current,
+                    role = Role.Button,
+                    onClick = onToggle
+                )
+                .heightIn(min = 48.dp)
+                .padding(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.ExpandMore,
+                contentDescription = if (expanded) {
+                    "Collapse ${group.category}"
+                } else {
+                    "Expand ${group.category}"
+                },
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .size(20.dp)
+                    .rotate(chevronRotation)
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = group.category,
+                style = MaterialTheme.typography.titleSmall.copy(
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.1.sp
+                ),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                text = when {
+                    isSearching -> "${group.apps.size} of ${group.totalCount}"
+                    group.blockedCount == 1 -> "1 blocked"
+                    group.blockedCount > 1 -> "${group.blockedCount} blocked"
+                    group.totalCount == 1 -> "1 app"
+                    else -> "${group.totalCount} apps"
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (group.blockedCount > 0) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                maxLines = 1
+            )
+        }
     }
 }
 
 /**
- * Website row: same M3 treatment as app rows — toggleable card, tonal rounded-square
- * domain icon (no ring), delete for customs, permanent-lock affordance and Switch.
+ * Website row: same treatment as app rows — toggleable tonal card, [IconBadge] squircle
+ * for the domain glyph, single-line ellipsized metadata, a quiet middle cluster (delete
+ * for customs, permanent lock) and one strong trailing control (the Switch). The switch
+ * sits in a plain Box while unfrozen so taps fall through to the row toggleable exactly
+ * once; the Box only becomes clickable while frozen, to surface the refusal message.
+ * Inner icon buttons keep their own onClick and consume the tap without toggling.
  */
 @Composable
 private fun WebsiteRow(
@@ -1551,10 +1717,11 @@ private fun WebsiteRow(
     onPermanentToggle: () -> Unit,
     onDeleteRequest: (BlockedWebsite) -> Unit,
     modifier: Modifier = Modifier,
-    boundariesLocked: Boolean = false
+    boundariesFrozen: Boolean = false,
+    lockedMessage: String = ""
 ) {
     val context = LocalContext.current
-    val switchEnabled = !(boundariesLocked && site.isBlocked)
+    val switchEnabled = !(boundariesFrozen && site.isBlocked)
     Card(
         colors = CardDefaults.cardColors(
             containerColor = if (site.isBlocked) MaterialTheme.colorScheme.surfaceContainerHighest else MaterialTheme.colorScheme.surfaceContainer
@@ -1576,27 +1743,20 @@ private fun WebsiteRow(
                 .padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(
-                        if (site.isBlocked) MaterialTheme.colorScheme.tertiaryContainer
-                        else MaterialTheme.colorScheme.surfaceContainerHighest
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Language,
-                    contentDescription = null,
-                    tint = if (site.isBlocked) {
-                        MaterialTheme.colorScheme.onTertiaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                    modifier = Modifier.size(20.dp)
-                )
-            }
+            IconBadge(
+                icon = Icons.Rounded.Language,
+                size = UiTokens.IconTileSize,
+                containerColor = if (site.isBlocked) {
+                    MaterialTheme.colorScheme.secondaryContainer
+                } else {
+                    MaterialTheme.colorScheme.surfaceContainerHighest
+                },
+                contentColor = if (site.isBlocked) {
+                    MaterialTheme.colorScheme.onSecondaryContainer
+                } else {
+                    MaterialTheme.colorScheme.onSurfaceVariant
+                }
+            )
 
             Spacer(Modifier.width(12.dp))
 
@@ -1605,7 +1765,8 @@ private fun WebsiteRow(
                     text = site.displayName,
                     style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium),
                     color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
                 Text(
                     text = buildString {
@@ -1614,13 +1775,10 @@ private fun WebsiteRow(
                         append(" · ")
                         append(if (site.isBlocked) "Blocked" else "Allowed")
                     },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (site.isBlocked) {
-                        MaterialTheme.colorScheme.tertiary
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                    maxLines = 2
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
 
@@ -1629,8 +1787,10 @@ private fun WebsiteRow(
                     Icon(
                         Icons.Rounded.Delete,
                         contentDescription = "Remove ${site.domain}",
-                        tint = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.size(18.dp)
+                        // Quiet row affordance; the confirmation dialog carries the
+                        // destructive weight. Strict-mode gating is unchanged.
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp)
                     )
                 }
             }
@@ -1639,16 +1799,23 @@ private fun WebsiteRow(
                 isPermanent = site.isPermanent,
                 label = site.displayName,
                 onClick = onPermanentToggle,
-                enabled = !boundariesLocked
+                enabled = !boundariesFrozen
             )
 
+            // Plain Box while unfrozen so switch-area taps fall through to the row
+            // toggleable exactly once (a disabled clickable would still swallow them).
+            // Only while frozen does the Box become clickable, to surface the refusal.
             Box(
-                modifier = Modifier.clickable(enabled = !switchEnabled) {
-                    Toast.makeText(
-                        context,
-                        "Boundaries Lock is ON — turn it off in Settings to remove",
-                        Toast.LENGTH_SHORT
-                    ).show()
+                modifier = if (switchEnabled) {
+                    Modifier
+                } else {
+                    Modifier.clickable {
+                        Toast.makeText(
+                            context,
+                            lockedMessage,
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
                 }
             ) {
                 Switch(
@@ -1678,9 +1845,10 @@ private fun WebsiteRow(
 }
 
 /**
- * Compact always-block lock toggle used by both app and website rows.
- * Filled tonal square when permanent; no outline variant is used anywhere.
- * 40dp visual with a 12dp rounded container, disabled while Boundaries Lock is on.
+ * Compact always-block lock toggle used by both app and website rows. Deliberately
+ * low-emphasis: no container, just an onSurfaceVariant 20dp glyph inside a 48dp touch
+ * target (primary tint only when the lock is active). Disabled while boundaries are
+ * frozen (Boundaries Lock or Strict Mode).
  */
 @Composable
 private fun PermanentLockButton(
@@ -1689,31 +1857,28 @@ private fun PermanentLockButton(
     onClick: () -> Unit,
     enabled: Boolean
 ) {
-    Box(
+    val contentColor = when {
+        !enabled -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+        isPermanent -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    IconButton(
+        onClick = onClick,
+        enabled = enabled,
         modifier = Modifier
-            .size(40.dp)
-            .clip(RoundedCornerShape(12.dp))
-            .background(
-                if (isPermanent) MaterialTheme.colorScheme.primaryContainer else Color.Transparent
-            )
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
+            .size(48.dp)
             .semantics {
                 contentDescription = if (isPermanent) {
                     "Stop always blocking $label"
                 } else {
                     "Always block $label"
                 }
-            },
-        contentAlignment = Alignment.Center
+            }
     ) {
         Icon(
             imageVector = Icons.Rounded.Lock,
             contentDescription = null,
-            tint = when {
-                !enabled -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
-                isPermanent -> MaterialTheme.colorScheme.onPrimaryContainer
-                else -> MaterialTheme.colorScheme.onSurfaceVariant
-            },
+            tint = contentColor,
             modifier = Modifier.size(20.dp)
         )
     }
@@ -1721,8 +1886,14 @@ private fun PermanentLockButton(
 
 /**
  * App row: the whole card is a switch ([toggleable] with [Role.Switch]) so a tap anywhere
- * toggles blocking; the trailing [Switch] is display-only (onCheckedChange = null).
- * The icon is seamless (40dp, clipped to a 12dp rounded square, no tonal circle/ring).
+ * toggles blocking; the trailing [Switch] is the row's one strong control. The switch
+ * sits in a plain Box while unfrozen so taps on the track/thumb fall through to the row
+ * toggleable exactly once; the Box only becomes clickable while frozen, to surface the
+ * refusal message. Leading [AppIconTileForPackage] is a seamless 40dp squircle (no
+ * container/ring); the middle cluster ("+ Limit" text action and the always-block lock)
+ * stays quiet and aligned so it never competes with the switch. Inner icon buttons keep
+ * their own onClick and consume the tap without toggling. Metadata is a single
+ * ellipsized line.
  */
 @Composable
 private fun InstalledAppRow(
@@ -1732,10 +1903,11 @@ private fun InstalledAppRow(
     onPermanentToggle: () -> Unit,
     onLimitClick: (AppRowItem) -> Unit,
     modifier: Modifier = Modifier,
-    boundariesLocked: Boolean = false
+    boundariesFrozen: Boolean = false,
+    lockedMessage: String = ""
 ) {
     val context = LocalContext.current
-    val switchEnabled = !(boundariesLocked && app.isBlocked)
+    val switchEnabled = !(boundariesFrozen && app.isBlocked)
     Card(
         colors = CardDefaults.cardColors(
             containerColor = if (app.isBlocked) MaterialTheme.colorScheme.surfaceContainerHighest else MaterialTheme.colorScheme.surfaceContainer
@@ -1757,10 +1929,10 @@ private fun InstalledAppRow(
                 .padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            AppIconBadge(
+            AppIconTileForPackage(
                 packageName = app.packageName,
-                appName = app.appName,
-                isBlocked = app.isBlocked
+                name = app.appName,
+                size = UiTokens.IconTileSize
             )
 
             Spacer(Modifier.width(12.dp))
@@ -1770,49 +1942,55 @@ private fun InstalledAppRow(
                     text = app.appName,
                     style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium),
                     color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = buildString {
+                    // Status beats category: an uninstalled row shows "Not installed"
+                    // alone so the status word can never be elided mid-word.
+                    text = if (!app.isInstalled) {
+                        "Not installed"
+                    } else buildString {
                         if (app.isPermanent) append("Always blocked · ")
                         append(app.category)
                         if (app.todayMinutes > 0) append(" · ${app.todayMinutes}m today")
                         if (limitMinutes != null) append(" · ${limitMinutes}m limit")
-                        if (!app.isInstalled) append(" · Not installed")
                     },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (app.isBlocked) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                    maxLines = 2
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
 
-            AppLimitChip(
+            LimitTextButton(
                 appName = app.appName,
                 limitMinutes = limitMinutes,
                 usedMinutes = app.todayMinutes,
                 onClick = { onLimitClick(app) }
             )
 
-            Spacer(Modifier.width(4.dp))
-
             PermanentLockButton(
                 isPermanent = app.isPermanent,
                 label = app.appName,
                 onClick = onPermanentToggle,
-                enabled = !boundariesLocked
+                enabled = !boundariesFrozen
             )
 
+            // Plain Box while unfrozen so switch-area taps fall through to the row
+            // toggleable exactly once (a disabled clickable would still swallow them).
+            // Only while frozen does the Box become clickable, to surface the refusal.
             Box(
-                modifier = Modifier.clickable(enabled = !switchEnabled) {
-                    Toast.makeText(
-                        context,
-                        "Boundaries Lock is ON — turn it off in Settings to remove",
-                        Toast.LENGTH_SHORT
-                    ).show()
+                modifier = if (switchEnabled) {
+                    Modifier
+                } else {
+                    Modifier.clickable {
+                        Toast.makeText(
+                            context,
+                            lockedMessage,
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
                 }
             ) {
                 Switch(
@@ -1845,63 +2023,46 @@ private fun InstalledAppRow(
     }
 }
 
-/** Filled tonal daily-limit chip — never outlined. */
+/**
+ * Quiet daily-limit action in the row's middle cluster: a borderless text button
+ * (onSurfaceVariant, 14sp) that reads "+ Limit" when unset, "30m" when set, and turns
+ * error-tinted once the limit is reached. 48dp touch target, aligned with the lock
+ * toggle next to it.
+ */
 @Composable
-private fun AppLimitChip(
+private fun LimitTextButton(
     appName: String,
     limitMinutes: Int?,
     usedMinutes: Long,
     onClick: () -> Unit
 ) {
     val overLimit = limitMinutes != null && usedMinutes >= limitMinutes
-    AssistChip(
+    TextButton(
         onClick = onClick,
-        label = {
-            Text(
-                text = when {
-                    limitMinutes == null -> "+ Limit"
-                    overLimit -> "${limitMinutes}m limit · over"
-                    else -> "${limitMinutes}m limit"
-                },
-                style = MaterialTheme.typography.labelSmall
-            )
-        },
-        leadingIcon = {
-            Icon(
-                imageVector = if (limitMinutes == null) Icons.Rounded.Add else Icons.Rounded.Timer,
-                contentDescription = null,
-                modifier = Modifier.size(14.dp)
-            )
-        },
-        colors = if (overLimit) {
-            AssistChipDefaults.assistChipColors(
-                containerColor = MaterialTheme.colorScheme.errorContainer,
-                labelColor = MaterialTheme.colorScheme.onErrorContainer,
-                leadingIconContentColor = MaterialTheme.colorScheme.onErrorContainer
-            )
-        } else if (limitMinutes == null) {
-            AssistChipDefaults.assistChipColors(
-                containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
-                labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                leadingIconContentColor = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        } else {
-            AssistChipDefaults.assistChipColors(
-                containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                labelColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                leadingIconContentColor = MaterialTheme.colorScheme.onSecondaryContainer
-            )
-        },
-        border = null,
-        shape = RoundedCornerShape(50),
-        modifier = Modifier.semantics {
-            contentDescription = when {
-                limitMinutes == null -> "Set a daily limit for $appName"
-                overLimit -> "$appName daily limit ${limitMinutes}m, limit reached"
-                else -> "$appName daily limit ${limitMinutes}m"
+        colors = ButtonDefaults.textButtonColors(
+            contentColor = if (overLimit) {
+                MaterialTheme.colorScheme.error
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
             }
-        }
-    )
+        ),
+        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+        modifier = Modifier
+            .heightIn(min = 48.dp)
+            .semantics {
+                contentDescription = when {
+                    limitMinutes == null -> "Set a daily limit for $appName"
+                    overLimit -> "$appName daily limit ${limitMinutes}m, limit reached"
+                    else -> "$appName daily limit ${limitMinutes}m"
+                }
+            }
+    ) {
+        Text(
+            text = if (limitMinutes == null) "+ Limit" else "${limitMinutes}m",
+            style = MaterialTheme.typography.labelLarge,
+            maxLines = 1
+        )
+    }
 }
 
 /**
@@ -1915,11 +2076,13 @@ private fun TonalActionChip(
     containerColor: Color,
     contentColor: Color,
     onClick: () -> Unit,
-    enabled: Boolean = true
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier
 ) {
     AssistChip(
         onClick = onClick,
         enabled = enabled,
+        modifier = modifier,
         label = {
             Text(
                 text = label,
@@ -1956,8 +2119,8 @@ private fun TonalChoiceChip(
         label = { Text(label) },
         colors = if (selected) {
             AssistChipDefaults.assistChipColors(
-                containerColor = MaterialTheme.colorScheme.primaryContainer,
-                labelColor = MaterialTheme.colorScheme.onPrimaryContainer
+                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                labelColor = MaterialTheme.colorScheme.onSecondaryContainer
             )
         } else {
             AssistChipDefaults.assistChipColors(
@@ -1968,62 +2131,6 @@ private fun TonalChoiceChip(
         border = null,
         shape = RoundedCornerShape(50)
     )
-}
-
-/**
- * Seamless app icon: the bitmap itself is clipped to a 12dp rounded square at 40dp with
- * no tonal circle, ring or border behind it. Missing icons fall back to a rounded tonal
- * square with the app's first letter. Internal so the Boundaries overview can reuse the
- * exact same badge (and shared [InstalledAppsRepository] icon cache) for blocked rows.
- */
-@Composable
-internal fun AppIconBadge(packageName: String, appName: String, isBlocked: Boolean) {
-    val context = LocalContext.current
-    // Fast path: memory-cached bitmap avoids IO entirely for rows already seen.
-    var iconBitmap by remember(packageName) {
-        mutableStateOf(InstalledAppsRepository.getCachedIconBitmap(packageName))
-    }
-
-    if (iconBitmap == null) {
-        LaunchedEffect(packageName) {
-            // getAppIconBitmap loads the drawable + toBitmap on IO and caches it.
-            val bmp = InstalledAppsRepository.getAppIconBitmap(context, packageName)
-            if (bmp != null) iconBitmap = bmp
-        }
-    }
-
-    val shape = RoundedCornerShape(12.dp)
-    val bmp = iconBitmap
-    if (bmp != null) {
-        Image(
-            bitmap = bmp,
-            contentDescription = null,
-            modifier = Modifier
-                .size(40.dp)
-                .clip(shape)
-        )
-    } else {
-        Box(
-            modifier = Modifier
-                .size(40.dp)
-                .clip(shape)
-                .background(
-                    if (isBlocked) MaterialTheme.colorScheme.primaryContainer
-                    else MaterialTheme.colorScheme.surfaceContainerHighest
-                ),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = appName.firstOrNull()?.toString()?.uppercase() ?: "A",
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-                color = if (isBlocked) {
-                    MaterialTheme.colorScheme.onPrimaryContainer
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                }
-            )
-        }
-    }
 }
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -2062,7 +2169,7 @@ private fun AppLimitDialog(
                         )
                         append(" Used today: ${app.todayMinutes}m.")
                     },
-                    style = MaterialTheme.typography.bodySmall,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 FlowRow(
@@ -2086,7 +2193,10 @@ private fun AppLimitDialog(
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     supportingText = {
                         if (input.isNotBlank() && !isValid) {
-                            Text("Enter a number from 1 to 1440")
+                            Text(
+                                "Enter a number from 1 to 1440",
+                                style = MaterialTheme.typography.bodyMedium
+                            )
                         }
                     },
                     shape = RoundedCornerShape(14.dp),
@@ -2094,7 +2204,7 @@ private fun AppLimitDialog(
                 )
                 Text(
                     "Once the limit is reached the app is blocked for the rest of the day.",
-                    style = MaterialTheme.typography.labelSmall,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
