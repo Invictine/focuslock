@@ -11,8 +11,14 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api as convexApi } from "../../convex/_generated/api";
 import {
   localDate,
+  localDateOffset,
   syncApi,
+  type KnownTarget,
+  type KnownTargetDevice,
+  type TargetGroup,
+  type TargetGroupMember,
   type UsageBucket,
+  type UsageSummary,
   type UserPrefs,
 } from "./sync";
 import { useFocusAuth } from "./auth";
@@ -571,6 +577,203 @@ function useSyncedPrefs(dashboard: any) {
 const EMPTY_DEVICES: any[] = [];
 const EMPTY_USAGE: NativeUsage[] = [];
 const EMPTY_TARGETS: any[] = [];
+const EMPTY_GROUPS: any[] = [];
+
+// Stable args object for no-argument Convex queries — a fresh {} per render
+// would change the useMemo key inside convex/react's useQuery and resubscribe.
+const EMPTY_ARGS: Record<string, never> = {};
+
+type UsageRange = "today" | "7d" | "30d" | "all";
+const USAGE_RANGES: { id: UsageRange; label: string }[] = [
+  { id: "today", label: "Today" },
+  { id: "7d", label: "7 days" },
+  { id: "30d", label: "30 days" },
+  { id: "all", label: "All time" },
+];
+function usageRangeLabel(range: UsageRange): string {
+  return USAGE_RANGES.find((entry) => entry.id === range)?.label || "Today";
+}
+
+// ---------------------------------------------------------------------------
+// Daily-limit enforcement
+//
+// Desktop has no Rust-side limit engine: `TrackerRuntime` merely minimises the
+// foreground window when its `BlockedTargets` match (exact appId, or domain
+// equality / subdomain suffix). A daily limit is therefore enforced by UNIONing
+// the exhausted target into the same `set_blocked_targets` payload the
+// Boundaries page already drives ("over the limit" == "blocked"). The payload is
+// rebuilt from the current dashboard + today's summary on every pass, so
+// previously-blocked targets are always preserved (union, never replace).
+//
+// Usage rule: combinedSeconds = max(localSecondsToday, serverSecondsToday).
+// - The ~25s upload cadence means the server total lags and may not include
+//   another device's usage yet, i.e. it can only under-report. max() never
+//   under-blocks and still fires from local data while offline.
+// - Trade-off: a stale or larger server figure can over-block until the next
+//   summary refresh; with a single shared cap that is the safe direction.
+// ---------------------------------------------------------------------------
+
+/**
+ * Canonical website key: trimmed, lowercased and with a leading `www.` stripped
+ * — exactly what Rust (`BlockedTargets::normalized`) and the Convex
+ * `normalizeMemberKey` canonicalizer store. Exported so every desktop call site
+ * shares one rule instead of drifting (a legacy `www.foo.com` row must match a
+ * captured `foo.com` usage row). App/package keys are NOT passed through this:
+ * `www.` is a website-only concern.
+ */
+export function normalizeSiteKey(value: string | null | undefined): string {
+  return String(value || "")
+    .trim()
+    .replace(/^www\./i, "")
+    .toLowerCase();
+}
+
+/** `"kind:key"` identity of a target: website keys canonicalized, app keys only
+ * lowercased (Convex stores both lowercased; only websites drop `www.`). */
+function targetKeyFor(kind: string, rawKey: string): string {
+  return kind === "website"
+    ? normalizeSiteKey(rawKey)
+    : String(rawKey || "").toLowerCase();
+}
+
+/** Same mapping the upload path uses, normalized like Convex stores it. */
+function usageTargetFor(entry: NativeUsage): {
+  targetKind: "app" | "website";
+  targetKey: string;
+} {
+  return entry.browserDomain
+    ? {
+        targetKind: "website",
+        targetKey: normalizeSiteKey(entry.browserDomain),
+      }
+    : {
+        targetKind: "app",
+        targetKey: String(entry.appId || "").toLowerCase(),
+      };
+}
+
+/** Today's local seconds keyed by `"kind:key"` with the same canonical keys
+ * Convex stores (websites via normalizeSiteKey, apps lowercased). */
+function localSecondsByTarget(
+  usage: NativeUsage[],
+  date: string,
+): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const entry of usage) {
+    if (entry.date !== date) continue;
+    const { targetKind, targetKey } = usageTargetFor(entry);
+    const key = `${targetKind}:${targetKey}`;
+    map.set(key, (map.get(key) || 0) + Math.max(0, entry.activeSeconds || 0));
+  }
+  return map;
+}
+
+/** Same normalization Rust applies in BlockedTargets::normalized (clean_values). */
+function normalizeTargetKeys(values: string[] | undefined): string[] {
+  const seen = new Set<string>();
+  for (const raw of values || []) {
+    const value = String(raw || "")
+      .trim()
+      .replace(/^www\./i, "")
+      .toLowerCase();
+    if (value) seen.add(value);
+  }
+  return [...seen].sort();
+}
+
+function canonicalBlockedTargets(targets: {
+  appIds?: string[];
+  domains?: string[];
+}): string {
+  return JSON.stringify({
+    appIds: normalizeTargetKeys(targets?.appIds),
+    domains: normalizeTargetKeys(targets?.domains),
+  });
+}
+
+// Exported so pure-function tests can pin the union + key-normalization rules;
+// the component itself consumes it only through the enforcement effect.
+export function evaluateBlockedTargets({
+  dashboard,
+  groups,
+  summary,
+  usage,
+}: {
+  dashboard: any;
+  groups: TargetGroup[] | undefined;
+  summary: UsageSummary | undefined;
+  usage: NativeUsage[];
+}): { targets: { appIds: string[]; domains: string[] }; exceeded: string[] } {
+  // Base set: exactly what the previous dashboard-driven effect sent.
+  const appIds = new Set<string>(
+    (dashboard?.apps || [])
+      .filter((item: AppItem) => item.isBlocked && item.category === "Windows")
+      .map((item: AppItem) => item.packageName),
+  );
+  const domains = new Set<string>(
+    (dashboard?.sites || [])
+      .filter((item: SiteItem) => item.isBlocked)
+      .map((item: SiteItem) => normalizeSiteKey(item.domain))
+      .filter(Boolean),
+  );
+
+  const today = localDate();
+  const localSeconds = localSecondsByTarget(usage, today);
+  const localSecondsFor = (kind: string, rawKey: string) =>
+    localSeconds.get(`${kind}:${targetKeyFor(kind, rawKey)}`) || 0;
+  const exceeded: string[] = [];
+
+  // 1. Groups: one shared cap over every member, summed across devices today.
+  const groupSource: any[] = summary?.groups?.length
+    ? summary.groups
+    : groups || EMPTY_GROUPS;
+  for (const group of groupSource) {
+    const limitMinutes = Number(group?.dailyLimitMinutes) || 0;
+    if (limitMinutes <= 0 || group?.limitEnabled === false) continue;
+    const members: TargetGroupMember[] = group?.members || [];
+    if (!members.length) continue;
+    let local = 0;
+    for (const member of members) {
+      local += localSecondsFor(member.targetKind, member.targetKey);
+    }
+    const server = Number(group?.trackedSeconds) || 0;
+    if (Math.max(local, server) < limitMinutes * 60) continue;
+    for (const member of members) {
+      const key = targetKeyFor(member.targetKind, member.targetKey);
+      if (member.targetKind === "app") appIds.add(key);
+      else if (member.targetKind === "website") domains.add(key);
+    }
+    exceeded.push(String(group?.name || group?.groupId || "group"));
+  }
+
+  // 2. Legacy per-target `appLimits` rows authored on Android. Unsupported
+  //    kinds ("category", schedules, ...) are skipped.
+  const serverTargetSeconds = new Map<string, number>();
+  for (const target of summary?.targets || []) {
+    serverTargetSeconds.set(
+      `${target.targetKind}:${targetKeyFor(target.targetKind, target.targetKey)}`,
+      Number(target.trackedSeconds) || 0,
+    );
+  }
+  for (const row of dashboard?.limits || []) {
+    const kind = String(row?.targetKind || "");
+    if (kind !== "app" && kind !== "website") continue;
+    const limitMinutes = Number(row?.dailyLimitMinutes) || 0;
+    if (limitMinutes <= 0) continue;
+    const key = targetKeyFor(kind, row?.targetKey || "");
+    if (!key) continue;
+    const combined = Math.max(
+      localSecondsFor(kind, key),
+      serverTargetSeconds.get(`${kind}:${key}`) || 0,
+    );
+    if (combined < limitMinutes * 60) continue;
+    if (kind === "app") appIds.add(key);
+    else domains.add(key);
+    exceeded.push(String(row?.label || key));
+  }
+
+  return { targets: { appIds: [...appIds], domains: [...domains] }, exceeded };
+}
 
 // Polling: the tracker samples every second, but the UI only needs to replace
 // state when the payload actually changed. Each poll serializes the incoming
@@ -776,10 +979,54 @@ function DesktopApp() {
   const [tab, setTab] = useState<Tab>("focus");
   const { snapshot, status, error: trackerError, refresh } = useNativeTracking();
   const dashboard: any = useQuery(syncApi.getDashboard, {});
-  const usage: any = useQuery(syncApi.getUsageSummary, {
-    fromDate: localDate(),
-    toDate: localDate(),
-  });
+  // Focus-page range selector. Lives here (above useQuery) so the query args can
+  // depend on it; memoized so a re-render never resubscribes the query.
+  const [usageRange, setUsageRange] = useState<UsageRange>("today");
+  // Day key that rolls over at midnight without depending on unrelated renders
+  // (a memoized `localDate()` would otherwise freeze yesterday's date).
+  const [todayKey, setTodayKey] = useState(() => localDate());
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      setTodayKey((current) => {
+        const next = localDate();
+        return next === current ? current : next;
+      });
+    }, 60_000);
+    return () => window.clearInterval(id);
+  }, []);
+  const usageArgs = useMemo(() => {
+    if (usageRange === "all") return {};
+    if (usageRange === "today")
+      return { fromDate: todayKey, toDate: todayKey };
+    return {
+      // 7d = today + the 6 previous days, 30d = today + the 29 previous days.
+      fromDate: localDateOffset(usageRange === "7d" ? 6 : 29),
+      toDate: todayKey,
+    };
+  }, [usageRange, todayKey]);
+  const usage: any = useQuery(syncApi.getUsageSummary, usageArgs);
+  // Enforcement must NOT follow the range selector: limits are daily, so this
+  // stays today-scoped (Convex dedupes it with the "today" range above).
+  const todayUsageArgs = useMemo(
+    () => ({ fromDate: todayKey, toDate: todayKey }),
+    [todayKey],
+  );
+  const todayUsage: UsageSummary | undefined = useQuery(
+    syncApi.getUsageSummary,
+    todayUsageArgs,
+  ) as any;
+  const groups: TargetGroup[] | undefined = useQuery(
+    syncApi.listGroups,
+    EMPTY_ARGS,
+  ) as any;
+  // All-time, all-device target enumeration for the group picker. This is the
+  // only source that can surface a target tracked solely on another device
+  // (phone package or extension domain). Tolerates undefined on older
+  // deployments / while signed out — the picker falls back to local sources.
+  const knownTargets: KnownTarget[] | undefined = useQuery(
+    syncApi.listKnownTargets,
+    EMPTY_ARGS,
+  ) as any;
   const devices: any[] | undefined = useQuery(syncApi.listDevices, {});
   const heartbeat = useMutation(syncApi.heartbeat);
   const recordUsage = useMutation(syncApi.recordUsageBatch);
@@ -799,6 +1046,13 @@ function DesktopApp() {
   const [boundariesLock, setBoundariesLock] = useLocalFlag(
     "focuslock.boundariesLock",
   );
+  // "Merge…" handoff from the Focus usage list: the row's target is parked
+  // here, the tab switches to Boundaries, and BoundariesPage opens its create
+  // dialog pre-filled with it (then clears this via onInitialDraftConsumed).
+  const [pendingMerge, setPendingMerge] = useState<{
+    members: TargetGroupMember[];
+    sourceLabel: string;
+  } | null>(null);
   // Skip uploads until a real device id exists; failures are logged and the bucket
   // is dropped (no offline queue yet — same gap as Android). Heartbeats keep
   // their ~25s cadence via the interval (so a paused tracker still shows the
@@ -815,15 +1069,20 @@ function DesktopApp() {
       const usageChanged = usageJson !== usageJsonRef.current;
       if (!usageChanged && Date.now() - lastUploadRef.current < 25000) return;
       const buckets: UsageBucket[] = usageChanged
-        ? snap.usage.map((u) => ({
-            date: u.date,
-            targetKind: u.browserDomain ? "website" : "app",
-            targetKey: u.browserDomain || u.appId,
-            targetLabel: u.browserDomain || u.appName,
-            category: u.browserDomain ? "Web" : "Windows",
-            trackedSeconds: u.activeSeconds,
-            updatedAt: Date.now(),
-          }))
+        ? snap.usage.map((u) => {
+            // Shared with limit enforcement (usageTargetFor) so local keys can
+            // never drift from the keys Convex stores — both lowercased there.
+            const { targetKind, targetKey } = usageTargetFor(u);
+            return {
+              date: u.date,
+              targetKind,
+              targetKey,
+              targetLabel: u.browserDomain || u.appName,
+              category: u.browserDomain ? "Web" : "Windows",
+              trackedSeconds: u.activeSeconds,
+              updatedAt: Date.now(),
+            };
+          })
         : [];
       if (usageChanged) usageJsonRef.current = usageJson;
       lastUploadRef.current = Date.now();
@@ -858,18 +1117,61 @@ function DesktopApp() {
       window.clearInterval(id);
     };
   }, [snapshot, deviceId, heartbeat, recordUsage]);
+  // Blocked-targets payload: union of dashboard blocks + exhausted daily limits.
+  // Recomputed on dashboard/summary/snapshot changes, but invoked only when the
+  // union actually changed and at most once per debounce window (no invoke spam).
+  const blockedTargetsRef = useRef<{ appIds: string[]; domains: string[] } | null>(
+    null,
+  );
+  const blockedInvokedJsonRef = useRef("");
+  const blockedTimerRef = useRef<number | null>(null);
+  const flushBlockedTargets = useCallback(() => {
+    blockedTimerRef.current = null;
+    const payload = blockedTargetsRef.current;
+    if (!payload) return;
+    // Prefer Rust's actual current set (part of every tracker snapshot): the
+    // Boundaries page also invokes set_blocked_targets with a narrower payload,
+    // so "what we last sent" is not a safe enough dedupe key. Falls back to the
+    // last-sent JSON when the tracker is unavailable.
+    const rustTargets = snapshotRef.current?.blockedTargets;
+    const json = JSON.stringify(payload);
+    if (rustTargets) {
+      if (canonicalBlockedTargets(payload) === canonicalBlockedTargets(rustTargets)) {
+        blockedInvokedJsonRef.current = json;
+        return;
+      }
+    } else if (json === blockedInvokedJsonRef.current) {
+      return;
+    }
+    blockedInvokedJsonRef.current = json;
+    invoke("set_blocked_targets", { targets: payload }).catch(() => undefined);
+  }, []);
   useEffect(() => {
     if (!tauriAvailable() || !dashboard) return;
-    const appIds = (dashboard.apps || [])
-      .filter((item: AppItem) => item.isBlocked && item.category === "Windows")
-      .map((item: AppItem) => item.packageName);
-    const domains = (dashboard.sites || [])
-      .filter((item: SiteItem) => item.isBlocked)
-      .map((item: SiteItem) => item.domain);
-    invoke("set_blocked_targets", { targets: { appIds, domains } }).catch(
-      () => undefined,
-    );
-  }, [dashboard]);
+    const { targets, exceeded } = evaluateBlockedTargets({
+      dashboard,
+      groups,
+      summary: todayUsage,
+      usage: snapshotRef.current?.usage || EMPTY_USAGE,
+    });
+    if (exceeded.length) {
+      console.info("[focuslock] daily limit reached; blocking", exceeded);
+    }
+    blockedTargetsRef.current = targets;
+    if (blockedTimerRef.current !== null)
+      window.clearTimeout(blockedTimerRef.current);
+    blockedTimerRef.current = window.setTimeout(flushBlockedTargets, 350);
+    // Latest-wins: a re-run replaces the pending timer instead of cleaning up.
+  }, [dashboard, groups, todayUsage, snapshot, flushBlockedTargets]);
+  useEffect(
+    () => () => {
+      if (blockedTimerRef.current !== null) {
+        window.clearTimeout(blockedTimerRef.current);
+        blockedTimerRef.current = null;
+      }
+    },
+    [],
+  );
   // Manual "Sync Now": clear the throttle and refresh so the upload effect runs,
   // then re-read devices/usage. Real upload happens in the heartbeat effect.
   const syncNow = useCallback(async () => {
@@ -883,6 +1185,16 @@ function DesktopApp() {
       window.setTimeout(() => setSyncing(false), 600);
     }
   }, [refresh]);
+  // Stable (setters only) so the memoized FocusPage keeps skipping re-renders
+  // on unrelated state updates.
+  const handleMergeTarget = useCallback(
+    (member: TargetGroupMember, sourceLabel: string) => {
+      setPendingMerge({ members: [member], sourceLabel });
+      setTab("boundaries");
+    },
+    [],
+  );
+  const clearPendingMerge = useCallback(() => setPendingMerge(null), []);
   return (
     <div className="app-frame">
       <aside className="rail">
@@ -947,12 +1259,21 @@ function DesktopApp() {
             trackerError={trackerError}
             workRatio={workRatio}
             taskBonus={taskBonus}
+            usageRange={usageRange}
+            onUsageRangeChange={setUsageRange}
+            onMerge={handleMergeTarget}
           />
         ) : tab === "boundaries" ? (
           <BoundariesPage
             dashboard={dashboard}
             snapshot={snapshot}
+            usage={usage}
+            todayUsage={todayUsage}
             boundariesLock={boundariesLock}
+            knownTargets={knownTargets}
+            initialDraftMembers={pendingMerge?.members || null}
+            mergeSourceLabel={pendingMerge?.sourceLabel || null}
+            onInitialDraftConsumed={clearPendingMerge}
           />
         ) : tab === "settings" ? (
           <SettingsPage
@@ -1016,13 +1337,18 @@ const FocusPage = memo(function FocusPage({
   usage,
   devices,
   snapshot,
+  status,
   trackerError,
   workRatio,
   taskBonus,
+  usageRange = "today",
+  onUsageRangeChange,
+  onMerge,
 }: any) {
   const state = dashboard?.state || {};
   const records: WorkRecord[] = dashboard?.records || [];
   const total = usage?.totalTrackedSeconds || 0;
+  const rangeLabel = usageRangeLabel(usageRange);
   // deviceId -> platform lookup built once per devices change instead of an
   // O(devices) find per usage row per render.
   const devicePlatformById = useMemo(() => {
@@ -1043,7 +1369,10 @@ const FocusPage = memo(function FocusPage({
   const browserSeconds = deviceUsage
     .filter((d: any) => devicePlatformById.get(d.deviceId) === "browser")
     .reduce((sum: number, device: any) => sum + device.trackedSeconds, 0);
-  const androidSeconds = Math.max(0, total - windowsSeconds - browserSeconds);
+  // Real per-platform totals from listDevices().platform — no subtraction hack.
+  const androidSeconds = deviceUsage
+    .filter((d: any) => devicePlatformById.get(d.deviceId) === "android")
+    .reduce((sum: number, device: any) => sum + device.trackedSeconds, 0);
   const trackedDeviceIds = new Set(
     (usage?.devices || [])
       .filter((device: any) => device.trackedSeconds > 0)
@@ -1163,14 +1492,36 @@ const FocusPage = memo(function FocusPage({
       <section className="device-summary">
         <div className="section-heading">
           <div>
-            <p className="section-label">Screen time</p>
+            <p className="section-label">Screen time · {rangeLabel}</p>
             <h2>{fmt(total)}</h2>
           </div>
           <p>
-            Today across {trackedDeviceCount} tracked device
+            {usageRange === "today" ? "Today" : rangeLabel} across{" "}
+            {trackedDeviceCount} tracked device
             {trackedDeviceCount === 1 ? "" : "s"}
           </p>
         </div>
+        <div
+          className="segment usage-range"
+          role="tablist"
+          aria-label="Usage range"
+        >
+          {USAGE_RANGES.map((entry) => (
+            <button
+              key={entry.id}
+              type="button"
+              role="tab"
+              aria-selected={usageRange === entry.id}
+              className={usageRange === entry.id ? "active" : ""}
+              onClick={() => onUsageRangeChange?.(entry.id)}
+            >
+              {entry.label}
+            </button>
+          ))}
+        </div>
+        <p className="usage-range-note">
+          Cumulative time is summed across every device, not just this PC.
+        </p>
         <div className="device-split">
           <DeviceMetric
             icon="monitor"
@@ -1191,17 +1542,28 @@ const FocusPage = memo(function FocusPage({
             label="Android"
             value={fmt(androidSeconds)}
             detail={
-              androidSeconds ? "Synced from phone" : "No usage uploaded today"
+              androidSeconds
+                ? "Synced from phone"
+                : `No phone usage in ${rangeLabel.toLowerCase()}`
             }
           />
           <DeviceMetric
             icon="globe"
             label="Chrome"
             value={fmt(browserSeconds)}
-            detail={browserSeconds ? "Synced from extension" : "No website usage uploaded today"}
+            detail={
+              browserSeconds
+                ? "Synced from extension"
+                : `No extension usage in ${rangeLabel.toLowerCase()}`
+            }
           />
         </div>
-        <UsageBars targets={usage?.targets || EMPTY_TARGETS} devices={devices} />
+        <UsageBars
+          summary={usage}
+          devices={devices}
+          usageRange={usageRange}
+          onMerge={onMerge}
+        />
       </section>
       <section className="stats-row">
         <Metric
@@ -1814,8 +2176,8 @@ function Metric({ label, value }: { label: string; value: string }) {
     </article>
   );
 }
-function UsageBars({ targets, devices }: any) {
-  // deviceId -> name lookup built once per devices/targets change instead of
+function UsageBars({ summary, devices, usageRange = "today", onMerge }: any) {
+  // deviceId -> name lookup built once per devices/summary change instead of
   // a devices.find per deviceIds entry per render.
   const deviceNameById = useMemo(() => {
     const map = new Map<string, string>();
@@ -1824,31 +2186,155 @@ function UsageBars({ targets, devices }: any) {
     );
     return map;
   }, [devices]);
-  const top = useMemo(() => targets.slice(0, 6), [targets]);
-  const max = Math.max(1, ...top.map((t: any) => t.trackedSeconds));
+  // groupedTargets is the merge-aware view (groups first, then ungrouped
+  // targets). Fall back to `targets` so the app still works against an older
+  // deployment that predates groups.
+  const rows: any[] = useMemo(() => {
+    const grouped = summary?.groupedTargets;
+    if (Array.isArray(grouped) && grouped.length) return grouped;
+    return summary?.targets || EMPTY_TARGETS;
+  }, [summary]);
+  const groupById = useMemo(() => {
+    const map = new Map<string, any>();
+    (summary?.groups || []).forEach((group: any) => map.set(group.groupId, group));
+    return map;
+  }, [summary]);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const top = useMemo(() => rows.slice(0, 6), [rows]);
+  const max = Math.max(1, ...top.map((t: any) => t.trackedSeconds || 0));
+  const rangeIsToday = usageRange === "today";
+  function deviceNames(ids: string[] | undefined): string {
+    const names = (ids || []).map(
+      (id) => deviceNameById.get(id) || "Unknown device",
+    );
+    return names.length ? names.join(" + ") : "No device data";
+  }
   return (
     <div className="usage-list">
-      {top.map((t: any) => (
-        <div className="usage-row" key={`${t.targetKind}:${t.targetKey}`}>
-          <span className="target-icon">
-            <Icon name={t.targetKind === "website" ? "globe" : "monitor"} />
-          </span>
-          <div>
-            <div className="usage-copy">
-              <strong>{t.targetLabel}</strong>
-              <span>{fmt(t.trackedSeconds)}</span>
+      {top.map((t: any) => {
+        const rowKey = `${t.targetKind}:${t.targetKey}`;
+        const isGroup = t.targetKind === "group";
+        const group = isGroup ? groupById.get(t.groupId) : undefined;
+        const limitMinutes = Number(t.dailyLimitMinutes) || 0;
+        const hasLimit = limitMinutes > 0 && t.limitEnabled !== false;
+        const usedMinutes = Math.round((t.trackedSeconds || 0) / 60);
+        const exceeded =
+          rangeIsToday && hasLimit && (t.trackedSeconds || 0) >= limitMinutes * 60;
+        const isOpen = Boolean(expanded[rowKey]);
+        return (
+          <div
+            className={`usage-row ${exceeded ? "limit-exceeded" : ""}`}
+            key={rowKey}
+          >
+            <span className="target-icon">
+              <Icon
+                name={
+                  isGroup
+                    ? "grid"
+                    : t.targetKind === "website"
+                      ? "globe"
+                      : "monitor"
+                }
+              />
+            </span>
+            <div>
+              <div className="usage-copy">
+                <strong>
+                  {isGroup ? (
+                    <button
+                      type="button"
+                      className="group-toggle"
+                      aria-expanded={isOpen}
+                      onClick={() =>
+                        setExpanded((value) => ({
+                          ...value,
+                          [rowKey]: !value[rowKey],
+                        }))
+                      }
+                    >
+                      {t.targetLabel}
+                      <span className="merge-badge">
+                        merged · {t.memberCount || (t.memberKeys || []).length}
+                      </span>
+                    </button>
+                  ) : (
+                    <span className="usage-label">{t.targetLabel}</span>
+                  )}
+                  {/* Groups cannot be members of another group, so the merge
+                      entry point exists on app/website rows only. */}
+                  {!isGroup && onMerge && (
+                    <button
+                      type="button"
+                      className="merge-row-button"
+                      title={`Merge ${t.targetLabel} into a new bucket in Boundaries`}
+                      aria-label={`Merge ${t.targetLabel} into a new bucket in Boundaries`}
+                      onClick={() =>
+                        onMerge(
+                          mergeMemberFromUsageRow(t),
+                          usageRangeLabel(usageRange),
+                        )
+                      }
+                    >
+                      Merge…
+                    </button>
+                  )}
+                  {hasLimit && (
+                    <span className={`limit-pill ${exceeded ? "exceeded" : ""}`}>
+                      {rangeIsToday
+                        ? `${usedMinutes}m / ${limitMinutes}m`
+                        : `limit ${limitMinutes}m/day`}
+                    </span>
+                  )}
+                </strong>
+                <span>{fmt(t.trackedSeconds)}</span>
+              </div>
+              <div className="bar">
+                <i
+                  style={{
+                    width: `${((t.trackedSeconds || 0) / max) * 100}%`,
+                  }}
+                />
+              </div>
+              <small className="device-chips">
+                {(t.deviceIds || []).map((id: string) => (
+                  <span className="device-chip" key={id}>
+                    {deviceNameById.get(id) || "Unknown device"}
+                  </span>
+                ))}
+                {!(t.deviceIds || []).length && (
+                  <span className="device-chip">No device data</span>
+                )}
+              </small>
+              {isGroup && isOpen && (
+                <div className="usage-members">
+                  {(group?.members || []).map((member: any) => (
+                    <div
+                      className="usage-member"
+                      key={`${member.targetKind}:${member.targetKey}`}
+                    >
+                      <span className="usage-member-name">
+                        <Icon
+                          name={member.targetKind === "website" ? "globe" : "monitor"}
+                          size={14}
+                        />
+                        {member.targetLabel}
+                      </span>
+                      <span>
+                        {fmt(member.trackedSeconds)} · {deviceNames(member.deviceIds)}
+                      </span>
+                    </div>
+                  ))}
+                  {!group?.members?.length && (
+                    <div className="usage-member">
+                      <span className="usage-member-name">No members</span>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
-            <div className="bar">
-              <i style={{ width: `${(t.trackedSeconds / max) * 100}%` }} />
-            </div>
-            <small>
-              {t.deviceIds
-                .map((id: string) => deviceNameById.get(id) || "Unknown device")
-                .join(" + ")}
-            </small>
           </div>
-        </div>
-      ))}
+        );
+      })}
       {!top.length && (
         <EmptyState
           title="No tracked activity yet"
@@ -1901,7 +2387,8 @@ function normalizeDomainInput(raw: string): string | null {
   value = value.split("/")[0].split("?")[0].split("#")[0];
   if (value.includes("@")) value = value.split("@").pop() || value;
   value = value.split(":")[0];
-  value = value.replace(/^www\./, "").replace(/^m\./, "");
+  // www-stripping goes through the shared helper; `m.` is an input nicety only.
+  value = normalizeSiteKey(value).replace(/^m\./, "");
   value = value.replace(/^[.\-_ ]+|[.\-_ ]+$/g, "");
   return BOUNDARY_DOMAIN_REGEX.test(value) ? value : null;
 }
@@ -1916,11 +2403,179 @@ function stripSite(site: SiteItem): SiteItem {
   };
 }
 
-function BoundariesPage({ dashboard, snapshot, boundariesLock = false }: any) {
+// --- Merged buckets (groups) -------------------------------------------------
+
+type GroupDraft = {
+  groupId: string | null; // null = creating
+  name: string;
+  limitMinutes: string; // free text; "" = no daily limit
+  members: TargetGroupMember[];
+};
+
+/** `"kind:key"` — the identity Convex stores for group members (website keys
+ * canonicalized via normalizeSiteKey, app keys only lowercased). */
+export function memberKeyOf(member: { targetKind: string; targetKey: string }): string {
+  return `${member.targetKind}:${targetKeyFor(member.targetKind, member.targetKey)}`;
+}
+
+function groupMemberFromApp(row: { key: string; name: string }): TargetGroupMember {
+  return {
+    targetKind: "app",
+    targetKey: row.key.toLowerCase(),
+    targetLabel: row.name,
+  };
+}
+
+function groupMemberFromSite(site: SiteItem): TargetGroupMember {
+  return {
+    targetKind: "website",
+    targetKey: normalizeSiteKey(site.domain),
+    targetLabel: site.displayName || site.domain,
+  };
+}
+
+// A picker candidate is a group member plus optional device provenance (only
+// the server's listKnownTargets carries it, so local-only rows omit it).
+type GroupCandidate = TargetGroupMember & { devices?: KnownTargetDevice[] };
+
+/**
+ * Picker candidates from every source, deduped by memberKeyOf.
+ *
+ * Priority: remote `knownTargets` first (all-time, every device), so a target
+ * that only ever existed on another device is a first-class candidate and the
+ * version carrying device provenance wins the dedupe. Local sources only fill
+ * gaps afterwards; draft members go last so a manually typed key that matches
+ * nothing else still appears in the list as picked.
+ */
+export function buildGroupCandidates({
+  knownTargets,
+  appRows,
+  sites,
+  usageTargets,
+  draftMembers,
+}: {
+  knownTargets?: KnownTarget[] | null;
+  appRows: { key: string; name: string }[];
+  sites: SiteItem[];
+  usageTargets?:
+    | { targetKind: string; targetKey: string; targetLabel: string }[]
+    | null;
+  draftMembers?: TargetGroupMember[] | null;
+}): GroupCandidate[] {
+  const map = new Map<string, GroupCandidate>();
+  (knownTargets || []).forEach((target) => {
+    const member: GroupCandidate = {
+      targetKind: target.targetKind,
+      targetKey: targetKeyFor(target.targetKind, target.targetKey),
+      targetLabel: target.targetLabel,
+      devices: target.devices || [],
+    };
+    map.set(memberKeyOf(member), member);
+  });
+  const addIfAbsent = (member: GroupCandidate) => {
+    const key = memberKeyOf(member);
+    if (!map.has(key)) map.set(key, member);
+  };
+  appRows.forEach((row) => addIfAbsent(groupMemberFromApp(row)));
+  sites.forEach((site) => addIfAbsent(groupMemberFromSite(site)));
+  (usageTargets || []).forEach((target) => {
+    if (target.targetKind === "group") return;
+    addIfAbsent({
+      targetKind: target.targetKind as "app" | "website",
+      targetKey: targetKeyFor(target.targetKind, target.targetKey),
+      targetLabel: target.targetLabel,
+    });
+  });
+  (draftMembers || []).forEach((member) => addIfAbsent(member));
+  return [...map.values()].sort((a, b) =>
+    a.targetLabel.toLowerCase().localeCompare(b.targetLabel.toLowerCase()),
+  );
+}
+
+/**
+ * Manual "add any key by hand" entry. Normalizes exactly like the server
+ * (websites drop a leading `www.` and lowercase; apps lowercase) and returns
+ * null when nothing usable remains, so whitespace-only input cannot be added.
+ */
+export function manualMemberFor(
+  kind: "app" | "website",
+  typed: string,
+): TargetGroupMember | null {
+  const raw = String(typed || "").trim();
+  const targetKey = targetKeyFor(kind, raw);
+  if (!targetKey) return null;
+  return { targetKind: kind, targetKey, targetLabel: raw || targetKey };
+}
+
+/**
+ * Add/remove by memberKeyOf identity — the same dedupe the picker and the chip
+ * row use, so a manually typed key can never duplicate an existing candidate.
+ */
+export function toggleMemberInList(
+  members: TargetGroupMember[],
+  member: TargetGroupMember,
+): TargetGroupMember[] {
+  const key = memberKeyOf(member);
+  return members.some((entry) => memberKeyOf(entry) === key)
+    ? members.filter((entry) => memberKeyOf(entry) !== key)
+    : [...members, member];
+}
+
+/**
+ * Maps a usage row to the member handed to `onMerge`. Canonical rows pass
+ * through unchanged; the normalization is only a defensive no-op.
+ */
+export function mergeMemberFromUsageRow(row: {
+  targetKind: string;
+  targetKey: string;
+  targetLabel: string;
+}): TargetGroupMember {
+  return {
+    targetKind: row.targetKind === "website" ? "website" : "app",
+    targetKey: targetKeyFor(row.targetKind, row.targetKey),
+    targetLabel: row.targetLabel,
+  };
+}
+
+/** Exact saveGroups validator shape (drops `updatedAt` and unknown fields). */
+function groupForSave(group: TargetGroup) {
+  return {
+    groupId: group.groupId,
+    name: group.name,
+    category: group.category,
+    members: group.members.map((member) => ({
+      targetKind: member.targetKind,
+      targetKey: member.targetKey,
+      targetLabel: member.targetLabel,
+    })),
+    dailyLimitMinutes: group.dailyLimitMinutes,
+    limitEnabled: group.limitEnabled,
+  };
+}
+
+function BoundariesPage({
+  dashboard,
+  snapshot,
+  usage,
+  todayUsage,
+  boundariesLock = false,
+  knownTargets,
+  initialDraftMembers,
+  mergeSourceLabel,
+  onInitialDraftConsumed,
+}: any) {
   const saveApps = useMutation(api.focus.saveBlockedApps);
   const saveSites = useMutation(api.focus.saveBlockedWebsites);
+  const saveGroups = useMutation(syncApi.saveGroups);
   const apps: AppItem[] = dashboard?.apps || [];
   const sites: SiteItem[] = dashboard?.sites || [];
+  // Full group list (editable source of truth). The range summary below only
+  // supplies tracked seconds; listGroups keeps groups that have zero usage.
+  const remoteGroups: TargetGroup[] | undefined = useQuery(
+    syncApi.listGroups,
+    EMPTY_ARGS,
+  ) as any;
+  const groups: TargetGroup[] = remoteGroups || EMPTY_GROUPS;
 
   const [kind, setKind] = useState<"apps" | "sites">("apps");
   const [q, setQ] = useState("");
@@ -1932,6 +2587,210 @@ function BoundariesPage({ dashboard, snapshot, boundariesLock = false }: any) {
   const [showAddSite, setShowAddSite] = useState(false);
   const [siteInput, setSiteInput] = useState("");
   const [siteError, setSiteError] = useState<string | null>(null);
+  // Groups: draft dialog (create when groupId is null), merge multi-select and
+  // the non-blocking LWW notice.
+  const [groupDraft, setGroupDraft] = useState<GroupDraft | null>(null);
+  const [groupError, setGroupError] = useState<string | null>(null);
+  const [groupNotice, setGroupNotice] = useState<string | null>(null);
+  const [pickerQuery, setPickerQuery] = useState("");
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedMembers, setSelectedMembers] = useState<TargetGroupMember[]>([]);
+  // Manual "add any key" entry inside the picker area (kind + raw key).
+  const [manualKind, setManualKind] = useState<"app" | "website">("app");
+  const [manualKey, setManualKey] = useState("");
+  // Context line for a draft opened via the Focus page's "Merge…" action.
+  const [mergeNote, setMergeNote] = useState<string | null>(null);
+
+  const selectionKeys = useMemo(
+    () => new Set(selectedMembers.map(memberKeyOf)),
+    [selectedMembers],
+  );
+
+  function toggleMemberSelection(member: TargetGroupMember) {
+    const key = memberKeyOf(member);
+    setSelectedMembers((current) =>
+      current.some((entry) => memberKeyOf(entry) === key)
+        ? current.filter((entry) => memberKeyOf(entry) !== key)
+        : [...current, member],
+    );
+  }
+
+  function openCreateGroup(members: TargetGroupMember[] = []) {
+    setGroupError(null);
+    setPickerQuery("");
+    setMergeNote(null);
+    setGroupDraft({
+      groupId: null,
+      name: "",
+      limitMinutes: "",
+      members: members.map((member) => ({ ...member })),
+    });
+  }
+
+  function openEditGroup(group: TargetGroup) {
+    setGroupError(null);
+    setPickerQuery("");
+    setMergeNote(null);
+    setGroupDraft({
+      groupId: group.groupId,
+      name: group.name,
+      limitMinutes: group.dailyLimitMinutes
+        ? String(group.dailyLimitMinutes)
+        : "",
+      members: group.members.map((member) => ({ ...member })),
+    });
+  }
+
+  function toggleDraftMember(member: TargetGroupMember) {
+    setGroupDraft((draft) =>
+      draft
+        ? { ...draft, members: toggleMemberInList(draft.members, member) }
+        : draft,
+    );
+    setGroupError(null);
+  }
+
+  // Manual entry: normalize the typed key and toggle it in like any candidate,
+  // so a target that is only visible on another device can still be merged.
+  function submitManualMember() {
+    const member = manualMemberFor(manualKind, manualKey);
+    if (!member) return;
+    toggleDraftMember(member);
+    setManualKey("");
+  }
+
+  // The Focus page's "Merge…" action parks one target in DesktopApp and
+  // switches here. Open the create dialog pre-filled with it, show which view
+  // it came from, and clear the handoff immediately so closing the dialog
+  // never re-opens it. openCreateGroup is recreated per render and must not be
+  // a dependency.
+  useEffect(() => {
+    if (!initialDraftMembers?.length) return;
+    openCreateGroup(initialDraftMembers);
+    setMergeNote(mergeSourceLabel || null);
+    onInitialDraftConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialDraftMembers, mergeSourceLabel, onInitialDraftConsumed]);
+
+  // Full-replace save: always send the whole list with a fresh updatedAt.
+  async function persistGroups(next: TargetGroup[], message: string) {
+    setBusy(true);
+    setGroupError(null);
+    try {
+      const result = (await saveGroups({
+        groups: next.map(groupForSave),
+        updatedAt: Date.now(),
+      })) as { applied?: boolean } | undefined;
+      if (result && result.applied === false) {
+        // Another device wrote newer data. listGroups is reactive, so the list
+        // has already reloaded — surface it without blocking.
+        setGroupNotice("Updated on another device — reloaded.");
+        setGroupDraft(null);
+        return;
+      }
+      setGroupNotice(message);
+      setGroupDraft(null);
+      setSelectedMembers([]);
+    } catch (e) {
+      setGroupError(`Couldn't save groups: ${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitGroup() {
+    if (!groupDraft) return;
+    const name = groupDraft.name.trim();
+    if (!name) {
+      setGroupError("Give the group a name.");
+      return;
+    }
+    // A target may live in only one group, so drop members already claimed by
+    // another group (they were disabled in the picker; this is a stale-data
+    // guard). Mirrors the server canonicalization.
+    const available = groupDraft.members.filter((member) => {
+      const owner = memberOwnerByKey.get(memberKeyOf(member));
+      return !owner || owner.groupId === groupDraft.groupId;
+    });
+    if (available.length < 2) {
+      setGroupError(
+        available.length < groupDraft.members.length
+          ? "Some members already belong to another group — pick at least 2 available members."
+          : "Pick at least 2 members to merge.",
+      );
+      return;
+    }
+    const limitValue = Math.floor(Number(groupDraft.limitMinutes));
+    const hasLimit = Number.isFinite(limitValue) && limitValue > 0;
+    const entry: TargetGroup = {
+      groupId:
+        groupDraft.groupId ||
+        (window.crypto?.randomUUID
+          ? `group-${window.crypto.randomUUID()}`
+          : `group-${Date.now().toString(36)}`),
+      name,
+      members: available,
+      dailyLimitMinutes: hasLimit ? Math.min(1440, limitValue) : undefined,
+      limitEnabled: hasLimit ? true : undefined,
+    };
+    const editing = Boolean(groupDraft.groupId);
+    const next = editing
+      ? groups.map((group) =>
+          group.groupId === groupDraft.groupId ? entry : group,
+        )
+      : [...groups, entry];
+    await persistGroups(next, editing ? `Updated ${name}.` : `Created ${name}.`);
+  }
+
+  function deleteGroup(group: TargetGroup) {
+    void persistGroups(
+      groups.filter((item) => item.groupId !== group.groupId),
+      `Deleted ${group.name}.`,
+    );
+  }
+
+  // Group stats and limit badges follow today (daily limits are daily), not the
+  // Focus range selector; the range summary is the fallback while today's
+  // summary is still loading.
+  const statsSummary = todayUsage?.groups?.length ? todayUsage : usage;
+
+  // Tracked seconds per member, from today's (or range) usage summary.
+  const trackedSecondsByMember = useMemo(() => {
+    const map = new Map<string, number>();
+    (statsSummary?.groups || []).forEach((group: any) => {
+      (group.members || []).forEach((member: any) =>
+        map.set(memberKeyOf(member), member.trackedSeconds || 0),
+      );
+    });
+    (statsSummary?.groupedTargets || []).forEach((target: any) => {
+      if (target.targetKind === "group") return;
+      const key = memberKeyOf(target);
+      if (!map.has(key)) map.set(key, target.trackedSeconds || 0);
+    });
+    return map;
+  }, [statsSummary]);
+
+  const groupSummaryById = useMemo(() => {
+    const map = new Map<string, any>();
+    (statsSummary?.groups || []).forEach((group: any) =>
+      map.set(group.groupId, group),
+    );
+    return map;
+  }, [statsSummary]);
+
+  // Which group already owns a target — the server allows at most one.
+  const memberOwnerByKey = useMemo(() => {
+    const map = new Map<string, { groupId: string; name: string }>();
+    groups.forEach((group) => {
+      (group.members || []).forEach((member) =>
+        map.set(memberKeyOf(member), {
+          groupId: group.groupId,
+          name: group.name,
+        }),
+      );
+    });
+    return map;
+  }, [groups]);
 
   // Debounced (250ms) search so typing never re-filters the list per keystroke.
   useEffect(() => {
@@ -2000,7 +2859,8 @@ function BoundariesPage({ dashboard, snapshot, boundariesLock = false }: any) {
       .filter((u: NativeUsage) => Boolean(u.browserDomain))
       .forEach((u: NativeUsage) => {
         if (u.date !== today || !u.browserDomain) return;
-        map.set(u.browserDomain, (map.get(u.browserDomain) || 0) + u.activeSeconds);
+        const key = normalizeSiteKey(u.browserDomain);
+        map.set(key, (map.get(key) || 0) + u.activeSeconds);
       });
     return map;
   }, [nativeUsage]);
@@ -2043,6 +2903,34 @@ function BoundariesPage({ dashboard, snapshot, boundariesLock = false }: any) {
   const blockedAppCount = appRows.filter((row) => row.isBlocked).length;
   const blockedSiteCount = sites.filter((site) => site.isBlocked).length;
 
+  // Picker candidates: every known target from every device (server, all-time)
+  // seeded first so remote-only targets carry device provenance, then
+  // boundaries apps/sites and the current range summary as local fallbacks.
+  const groupCandidates = useMemo(
+    () =>
+      buildGroupCandidates({
+        knownTargets,
+        appRows,
+        sites,
+        usageTargets: usage?.groupedTargets,
+        draftMembers: groupDraft?.members,
+      }),
+    [knownTargets, appRows, sites, usage, groupDraft?.members],
+  );
+
+  const pickerCandidates = useMemo(() => {
+    const needle = pickerQuery.trim().toLowerCase();
+    if (!needle) return groupCandidates;
+    return groupCandidates.filter(
+      (member) =>
+        member.targetLabel.toLowerCase().includes(needle) ||
+        member.targetKey.toLowerCase().includes(needle) ||
+        (member.devices || []).some((device) =>
+          device.name.toLowerCase().includes(needle),
+        ),
+    );
+  }, [groupCandidates, pickerQuery]);
+
   function toAppItems(rows: BoundaryAppRow[]): AppItem[] {
     return rows.map((row) => ({
       packageName: row.key,
@@ -2070,14 +2958,22 @@ function BoundariesPage({ dashboard, snapshot, boundariesLock = false }: any) {
   }
   async function applyNative(nextApps: BoundaryAppRow[], nextSites: SiteItem[]) {
     if (!tauriAvailable()) return;
-    await invoke("set_blocked_targets", {
-      targets: {
-        appIds: nextApps
-          .filter((row) => row.native && row.isBlocked)
-          .map((row) => row.key),
-        domains: nextSites.filter((site) => site.isBlocked).map((site) => site.domain),
+    // Send the SAME union the enforcement effect sends (dashboard blocks +
+    // exhausted limits/groups), with the in-flight toggle folded into the
+    // dashboard shape. A base-only payload here replaced Rust's blocked-target
+    // set and transiently dropped over-limit groups until the next snapshot
+    // tick (~5s).
+    const { targets } = evaluateBlockedTargets({
+      dashboard: {
+        ...(dashboard || {}),
+        apps: toAppItems(nextApps),
+        sites: nextSites.map(stripSite),
       },
-    }).catch(() => undefined);
+      groups,
+      summary: todayUsage,
+      usage: snapshot?.usage || EMPTY_USAGE,
+    });
+    await invoke("set_blocked_targets", { targets }).catch(() => undefined);
   }
 
   async function persistApps(toggled: BoundaryAppRow[], nextApps: BoundaryAppRow[], message: string) {
@@ -2198,7 +3094,7 @@ function BoundariesPage({ dashboard, snapshot, boundariesLock = false }: any) {
       setSiteError("Enter a valid domain, like example.com or a full URL.");
       return;
     }
-    if (sites.some((site) => site.domain === normalized)) {
+    if (sites.some((site) => normalizeSiteKey(site.domain) === normalized)) {
       setSiteError("That domain is already in your list.");
       return;
     }
@@ -2253,6 +3149,124 @@ function BoundariesPage({ dashboard, snapshot, boundariesLock = false }: any) {
           unblocked.
         </p>
       )}
+
+      <section className="settings-group group-section">
+        <div className="section-heading">
+          <div>
+            <p className="section-label">Merged buckets</p>
+            <h2>Groups</h2>
+          </div>
+          <div className="group-heading-actions">
+            <button
+              type="button"
+              className={`secondary-button ${selectMode ? "active" : ""}`}
+              onClick={() => {
+                setSelectMode((value) => !value);
+                setNotice(null);
+              }}
+            >
+              <Icon name="check" />
+              {selectMode ? "Done selecting" : "Merge selected"}
+            </button>
+            <button
+              type="button"
+              className="primary-button"
+              disabled={busy}
+              onClick={() => openCreateGroup()}
+            >
+              <Icon name="plus" /> New group
+            </button>
+          </div>
+        </div>
+        <p className="group-hint">
+          Merge an app and a website — or several targets — into one bucket with
+          a single daily limit shared across every device. A target can belong to
+          one group only.
+        </p>
+        {groupNotice && <p className="boundary-notice">{groupNotice}</p>}
+        {groups.length ? (
+          <div className="group-list">
+            {groups.map((group) => {
+              const stats = groupSummaryById.get(group.groupId);
+              const limit = Number(group.dailyLimitMinutes) || 0;
+              const limitOn = limit > 0 && group.limitEnabled !== false;
+              const usedSeconds = Number(stats?.trackedSeconds) || 0;
+              const exceeded = limitOn && usedSeconds >= limit * 60;
+              return (
+                <article className="group-card" key={group.groupId}>
+                  <div className="group-card-head">
+                    <div>
+                      <strong>{group.name}</strong>
+                      <p>
+                        {fmt(usedSeconds)} tracked
+                        {statsSummary === todayUsage ? " today" : ""} ·{" "}
+                        {group.members.length} member
+                        {group.members.length === 1 ? "" : "s"} ·{" "}
+                        {limitOn ? `${limit}m/day limit` : "no limit"}
+                      </p>
+                    </div>
+                    <div className="group-card-actions">
+                      {exceeded && (
+                        <span className="limit-pill exceeded">
+                          limit reached
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        disabled={busy}
+                        onClick={() => openEditGroup(group)}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        className="site-delete"
+                        disabled={busy}
+                        onClick={() => deleteGroup(group)}
+                        aria-label={`Delete ${group.name}`}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  </div>
+                  <div className="chip-row">
+                    {group.members.map((member) => {
+                      const key = memberKeyOf(member);
+                      const stat = (stats?.members || []).find(
+                        (entry: any) => memberKeyOf(entry) === key,
+                      );
+                      return (
+                        <span
+                          className={`member-chip ${member.targetKind}`}
+                          key={key}
+                          title={member.targetKey}
+                        >
+                          <Icon
+                            name={
+                              member.targetKind === "website"
+                                ? "globe"
+                                : "monitor"
+                            }
+                            size={14}
+                          />
+                          {member.targetLabel}
+                          {stat ? ` · ${fmt(stat.trackedSeconds)}` : ""}
+                        </span>
+                      );
+                    })}
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          <EmptyState
+            title="No merged buckets yet"
+            body="Use Merge selected on the lists below, or create a group, to combine an app and a website under one daily limit."
+          />
+        )}
+      </section>
 
       <div className="segment">
         <button
@@ -2385,10 +3399,83 @@ function BoundariesPage({ dashboard, snapshot, boundariesLock = false }: any) {
 
       {notice && <p className="boundary-notice">{notice}</p>}
 
+      {selectMode && (
+        <div className="selection-tray">
+          <div className="chip-row">
+            {selectedMembers.map((member) => (
+              <button
+                type="button"
+                className={`member-chip ${member.targetKind}`}
+                key={memberKeyOf(member)}
+                title="Remove from selection"
+                onClick={() => toggleMemberSelection(member)}
+              >
+                <Icon
+                  name={member.targetKind === "website" ? "globe" : "monitor"}
+                  size={14}
+                />
+                {member.targetLabel} ×
+              </button>
+            ))}
+            {!selectedMembers.length && (
+              <span className="selection-hint">
+                Tick apps and websites to merge — selection can span both lists.
+                At least 2 are required.
+              </span>
+            )}
+          </div>
+          <div className="selection-actions">
+            <span className="tab-count">{selectedMembers.length}</span>
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={!selectedMembers.length}
+              onClick={() => setSelectedMembers([])}
+            >
+              Clear
+            </button>
+            <button
+              type="button"
+              className="primary-button"
+              disabled={selectedMembers.length < 2 || busy}
+              onClick={() => openCreateGroup(selectedMembers)}
+            >
+              Merge selected
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="boundary-list">
         {kind === "apps"
           ? filteredApps.map((row) => (
-              <article className="boundary-row" key={row.key}>
+              <article
+                className={`boundary-row ${selectMode ? "selecting" : ""}`}
+                key={row.key}
+              >
+                {selectMode &&
+                  (() => {
+                    const member = groupMemberFromApp(row);
+                    const owner = memberOwnerByKey.get(memberKeyOf(member));
+                    const picked = selectionKeys.has(memberKeyOf(member));
+                    return (
+                      <button
+                        type="button"
+                        className={`pick-box ${picked ? "selected" : ""}`}
+                        aria-pressed={picked}
+                        disabled={Boolean(owner)}
+                        title={
+                          owner
+                            ? `Already in ${owner.name} — remove it there first`
+                            : `Select ${row.name} for merging`
+                        }
+                        aria-label={`Select ${row.name} for merging`}
+                        onClick={() => toggleMemberSelection(member)}
+                      >
+                        <Icon name="check" size={14} />
+                      </button>
+                    );
+                  })()}
                 <span className="letter-icon">
                   {row.name.charAt(0).toUpperCase()}
                 </span>
@@ -2413,7 +3500,33 @@ function BoundariesPage({ dashboard, snapshot, boundariesLock = false }: any) {
               </article>
             ))
           : filteredSites.map((site) => (
-              <article className="boundary-row" key={site.domain}>
+              <article
+                className={`boundary-row ${selectMode ? "selecting" : ""}`}
+                key={site.domain}
+              >
+                {selectMode &&
+                  (() => {
+                    const member = groupMemberFromSite(site);
+                    const owner = memberOwnerByKey.get(memberKeyOf(member));
+                    const picked = selectionKeys.has(memberKeyOf(member));
+                    return (
+                      <button
+                        type="button"
+                        className={`pick-box ${picked ? "selected" : ""}`}
+                        aria-pressed={picked}
+                        disabled={Boolean(owner)}
+                        title={
+                          owner
+                            ? `Already in ${owner.name} — remove it there first`
+                            : `Select ${site.domain} for merging`
+                        }
+                        aria-label={`Select ${site.domain} for merging`}
+                        onClick={() => toggleMemberSelection(member)}
+                      >
+                        <Icon name="check" size={14} />
+                      </button>
+                    );
+                  })()}
                 <span className="letter-icon">
                   {(site.displayName || site.domain).charAt(0).toUpperCase()}
                 </span>
@@ -2422,8 +3535,8 @@ function BoundariesPage({ dashboard, snapshot, boundariesLock = false }: any) {
                   <p>
                     <span className="category-label">{site.category}</span> ·{" "}
                     {site.domain}
-                    {siteMinutes.get(site.domain)
-                      ? ` · ${Math.round((siteMinutes.get(site.domain) || 0) / 60)} min today`
+                    {siteMinutes.get(normalizeSiteKey(site.domain))
+                      ? ` · ${Math.round((siteMinutes.get(normalizeSiteKey(site.domain)) || 0) / 60)} min today`
                       : ""}
                   </p>
                 </div>
@@ -2507,6 +3620,231 @@ function BoundariesPage({ dashboard, snapshot, boundariesLock = false }: any) {
                 disabled={busy || !siteInput.trim()}
               >
                 Add Website
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {groupDraft && (
+        <div
+          className="boundary-dialog-backdrop"
+          role="presentation"
+          onClick={() => setGroupDraft(null)}
+        >
+          <div
+            className="boundary-dialog group-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label={groupDraft.groupId ? "Edit group" : "Create group"}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h2>{groupDraft.groupId ? "Edit group" : "New group"}</h2>
+            <p>
+              Members share one daily limit and count as one cumulative bucket
+              across every device. A target can belong to one group only.
+            </p>
+            {mergeNote && (
+              <p className="selection-hint">
+                Added from the {mergeNote} view — pick at least one more member
+                (a bucket needs 2 or more).
+              </p>
+            )}
+            <label className="group-field">
+              <span>Name</span>
+              <input
+                autoFocus
+                value={groupDraft.name}
+                onChange={(e) => {
+                  setGroupDraft({ ...groupDraft, name: e.target.value });
+                  setGroupError(null);
+                }}
+                onKeyDown={(e) => e.key === "Enter" && submitGroup()}
+                placeholder="e.g. YouTube"
+                aria-invalid={Boolean(groupError) && !groupDraft.name.trim()}
+              />
+            </label>
+            <label className="group-field">
+              <span>Daily limit (minutes, optional)</span>
+              <input
+                value={groupDraft.limitMinutes}
+                onChange={(e) => {
+                  setGroupDraft({ ...groupDraft, limitMinutes: e.target.value });
+                  setGroupError(null);
+                }}
+                inputMode="numeric"
+                placeholder="No limit"
+              />
+            </label>
+            <div className="chip-row">
+              {groupDraft.members.map((member) => (
+                <button
+                  type="button"
+                  className={`member-chip ${member.targetKind}`}
+                  key={memberKeyOf(member)}
+                  title="Remove member"
+                  onClick={() => toggleDraftMember(member)}
+                >
+                  <Icon
+                    name={member.targetKind === "website" ? "globe" : "monitor"}
+                    size={14}
+                  />
+                  {member.targetLabel} ×
+                </button>
+              ))}
+              {!groupDraft.members.length && (
+                <span className="selection-hint">
+                  No members yet — pick at least 2 below.
+                </span>
+              )}
+            </div>
+            <label className="search">
+              <Icon name="search" />
+              <input
+                value={pickerQuery}
+                onChange={(e) => setPickerQuery(e.target.value)}
+                placeholder="Search apps and websites"
+                aria-label="Search group members"
+              />
+            </label>
+            <div className="key-entry">
+              <div
+                className="segment key-entry-kind"
+                role="group"
+                aria-label="Key kind"
+              >
+                <button
+                  type="button"
+                  className={manualKind === "app" ? "active" : ""}
+                  aria-pressed={manualKind === "app"}
+                  onClick={() => setManualKind("app")}
+                >
+                  App
+                </button>
+                <button
+                  type="button"
+                  className={manualKind === "website" ? "active" : ""}
+                  aria-pressed={manualKind === "website"}
+                  onClick={() => setManualKind("website")}
+                >
+                  Website
+                </button>
+              </div>
+              <input
+                value={manualKey}
+                onChange={(e) => setManualKey(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && submitManualMember()}
+                placeholder={
+                  manualKind === "app" ? "e.g. chrome.exe" : "e.g. youtube.com"
+                }
+                aria-label="Add a target key manually"
+              />
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={submitManualMember}
+                disabled={!manualKey.trim()}
+              >
+                Add
+              </button>
+            </div>
+            <p className="selection-hint">
+              Not listed? Add the exact key by hand — e.g. an app that only runs
+              on your phone. It is normalized (lowercase; websites drop a
+              leading www.), and any device whose tracked key matches will
+              contribute to this bucket.
+            </p>
+            <div className="picker-list">
+              {pickerCandidates.map((member) => {
+                const key = memberKeyOf(member);
+                const owner = memberOwnerByKey.get(key);
+                const ownedElsewhere = Boolean(
+                  owner && owner.groupId !== groupDraft.groupId,
+                );
+                const picked = groupDraft.members.some(
+                  (entry) => memberKeyOf(entry) === key,
+                );
+                const tracked = trackedSecondsByMember.get(key);
+                return (
+                  <button
+                    type="button"
+                    className={`picker-row ${picked ? "picked" : ""}`}
+                    key={key}
+                    disabled={ownedElsewhere}
+                    title={
+                      ownedElsewhere
+                        ? `Already in ${owner?.name}`
+                        : member.targetKey
+                    }
+                    onClick={() => toggleDraftMember(member)}
+                  >
+                    <span className="picker-icon">
+                      <Icon
+                        name={
+                          member.targetKind === "website" ? "globe" : "monitor"
+                        }
+                        size={14}
+                      />
+                    </span>
+                    <span className="picker-copy">
+                      <strong>{member.targetLabel}</strong>
+                      <small>
+                        {member.targetKind === "app" ? "App" : "Website"}
+                        {tracked ? ` · ${fmt(tracked)} tracked` : ""}
+                        {ownedElsewhere ? ` · in ${owner?.name}` : ""}
+                      </small>
+                      {Boolean(member.devices?.length) && (
+                        <small className="device-chips">
+                          {(member.devices || []).map((device) => (
+                            <span className="device-chip" key={device.deviceId}>
+                              {device.name}
+                              {device.platform && device.platform !== "unknown"
+                                ? ` · ${device.platform}`
+                                : ""}
+                            </span>
+                          ))}
+                        </small>
+                      )}
+                    </span>
+                    <span className={`pick-box ${picked ? "selected" : ""}`}>
+                      <Icon name="check" size={14} />
+                    </span>
+                  </button>
+                );
+              })}
+              {!pickerCandidates.length && (
+                <p className="picker-empty">No targets match that search.</p>
+              )}
+            </div>
+            <p
+              className={`group-rule ${
+                groupDraft.members.length < 2 ? "warn" : ""
+              }`}
+            >
+              {groupDraft.members.length < 2
+                ? `At least 2 members are required (${groupDraft.members.length} selected).`
+                : `${groupDraft.members.length} members selected.`}
+            </p>
+            {groupError && <p className="inline-error">{groupError}</p>}
+            <div className="dialog-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => setGroupDraft(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="primary-button"
+                onClick={submitGroup}
+                disabled={
+                  busy ||
+                  !groupDraft.name.trim() ||
+                  groupDraft.members.length < 2
+                }
+              >
+                {groupDraft.groupId ? "Save group" : "Create group"}
               </button>
             </div>
           </div>

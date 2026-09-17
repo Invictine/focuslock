@@ -40,10 +40,114 @@ data class UsageDeviceSummary(
     val blockedSeconds: Long,
 )
 
+/** One target row from `usage:getUsageSummary` (`targets[]`). */
+data class UsageTarget(
+    val targetKind: String,
+    val targetKey: String,
+    val targetLabel: String,
+    val trackedSeconds: Long,
+    val blockedSeconds: Long,
+    val deviceIds: List<String>,
+)
+
+/** One day bucket from `usage:getUsageSummary` (`days[]`). */
+data class UsageDay(
+    val date: String,
+    val trackedSeconds: Long,
+    val blockedSeconds: Long,
+)
+
+/**
+ * Merge-aware target row from `usage:getUsageSummary` (`groupedTargets[]`): merged
+ * buckets appear as `targetKind = "group"` with [groupId]/[memberKeys] set, every
+ * target outside a group keeps its real kind and a single-member key list.
+ */
+data class GroupedTarget(
+    val targetKind: String,
+    val targetKey: String,
+    val targetLabel: String,
+    val trackedSeconds: Long,
+    val blockedSeconds: Long,
+    val deviceIds: List<String>,
+    val memberKeys: List<String>,
+    val memberCount: Int,
+    val groupId: String? = null,
+    val dailyLimitMinutes: Int? = null,
+    val limitEnabled: Boolean? = null,
+    val category: String? = null,
+)
+
+/** One device that contributed usage for a [KnownTarget] (`usage:listKnownTargets`). */
+data class KnownTargetDevice(
+    val deviceId: String,
+    val name: String,
+    val platform: String,
+)
+
+/**
+ * One all-time, all-device target from `usage:listKnownTargets`: every key the account
+ * has ever been observed using, regardless of date range or which device produced it.
+ * This is the enumeration the merge picker needs — a Windows app, an Android package
+ * and an extension-only domain are all just candidate members. [groupId]/[groupName]
+ * are set when the target already belongs to a bucket; [devices] is the provenance.
+ */
+data class KnownTarget(
+    val targetKind: String,
+    val targetKey: String,
+    val targetLabel: String,
+    val trackedSeconds: Long,
+    val lastDate: String? = null,
+    val devices: List<KnownTargetDevice> = emptyList(),
+    val groupId: String? = null,
+    val groupName: String? = null,
+)
+
+/** One member of a merged group (`groups:listGroups` / summary `groups[]`). */
+data class TargetGroupMember(
+    val targetKind: String,
+    val targetKey: String,
+    val targetLabel: String,
+    val trackedSeconds: Long = 0L,
+    val deviceIds: List<String> = emptyList(),
+)
+
+/** A merged group from `groups:listGroups` / the summary's `groups[]`. */
+data class TargetGroup(
+    val groupId: String,
+    val name: String,
+    val category: String? = null,
+    val members: List<TargetGroupMember>,
+    val trackedSeconds: Long = 0L,
+    val blockedSeconds: Long = 0L,
+    val deviceIds: List<String> = emptyList(),
+    val dailyLimitMinutes: Int? = null,
+    val limitEnabled: Boolean? = null,
+    val updatedAt: Long = 0L,
+)
+
+/**
+ * One pull of `groups:groupsState`: the group list plus the collection's authoritative
+ * LWW clock. [updatedAt] is present even when [groups] is empty, which is what makes an
+ * intentional "deleted on every device" distinguishable from "never synced".
+ */
+data class GroupsState(val groups: List<TargetGroup>, val updatedAt: Long)
+
+/**
+ * Outcome of [ConvexSyncClient.saveGroups]. `applied == false` means the server did not
+ * accept the write — either it rejected a stale version or the request failed — so the
+ * caller must not re-stamp its local clock and should re-read `groups:groupsState`.
+ * [updatedAt] is the server's collection version when it returned one.
+ */
+data class SaveGroupsResult(val applied: Boolean, val updatedAt: Long = 0L)
+
 /** Cross-device usage totals for the requested date window (see [ConvexSyncClient.getUsageSummary]). */
 data class UsageSummary(
     val totalTrackedSeconds: Long,
     val devices: List<UsageDeviceSummary>,
+    val targets: List<UsageTarget> = emptyList(),
+    val days: List<UsageDay> = emptyList(),
+    val groupedTargets: List<GroupedTarget> = emptyList(),
+    val groups: List<TargetGroup> = emptyList(),
 )
 
 /** A registered installation from `devices:listDevices`. */
@@ -135,6 +239,79 @@ class ConvexSyncClient(
             .put("isBlocked", it.isBlocked).put("category", it.category)
             .put("isCustom", it.isCustom)) }
         return post("/api/mutation", "focus:saveBlockedWebsites", JSONObject().put("sites", arr).put("updatedAt", updatedAt)) != null
+    }
+
+    /**
+     * User's merged target groups (`groups:listGroups`). An array query result is wrapped
+     * by [post] as {"_primitive":[...]}. Returns **null** on auth/network/parse failure —
+     * never a fake empty list, which is indistinguishable from "no groups" and used to
+     * make callers push stale local state. Prefer [groupsState] for sync decisions; this
+     * endpoint cannot report the collection version.
+     */
+    suspend fun listGroups(): List<TargetGroup>? {
+        val raw = post("/api/query", "groups:listGroups", JSONObject()) ?: return null
+        val arr = raw.optJSONArray("_primitive") ?: raw.optJSONArray("groups") ?: return null
+        return try {
+            parseGroups(arr)
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            android.util.Log.w("ConvexSync", "groups:listGroups parse error: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Authoritative group pull (`groups:groupsState`): the group list plus the collection
+     * version, which the server keeps even when the list is intentionally empty. Returns
+     * null on auth/network/parse failure; callers must skip the whole group sync when
+     * null rather than treating it as an empty collection.
+     */
+    suspend fun groupsState(): GroupsState? {
+        val raw = post("/api/query", "groups:groupsState", JSONObject()) ?: return null
+        return try {
+            // An object value is returned as-is by [post]; be defensive about wrappers.
+            val obj = raw.optJSONObject("value") ?: raw
+            val arr = obj.optJSONArray("groups") ?: return null
+            GroupsState(
+                groups = parseGroups(arr),
+                updatedAt = obj.optLong("updatedAt", 0L).coerceAtLeast(0L),
+            )
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            android.util.Log.w("ConvexSync", "groups:groupsState parse error: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * Full-replace LWW push of the group list (`groups:saveGroups`). The server drops
+     * groups with fewer than two members, lowercases member keys and clamps the limit
+     * to 0..1440, so callers should not rely on the echo (there is none).
+     *
+     * [SaveGroupsResult.applied] is true only when the server accepted the write;
+     * `applied == false` covers both a rejection (server version newer) and a failed
+     * request. Callers must not re-stamp their local clock on a false result.
+     */
+    suspend fun saveGroups(groups: List<TargetGroup>, updatedAt: Long): SaveGroupsResult {
+        val arr = JSONArray()
+        groups.forEach { g ->
+            val members = JSONArray()
+            g.members.forEach { m -> members.put(JSONObject()
+                .put("targetKind", m.targetKind).put("targetKey", m.targetKey)
+                .put("targetLabel", m.targetLabel)) }
+            val obj = JSONObject()
+                .put("groupId", g.groupId).put("name", g.name).put("members", members)
+            if (g.category != null) obj.put("category", g.category)
+            if (g.dailyLimitMinutes != null) obj.put("dailyLimitMinutes", g.dailyLimitMinutes)
+            if (g.limitEnabled != null) obj.put("limitEnabled", g.limitEnabled)
+            arr.put(obj)
+        }
+        val raw = post("/api/mutation", "groups:saveGroups",
+            JSONObject().put("groups", arr).put("updatedAt", updatedAt)) ?: return SaveGroupsResult(applied = false)
+        return SaveGroupsResult(
+            applied = raw.optBoolean("applied", false),
+            updatedAt = raw.optLong("updatedAt", 0L).coerceAtLeast(0L),
+        )
     }
 
     /**
@@ -266,6 +443,60 @@ class ConvexSyncClient(
     }
 
     /**
+     * Every target this account has ever been observed using, on any device
+     * (`usage:listKnownTargets`, sorted by trackedSeconds desc). Returns **null** on
+     * auth/network/parse failure — never a fake empty list, which would make remote-only
+     * merge candidates silently disappear. The list is deliberately untyped server-side
+     * (a target may be an Android package, a Windows executable or a domain), so callers
+     * must read app-vs-website from [KnownTarget.targetKind].
+     */
+    suspend fun listKnownTargets(): List<KnownTarget>? {
+        val raw = post("/api/query", "usage:listKnownTargets", JSONObject()) ?: return null
+        val arr = raw.optJSONArray("_primitive") ?: raw.optJSONArray("targets") ?: return null
+        return try {
+            parseKnownTargets(arr)
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            android.util.Log.w("ConvexSync", "usage:listKnownTargets parse error: ${e.message}")
+            null
+        }
+    }
+
+    /** Defensive parse of the `usage:listKnownTargets` array; malformed rows are skipped. */
+    private fun parseKnownTargets(arr: JSONArray): List<KnownTarget> {
+        val out = mutableListOf<KnownTarget>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val targetKey = o.optString("targetKey").trim()
+            if (targetKey.isEmpty()) continue
+            val devices = mutableListOf<KnownTargetDevice>()
+            o.optJSONArray("devices")?.let { darr ->
+                for (j in 0 until darr.length()) {
+                    val d = darr.optJSONObject(j) ?: continue
+                    val deviceId = d.optString("deviceId").trim()
+                    if (deviceId.isEmpty()) continue
+                    devices += KnownTargetDevice(
+                        deviceId = deviceId,
+                        name = d.optString("name").trim().ifEmpty { "Unknown device" },
+                        platform = d.optString("platform").trim().ifEmpty { "unknown" },
+                    )
+                }
+            }
+            out += KnownTarget(
+                targetKind = o.optString("targetKind").trim().ifEmpty { "app" },
+                targetKey = targetKey,
+                targetLabel = o.optString("targetLabel").trim().ifEmpty { targetKey },
+                trackedSeconds = o.optLong("trackedSeconds", 0L).coerceAtLeast(0L),
+                lastDate = o.optString("lastDate").trim().ifEmpty { null },
+                devices = devices,
+                groupId = o.optString("groupId").trim().ifEmpty { null },
+                groupName = o.optString("groupName").trim().ifEmpty { null },
+            )
+        }
+        return out
+    }
+
+    /**
      * Partial upsert of cross-platform user prefs. The server patches only the fields
      * supplied (see convex/focus.ts savePrefs); [updatedAt] is the LWW clock stamped on
      * whichever field(s) are set here, so callers must pass a non-null field only when
@@ -354,7 +585,11 @@ class ConvexSyncClient(
         return Snapshot(state, apps, sites, records, prefs, stateUpdatedAt, appsUpdatedAt, sitesUpdatedAt)
     }
 
-    /** Defensive parse of the `usage:getUsageSummary` value object. */
+    /**
+     * Defensive parse of the `usage:getUsageSummary` value object. Every optional array
+     * (`targets`, `days`, `groupedTargets`, `groups`) degrades to an empty list when the
+     * deployment does not return it (older backend, partial payload).
+     */
     private fun parseUsageSummary(root: JSONObject): UsageSummary {
         val devices = mutableListOf<UsageDeviceSummary>()
         root.optJSONArray("devices")?.let { arr ->
@@ -370,12 +605,123 @@ class ConvexSyncClient(
                 )
             }
         }
+        val targets = mutableListOf<UsageTarget>()
+        root.optJSONArray("targets")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val targetKey = o.optString("targetKey").trim()
+                if (targetKey.isEmpty()) continue
+                targets += UsageTarget(
+                    targetKind = o.optString("targetKind").trim().ifEmpty { "app" },
+                    targetKey = targetKey,
+                    targetLabel = o.optString("targetLabel").trim().ifEmpty { targetKey },
+                    trackedSeconds = o.optLong("trackedSeconds", 0L).coerceAtLeast(0L),
+                    blockedSeconds = o.optLong("blockedSeconds", 0L).coerceAtLeast(0L),
+                    deviceIds = optStringList(o, "deviceIds"),
+                )
+            }
+        }
+        val days = mutableListOf<UsageDay>()
+        root.optJSONArray("days")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val date = o.optString("date").trim()
+                if (date.isEmpty()) continue
+                days += UsageDay(
+                    date = date,
+                    trackedSeconds = o.optLong("trackedSeconds", 0L).coerceAtLeast(0L),
+                    blockedSeconds = o.optLong("blockedSeconds", 0L).coerceAtLeast(0L),
+                )
+            }
+        }
+        val groupedTargets = mutableListOf<GroupedTarget>()
+        root.optJSONArray("groupedTargets")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val o = arr.optJSONObject(i) ?: continue
+                val targetKey = o.optString("targetKey").trim()
+                if (targetKey.isEmpty()) continue
+                groupedTargets += GroupedTarget(
+                    targetKind = o.optString("targetKind").trim().ifEmpty { "app" },
+                    targetKey = targetKey,
+                    targetLabel = o.optString("targetLabel").trim().ifEmpty { targetKey },
+                    trackedSeconds = o.optLong("trackedSeconds", 0L).coerceAtLeast(0L),
+                    blockedSeconds = o.optLong("blockedSeconds", 0L).coerceAtLeast(0L),
+                    deviceIds = optStringList(o, "deviceIds"),
+                    memberKeys = optStringList(o, "memberKeys"),
+                    memberCount = o.optInt("memberCount", 1).coerceAtLeast(1),
+                    groupId = o.optString("groupId").trim().ifEmpty { null },
+                    dailyLimitMinutes = optIntOrNull(o, "dailyLimitMinutes"),
+                    limitEnabled = optBooleanOrNull(o, "limitEnabled"),
+                    category = o.optString("category").trim().ifEmpty { null },
+                )
+            }
+        }
         val reportedTotal = root.optLong("totalTrackedSeconds", -1L)
         return UsageSummary(
             totalTrackedSeconds = if (reportedTotal >= 0L) reportedTotal else devices.sumOf { it.trackedSeconds },
             devices = devices.sortedByDescending { it.trackedSeconds },
+            targets = targets,
+            days = days,
+            groupedTargets = groupedTargets,
+            groups = parseGroups(root.optJSONArray("groups")),
         )
     }
+
+    /** Defensive parse of a `groups:listGroups` / summary `groups[]` array. */
+    private fun parseGroups(arr: JSONArray?): List<TargetGroup> {
+        if (arr == null) return emptyList()
+        val groups = mutableListOf<TargetGroup>()
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val groupId = o.optString("groupId").trim()
+            if (groupId.isEmpty()) continue
+            val members = mutableListOf<TargetGroupMember>()
+            o.optJSONArray("members")?.let { marr ->
+                for (j in 0 until marr.length()) {
+                    val m = marr.optJSONObject(j) ?: continue
+                    val targetKey = m.optString("targetKey").trim()
+                    if (targetKey.isEmpty()) continue
+                    members += TargetGroupMember(
+                        targetKind = m.optString("targetKind").trim().ifEmpty { "app" },
+                        targetKey = targetKey,
+                        targetLabel = m.optString("targetLabel").trim().ifEmpty { targetKey },
+                        trackedSeconds = m.optLong("trackedSeconds", 0L).coerceAtLeast(0L),
+                        deviceIds = optStringList(m, "deviceIds"),
+                    )
+                }
+            }
+            groups += TargetGroup(
+                groupId = groupId,
+                name = o.optString("name").trim().ifEmpty { groupId },
+                category = o.optString("category").trim().ifEmpty { null },
+                members = members,
+                trackedSeconds = o.optLong("trackedSeconds", 0L).coerceAtLeast(0L),
+                blockedSeconds = o.optLong("blockedSeconds", 0L).coerceAtLeast(0L),
+                deviceIds = optStringList(o, "deviceIds"),
+                dailyLimitMinutes = optIntOrNull(o, "dailyLimitMinutes"),
+                limitEnabled = optBooleanOrNull(o, "limitEnabled"),
+                updatedAt = o.optLong("updatedAt", 0L).coerceAtLeast(0L),
+            )
+        }
+        return groups
+    }
+
+    /** Non-empty trimmed strings from an optional JSON array; never throws. */
+    private fun optStringList(o: JSONObject, key: String): List<String> {
+        val arr = o.optJSONArray(key) ?: return emptyList()
+        val out = ArrayList<String>(arr.length())
+        for (i in 0 until arr.length()) {
+            val value = arr.optString(i, "").trim()
+            if (value.isNotEmpty()) out += value
+        }
+        return out
+    }
+
+    private fun optIntOrNull(o: JSONObject, key: String): Int? =
+        if (o.has(key) && !o.isNull(key)) o.optInt(key) else null
+
+    private fun optBooleanOrNull(o: JSONObject, key: String): Boolean? =
+        if (o.has(key) && !o.isNull(key)) o.optBoolean(key) else null
 
     /** Defensive parse of the `devices:listDevices` array (already sorted server-side). */
     private fun parseDevices(arr: JSONArray?): List<DeviceInfo> {

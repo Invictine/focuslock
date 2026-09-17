@@ -1,5 +1,23 @@
 package com.focuslock.app.ui.components
 
+import android.database.ContentObserver
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.MotionDurationScale
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -14,9 +32,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
@@ -48,7 +64,6 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.focuslock.app.service.InstalledAppsRepository
-import kotlinx.coroutines.delay
 
 /**
  * Shared spacing/size tokens for the app's screens. Screens should prefer these over
@@ -271,12 +286,7 @@ private fun String.monogramOrFallback(): String {
     return String(Character.toChars(first)).uppercase()
 }
 
-/**
- * Shared motion language (M3 Expressive, no new deps): spatial default
- * `spring(0.8, 380)`, fast `spring(0.6, 800)`, fade/color `spring(1, 1600)`.
- * Entrances are `slideInVertically { it / 4 } + fadeIn`, staggered ~60ms per
- * element. Callers cap the stagger index at ~6 items so the tail never lags.
- */
+/** Shared finite motion specs and restrained decorative/entrance timing. */
 object MotionTokens {
     val SpatialFloat: FiniteAnimationSpec<Float> = spring<Float>(dampingRatio = 0.8f, stiffness = 380f)
     /** Slide-offset spec for slideInVertically/slideOutVertically (animates IntOffset). */
@@ -287,40 +297,149 @@ object MotionTokens {
     val FastFloat: FiniteAnimationSpec<Float> = spring<Float>(dampingRatio = 0.6f, stiffness = 800f)
     val FadeFloat: FiniteAnimationSpec<Float> = spring<Float>(dampingRatio = 1f, stiffness = 1600f)
 
-    /** Per-element entrance stagger; callers cap the index at ~6 items. */
-    const val StaggerMs = 60L
+    val PressFloat: FiniteAnimationSpec<Float> = spring(dampingRatio = 0.85f, stiffness = 800f)
+    val ChevronFloat: FiniteAnimationSpec<Float> = spring(dampingRatio = 0.85f, stiffness = 800f)
+    val ProgressFloat: FiniteAnimationSpec<Float> = tween(durationMillis = 500)
+    val PulseFloat = tween<Float>(durationMillis = 1200)
+    const val PressScale = 0.97f
+    val EntranceTravel = 12.dp
+    const val StaggerMs = 40L
+    const val MaxStaggerMs = 200L
 }
 
 /**
  * Small staged-entrance wrapper shared by the non-lazy screens (boundaries
- * overview, strict, permission dialog). Each element waits ~60ms after the
- * previous one, then fades/slides in with the shared spatial/fade springs.
+ * overview, strict, permission dialog), home and auth. Elements stagger by 40ms
+ * (200ms maximum), then fade/slide up to 12dp with shared spatial/fade springs.
  * Runs on first composition only: once [visible] flips true the element stays
  * revealed across recompositions, so scrolls and state flips never replay it.
+ *
+ * Content is always composed and laid out. Only layer alpha and translation
+ * animate, with no per-frame composition reads or layout jumps. Eligible content
+ * starts transparent while waiting for [visible], unless system motion is disabled.
+ *
+ * Once-per-process gating via [screenKey]: null keeps the legacy behavior
+ * (play on each fresh composition); a non-null key plays only the first time
+ * that key is seen in this process (tracked in a module-level seen-set), and
+ * later compositions render the final state instantly with no animation. This
+ * stops entrance cascades replaying on every tab return, since tab switches
+ * tear the screens out of composition and reset their remembered flags.
  */
 @Composable
 fun StaggeredFadeSlide(
     visible: Boolean,
     index: Int,
     modifier: Modifier = Modifier,
+    screenKey: String? = null,
     content: @Composable () -> Unit,
 ) {
-    var revealed by remember { mutableStateOf(false) }
-    LaunchedEffect(visible) {
-        if (visible) {
-            if (index > 0) delay(index * MotionTokens.StaggerMs)
-            revealed = true
+    // Keep eligibility and animation state together for this screen/index identity.
+    // A sibling consuming the seen-set slot must never switch an in-flight branch.
+    val eligible = remember(screenKey, index) {
+        screenKey == null || !seenEntranceScreens.contains(screenKey)
+    }
+    val alpha = remember(screenKey, index) { Animatable(if (eligible) 0f else 1f) }
+    val travel = remember(screenKey, index) { Animatable(if (eligible) 1f else 0f) }
+    val systemMotionEnabled = rememberSystemMotionEnabled()
+    LaunchedEffect(visible, screenKey, index, systemMotionEnabled) {
+        if (!eligible || !systemMotionEnabled) {
+            alpha.snapTo(1f)
+            travel.snapTo(0f)
+            if (visible && screenKey != null) seenEntranceScreens.add(screenKey)
+        } else if (visible) {
+            // Consume the process-wide slot up front, so a restart that cancels the
+            // in-flight cascade (system animator scale flipping mid-run) cannot replay it.
+            if (screenKey != null) seenEntranceScreens.add(screenKey)
+            // A Compose animation (rather than delay) respects live motion-scale changes,
+            // including a zero-scale override supplied by a host/test.
+            val stagger = (index.coerceIn(0, 5) * MotionTokens.StaggerMs)
+                .coerceAtMost(MotionTokens.MaxStaggerMs).toInt()
+            if (stagger > 0 && coroutineContext[MotionDurationScale]?.scaleFactor != 0f) {
+                Animatable(0f).animateTo(1f, tween(durationMillis = stagger))
+            }
+            launch { travel.animateTo(0f, MotionTokens.SpatialFloat) }
+            alpha.animateTo(1f, MotionTokens.FadeFloat)
         }
     }
-    AnimatedVisibility(
-        visible = revealed,
-        modifier = modifier,
-        enter = slideInVertically(
-            animationSpec = MotionTokens.SpatialOffset,
-            initialOffsetY = { it / 4 }
-        ) + fadeIn(animationSpec = MotionTokens.FadeFloat),
+    Box(
+        modifier = modifier.graphicsLayer {
+            this.alpha = alpha.value
+            translationY = travel.value.coerceIn(0f, 1f) * MotionTokens.EntranceTravel.toPx()
+        },
     ) {
         content()
+    }
+}
+
+/**
+ * Process-lifetime set of entrance [screenKey] values that have already played
+ * their cascade once. Tab switches tear screens out of composition (resetting
+ * remembered flags), so this module-level set is the only thing that survives
+ * a tab return and keeps entrances to once per process per screen.
+ */
+private val seenEntranceScreens = mutableSetOf<String>()
+
+/** Observe settings changes, not frames; unregister on leaving composition. */
+@Composable
+private fun rememberSystemMotionEnabled(): Boolean {
+    val resolver = LocalContext.current.applicationContext.contentResolver
+    fun readEnabled(): Boolean = runCatching {
+        Settings.Global.getFloat(resolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) > 0f
+    }.getOrDefault(true)
+    var enabled by remember(resolver) { mutableStateOf(readEnabled()) }
+    DisposableEffect(resolver) {
+        val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean) { enabled = readEnabled() }
+        }
+        resolver.registerContentObserver(
+            Settings.Global.getUriFor(Settings.Global.ANIMATOR_DURATION_SCALE), false, observer,
+        )
+        enabled = readEnabled() // Close the gap between initial read and registration.
+        onDispose { resolver.unregisterContentObserver(observer) }
+    }
+    return enabled
+}
+
+/** Decorative motion only runs while resumed and both system/Compose motion are enabled. */
+@Composable
+fun rememberDecorativeMotionEnabled(): Boolean {
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    var resumed by remember(lifecycle) {
+        mutableStateOf(lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED))
+    }
+    DisposableEffect(lifecycle) {
+        val observer = LifecycleEventObserver { _, _ ->
+            resumed = lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+        }
+        lifecycle.addObserver(observer)
+        resumed = lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+        onDispose { lifecycle.removeObserver(observer) }
+    }
+    val systemEnabled = rememberSystemMotionEnabled()
+    val motionScale = rememberCoroutineScope().coroutineContext[MotionDurationScale]
+    return resumed && systemEnabled && (motionScale?.scaleFactor ?: 1f) > 0f
+}
+
+/** Read the returned State only inside a draw/graphicsLayer lambda. */
+@Composable
+fun rememberDecorativePulse(
+    initialValue: Float,
+    targetValue: Float,
+    staticValue: Float = initialValue,
+    active: Boolean = true,
+    label: String = "decorative-pulse",
+): State<Float> {
+    val enabled = rememberDecorativeMotionEnabled()
+    return if (active && enabled) {
+        val transition = rememberInfiniteTransition(label = label)
+        transition.animateFloat(
+            initialValue = initialValue,
+            targetValue = targetValue,
+            animationSpec = infiniteRepeatable(MotionTokens.PulseFloat, RepeatMode.Reverse),
+            label = label,
+        )
+    } else {
+        rememberUpdatedState(staticValue)
     }
 }
 
@@ -334,12 +453,12 @@ fun StaggeredFadeSlide(
 @Composable
 fun pressScaleModifier(
     interactionSource: MutableInteractionSource,
-    pressedScale: Float = 0.97f,
+    pressedScale: Float = MotionTokens.PressScale,
 ): Modifier {
     val pressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
         targetValue = if (pressed) pressedScale else 1f,
-        animationSpec = MotionTokens.FastFloat,
+        animationSpec = MotionTokens.PressFloat,
         label = "pressScale"
     )
     return Modifier.graphicsLayer {

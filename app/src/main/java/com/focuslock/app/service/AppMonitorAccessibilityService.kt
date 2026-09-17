@@ -109,6 +109,11 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     private var frogLockJob: Job? = null
     private var frogWakeReceiver: BroadcastReceiver? = null
 
+    // Target-group membership mirror: a collector started in onServiceConnected keeps
+    // TargetGroupsRepository's in-memory index warm, so the per-package group-limit
+    // check reads memory only (never DataStore) while an app is opening.
+    private var targetGroupsJob: Job? = null
+
     // Default launcher / IME packages for the frog gate's brick mitigation (F7):
     // resolved lazily and cached; null = not resolved (yet).
     @Volatile
@@ -312,6 +317,19 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         // across the wake hour never fires USER_PRESENT/SCREEN_ON, so without this the
         // frog would stay unarmed until an app switch (see maybeArmFrogOnForeground).
         serviceScope.launch { armAndHandleFrog() }
+
+        // Merged target groups: keep the repository's membership index warm off the event
+        // path so the group-limit check on app entry never suspends on DataStore. Fail
+        // open until the first emission (the repository itself falls back to one read).
+        targetGroupsJob?.cancel()
+        targetGroupsJob = serviceScope.launch {
+            try {
+                FocusLockApplication.instance.targetGroupsRepository.groups.collect { }
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                Log.w(TAG, "target-groups collector failed", e)
+            }
+        }
         // Runtime wake/unlock delivery: the manifest receiver covers boot/package
         // replace only (USER_PRESENT/SCREEN_ON are not reliably manifest-delivered).
         registerFrogWakeReceiver()
@@ -522,6 +540,21 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 return@launch
             }
 
+            // 2b. Merged-group daily limit: the combined cross-device total of every
+            // member (app + website) counts against one cap. Applies to any group
+            // member, whether or not the app itself has its own limit or is blocked.
+            val groupLimitExceeded = try {
+                isGroupLimitExceeded(app, packageName)
+            } catch (_: Exception) {
+                false
+            }
+            if (groupLimitExceeded) {
+                Log.w(TAG, "Group daily limit reached for $packageName — blocking")
+                recordBlock(packageName, "limit")
+                triggerBlocker(packageName, website = null, reason = "limit")
+                return@launch
+            }
+
             // 2a. Permanent block: cannot be bypassed by balance, schedule, or strict mode.
             if (settings.isAppPermanent(packageName)) {
                 Log.w(TAG, "Permanently blocked app launched: $packageName")
@@ -563,6 +596,49 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 startDoomscrollCountdown(packageName, website = null)
             }
         }
+    }
+
+    /**
+     * Merged-group daily-limit enforcement for [packageName].
+     *
+     * A target may belong to at most one group (server rule, mirrored by the
+     * repository). For every group the foreground app is a member of whose limit is
+     * enabled, the combined total is
+     *
+     *     combinedSeconds = max(localSecondsToday, serverSecondsToday)
+     *
+     * - `localSecondsToday` sums today's UsageStats foreground seconds for the group's
+     *   app members; website members contribute 0 locally (browser time reaches the
+     *   server from the extension, never from Android UsageStats).
+     * - `serverSecondsToday` is the cached per-group total from the last
+     *   `usage:getUsageSummary` pull (FocusSyncManager, refreshed once per ~30s sync
+     *   cycle). It can lag one cycle and may not include another device's newest upload.
+     *
+     * max() therefore never under-blocks: enforcement still works fully offline from
+     * local data, and cross-device time is picked up the moment the next pull lands.
+     * All reads are from memory/cheap caches; any failure degrades to "no group limit".
+     */
+    private suspend fun isGroupLimitExceeded(app: FocusLockApplication, packageName: String): Boolean {
+        val groups = app.targetGroupsRepository.groupsForTarget("app", packageName)
+        if (groups.isEmpty()) return false
+        val serverUsage = app.syncManager.groupUsageTodaySeconds.value
+        for (group in groups) {
+            val limitMinutes = group.dailyLimitMinutes ?: continue
+            if (!group.limitEnabled || limitMinutes <= 0) continue
+            var localSeconds = 0L
+            for (member in group.members) {
+                if (member.targetKind != "app") continue
+                localSeconds += try {
+                    UsageStatsRepository.getMinutesForPackage(applicationContext, member.targetKey) * 60L
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    0L
+                }
+            }
+            val combinedSeconds = maxOf(localSeconds, serverUsage[group.groupId] ?: 0L)
+            if (combinedSeconds >= limitMinutes * 60L) return true
+        }
+        return false
     }
 
     /** Records one block event per (package, reason) for the current app entry. */
@@ -1154,6 +1230,8 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         permissionReturnJob = null
         frogLockJob?.cancel()
         frogLockJob = null
+        targetGroupsJob?.cancel()
+        targetGroupsJob = null
         unregisterFrogWakeReceiver()
         countdownJob?.cancel()
         tickTickSessionJob?.cancel()

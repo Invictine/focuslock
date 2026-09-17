@@ -1,26 +1,23 @@
 package com.focuslock.app.ui.apps
 
 import android.widget.Toast
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.*
@@ -31,7 +28,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
@@ -52,20 +49,26 @@ import com.focuslock.app.data.model.BlockedApp
 import com.focuslock.app.data.model.BlockedWebsite
 import com.focuslock.app.data.repository.AppLimit
 import com.focuslock.app.data.repository.SettingsRepository
+import com.focuslock.app.data.repository.TargetGroup
+import com.focuslock.app.data.repository.TargetGroupMember
+import com.focuslock.app.data.repository.UpsertResult
 import com.focuslock.app.service.InstalledApp
 import com.focuslock.app.service.InstalledAppsRepository
 import com.focuslock.app.service.UsageStatsRepository
 import com.focuslock.app.ui.components.AppIconTileForPackage
 import com.focuslock.app.ui.components.IconBadge
 import com.focuslock.app.ui.components.MotionTokens
+import com.focuslock.app.ui.components.PendingMergeTarget
 import com.focuslock.app.ui.components.StaggeredFadeSlide
 import com.focuslock.app.ui.components.UiTokens
+import com.focuslock.app.ui.components.formatUsageSeconds
 import com.focuslock.app.ui.components.pressScaleModifier
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.UUID
 
 enum class PickerTab {
     APPLICATIONS,
@@ -90,7 +93,38 @@ private data class CategoryGroup(
     val blockedCount: Int
 )
 
-/** Load lifecycle for the PackageManager query — distinct from "loaded but empty". */
+/** Max rows in the "Recommended" section (top apps by today's usage minutes). */
+private const val RECOMMENDED_APP_LIMIT = 5
+
+/**
+ * True for the catch-all buckets that must always sort last regardless of usage:
+ * the derived "Other" fallback plus legacy/defensive aliases. Case-insensitive so a
+ * stored "other" or "Uncategorized" can't jump the queue either.
+ */
+private fun isUncategorizedLast(category: String): Boolean {
+    val normalized = category.trim().lowercase()
+    return normalized == "other" || normalized == "unknown" || normalized == "uncategorized"
+}
+
+/**
+ * Category -> leading header glyph. Covers every value the code actually derives
+ * (InstalledAppsRepository.categorize: Social, Entertainment, Messaging, Browser,
+ * Games, Shopping, News, Other) plus the legacy stored "Social Media" alias from
+ * BlockedApp defaults. Anything else falls back to Apps. All glyphs are
+ * Icons.Rounded (filled/rounded only, no outlines) from material-icons-extended.
+ */
+private fun categoryIcon(category: String): ImageVector = when (category.trim().lowercase()) {
+    "social", "social media" -> Icons.Rounded.Group
+    "entertainment" -> Icons.Rounded.PlayArrow
+    "messaging" -> Icons.Rounded.Chat
+    "browser" -> Icons.Rounded.Language
+    "games" -> Icons.Rounded.SportsEsports
+    "shopping" -> Icons.Rounded.ShoppingCart
+    "news" -> Icons.Rounded.Newspaper
+    else -> Icons.Rounded.Apps
+}
+
+/** Load lifecycle for the PackageManager query â€” distinct from "loaded but empty". */
 private sealed interface AppsLoadState {
     data object Loading : AppsLoadState
     data object Ready : AppsLoadState
@@ -104,6 +138,61 @@ private data class BulkAction(
     val confirmLabel: String,
     val isDestructive: Boolean = false,
     val onConfirm: () -> Unit
+)
+
+/** One selectable member in the merge dialog (an app package or a website domain). */
+private data class GroupMemberChoice(
+    val kind: String,
+    val key: String,
+    val label: String,
+    /** Human provenance labels ("Pixel · Android") from the all-device catalog; empty for local-only sources. */
+    val deviceLabels: List<String> = emptyList(),
+) {
+    val selectionKey: String get() = "$kind:$key"
+
+    /** Search matches label, raw key and contributing device names. */
+    fun matches(query: String): Boolean =
+        label.contains(query, ignoreCase = true) ||
+            key.contains(query, ignoreCase = true) ||
+            deviceLabels.any { it.contains(query, ignoreCase = true) }
+}
+
+/**
+ * Repository/server member-key normalization: lowercase, and website keys drop a leading
+ * `www.` (mirrors `TargetGroupsRepository` and convex/groups.ts `normalizeMemberKey`).
+ * Returns null when nothing usable remains.
+ */
+private fun normalizedMemberKey(kind: String, rawKey: String): String? {
+    val normalizedKind = kind.trim().lowercase()
+    val key = rawKey.trim().lowercase()
+    if (normalizedKind.isEmpty() || key.isEmpty()) return null
+    val normalized = if (normalizedKind == "website") key.removePrefix("www.") else key
+    return normalized.ifEmpty { null }
+}
+
+/** "Pixel · Android" provenance label; unknown platforms keep just the device name. */
+private fun deviceLabel(name: String, platform: String): String {
+    val cleanName = name.trim().ifEmpty { "Unknown device" }
+    val suffix = when (platform.trim().lowercase()) {
+        "android" -> "Android"
+        "windows" -> "Windows"
+        "browser" -> "Browser"
+        else -> null
+    }
+    return if (suffix == null) cleanName else "$cleanName · $suffix"
+}
+
+/**
+ * Merge-editor request. [groupId] null = create (fresh UUID on save); non-null = edit,
+ * preserving the existing id and [updatedAt] stamp.
+ */
+private data class GroupEditorRequest(
+    val groupId: String? = null,
+    val updatedAt: Long = 0L,
+    val initialName: String = "",
+    val initialLimitMinutes: Int? = null,
+    val initialLimitEnabled: Boolean = true,
+    val initialMembers: List<GroupMemberChoice> = emptyList(),
 )
 
 private val DOMAIN_REGEX =
@@ -204,7 +293,9 @@ fun AppSelectorScreen() {
 internal fun AppPickerScreen(
     selectedTab: PickerTab,
     onTabChange: (PickerTab) -> Unit,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    pendingMerge: PendingMergeTarget? = null,
+    onPendingMergeConsumed: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -271,10 +362,46 @@ internal fun AppPickerScreen(
     var pendingBulk by remember { mutableStateOf<BulkAction?>(null) }
     var limitTarget by remember { mutableStateOf<AppRowItem?>(null) }
 
+    // ---- Merged groups (apps + websites into one bucket with one combined limit) ----
+    val targetGroupsRepository = FocusLockApplication.instance.targetGroupsRepository
+    val syncManager = FocusLockApplication.instance.syncManager
+    val targetGroups by targetGroupsRepository.groups.collectAsStateWithLifecycle(initialValue = emptyList())
+    val groupUsageToday by syncManager.groupUsageTodaySeconds
+        .collectAsStateWithLifecycle(initialValue = emptyMap())
+    // All-time, all-device catalog: adds targets that exist only on the Windows PC or
+    // the browser extension to the merge picker (empty until the first successful sync).
+    val knownTargets by syncManager.knownTargets
+        .collectAsStateWithLifecycle(initialValue = emptyList())
+    var selectionMode by rememberSaveable { mutableStateOf(false) }
+    val selectedKeys = remember { mutableStateOf<Set<String>>(emptySet()) }
+    var groupEditor by remember { mutableStateOf<GroupEditorRequest?>(null) }
+
+    // Cross-device "New bucket…" hand-off from a usage row: open the editor with that
+    // single target pre-selected. Consumed immediately, so closing/cancelling the
+    // editor (or backing out of the picker) can never reopen it.
+    LaunchedEffect(pendingMerge) {
+        val target = pendingMerge ?: return@LaunchedEffect
+        val kind = if (target.targetKind.trim().lowercase() == "website") "website" else "app"
+        val key = normalizedMemberKey(kind, target.targetKey)
+        if (key != null) {
+            groupEditor = GroupEditorRequest(
+                initialMembers = listOf(
+                    GroupMemberChoice(
+                        kind = kind,
+                        key = key,
+                        label = target.targetLabel.trim().ifEmpty { key },
+                    ),
+                ),
+            )
+        }
+        onPendingMergeConsumed()
+    }
+
     val snackbarHostState = remember { SnackbarHostState() }
     // One-shot entrance cascade for the persistent chrome (top bar -> tabs -> presets);
-    // remembered so it runs on first composition only. Tab bodies animate via
-    // AnimatedContent + animateItem instead, so tab switches never replay the cascade.
+    // remembered so it runs on first composition only. Tab bodies switch instantly
+    // (direct when, no AnimatedContent) with animateItem, so tab switches never
+    // replay the cascade.
     var entered by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { entered = true }
     val appOverrides = remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
@@ -287,7 +414,7 @@ internal fun AppPickerScreen(
         mutableStateOf<Map<String, Boolean>>(emptyMap())
     }
 
-    // Hoisted list states — never recreated, so toggles preserve scroll position.
+    // Hoisted list states â€” never recreated, so toggles preserve scroll position.
     val appsListState = rememberLazyListState()
     val websitesListState = rememberLazyListState()
 
@@ -357,7 +484,7 @@ internal fun AppPickerScreen(
         }
     }
 
-    // Hoisted stable toggle lambdas — same instance for every row, keeps rows skippable.
+    // Hoisted stable toggle lambdas â€” same instance for every row, keeps rows skippable.
     // Optimistic: the row state flips immediately; on persistence failure the override is
     // dropped (revert) and a snackbar explains why.
     val onAppToggle: (AppRowItem, Boolean) -> Unit = remember(settings, scope, snackbarHostState) {
@@ -394,7 +521,7 @@ internal fun AppPickerScreen(
             }
         }
     }
-    // Optimistic permanent-block toggles — mirror the block overrides above.
+    // Optimistic permanent-block toggles â€” mirror the block overrides above.
     val onAppPermanentToggle: (AppRowItem, Boolean) -> Unit = remember(settings, scope, snackbarHostState) {
         { app, permanent ->
             appPermanentOverrides.value = appPermanentOverrides.value + (app.packageName to permanent)
@@ -452,6 +579,21 @@ internal fun AppPickerScreen(
                 limitTarget = app
             }
         }
+    }
+
+    // ---- Multi-select merge mode: long-press any app/website row to start ----
+    // One shared key space so a selection can span both kinds: "app:<pkg>" / "website:<domain>".
+    val enterSelection: (String) -> Unit = { selKey ->
+        selectionMode = true
+        selectedKeys.value = selectedKeys.value + selKey
+    }
+    val toggleSelection: (String) -> Unit = { selKey ->
+        val current = selectedKeys.value
+        selectedKeys.value = if (selKey in current) current - selKey else current + selKey
+    }
+    val exitSelection: () -> Unit = {
+        selectionMode = false
+        selectedKeys.value = emptySet()
     }
 
     // Merge stored block-state with installed apps + defaults for not-yet-installed known apps.
@@ -512,7 +654,7 @@ internal fun AppPickerScreen(
     }
 
     // Stale blocked entries (uninstalled, not in defaults) are hidden from the main
-    // list — surfaced only as a count note so they never show as installed.
+    // list â€” surfaced only as a count note so they never show as installed.
     val staleUninstalledBlockedCount = remember(blockedApps, installedApps, appsLoadState, appsStorageLoaded) {
         if (!appsStorageLoaded || appsLoadState !is AppsLoadState.Ready) 0 else {
             val installedSet = installedApps.map { it.packageName }.toSet()
@@ -521,7 +663,7 @@ internal fun AppPickerScreen(
         }
     }
 
-    // Installed/system sets derived once per load — reused by filters and rows.
+    // Installed/system sets derived once per load â€” reused by filters and rows.
     val systemSet = remember(installedApps) {
         installedApps.filter { it.isSystem }.map { it.packageName }.toSet()
     }
@@ -575,11 +717,13 @@ internal fun AppPickerScreen(
                 )
             }
         if (debouncedQuery.isBlank()) {
+            // Usage-ordered, not alphabetical: groups with the most-used apps first.
+            // "Other"/unknown buckets always trail, whatever their usage.
             built.sortedWith(
-                compareBy<CategoryGroup>(
-                    { it.category == "Other" },
-                    { it.category.lowercase() }
-                )
+                compareBy<CategoryGroup> { isUncategorizedLast(it.category) }
+                    .thenByDescending { group -> group.apps.sumOf { it.todayMinutes } }
+                    .thenByDescending { it.blockedCount }
+                    .thenBy { it.category.lowercase() }
             )
         } else {
             // While searching, keep first-encounter order: the category holding the
@@ -587,6 +731,26 @@ internal fun AppPickerScreen(
             // instead of being buried under alphabetically earlier categories.
             built
         }
+    }
+
+    // "Recommended": top installed apps by today's usage minutes (limit 5), from the
+    // same merged rows and system-app filter as the category list â€” no new plumbing.
+    // Rendered only when idle (never while searching) and hidden entirely when there
+    // is no usage data (permission missing or every row at 0m): no placeholders.
+    val recommendedApps: List<AppRowItem> = remember(mergedAppRows, showSystemApps, systemSet) {
+        mergedAppRows
+            .asSequence()
+            .filter { row ->
+                row.isInstalled &&
+                    (showSystemApps || row.packageName !in systemSet) &&
+                    row.todayMinutes > 0
+            }
+            .sortedWith(
+                compareByDescending<AppRowItem> { it.todayMinutes }
+                    .thenBy { it.appName.lowercase() }
+            )
+            .take(RECOMMENDED_APP_LIMIT)
+            .toList()
     }
 
     // Apply optimistic website overrides before filtering so the switch/lock flips instantly.
@@ -622,6 +786,76 @@ internal fun AppPickerScreen(
     val clearAppSearch: () -> Unit = {
         searchQuery.value = ""
         debouncedQuery = ""
+    }
+
+    // ---- Merged groups: create/edit/delete + the merge-selected shortcut ----
+
+    /** Resolve a selection key to a dialog choice using the loaded app/website lists. */
+    val resolveMemberChoice: (String) -> GroupMemberChoice? = { selectionKey ->
+        val separator = selectionKey.indexOf(':')
+        if (separator <= 0 || separator == selectionKey.lastIndex) {
+            null
+        } else {
+            val kind = selectionKey.substring(0, separator)
+            val rawKey = selectionKey.substring(separator + 1)
+            when (kind) {
+                "app" -> normalizedMemberKey("app", rawKey)?.let { key ->
+                    val local = mergedAppRows
+                        .firstOrNull { it.packageName.equals(rawKey, ignoreCase = true) }
+                    GroupMemberChoice("app", key, local?.appName ?: rawKey)
+                }
+                "website" -> normalizedMemberKey("website", rawKey)?.let { key ->
+                    val local = visibleWebsites
+                        .firstOrNull { it.domain.equals(rawKey, ignoreCase = true) }
+                    GroupMemberChoice("website", key, local?.displayName ?: rawKey)
+                }
+                else -> null
+            }
+        }
+    }
+
+    val mergeSelected: () -> Unit = {
+        val choices = selectedKeys.value
+            .mapNotNull { resolveMemberChoice(it) }
+            .distinctBy { it.selectionKey }
+        if (choices.size < 2) {
+            scope.launch { snackbarHostState.showSnackbar("Pick at least 2 apps or websites to merge.") }
+        } else {
+            groupEditor = GroupEditorRequest(initialMembers = choices)
+        }
+    }
+    val openNewGroup: () -> Unit = { groupEditor = GroupEditorRequest() }
+    val openEditGroup: (TargetGroup) -> Unit = { group ->
+        groupEditor = GroupEditorRequest(
+            groupId = group.groupId,
+            updatedAt = group.updatedAt,
+            initialName = group.name,
+            initialLimitMinutes = group.dailyLimitMinutes,
+            initialLimitEnabled = group.limitEnabled,
+            initialMembers = group.members.map {
+                GroupMemberChoice(it.targetKind, it.targetKey, it.targetLabel)
+            },
+        )
+    }
+    val requestDeleteGroup: (TargetGroup) -> Unit = { group ->
+        pendingBulk = BulkAction(
+            title = "Delete \"${group.name}\"?",
+            message = "The merged bucket is removed. Its apps and websites keep their own blocking and limits.",
+            confirmLabel = "Delete",
+            isDestructive = true,
+            onConfirm = {
+                scope.launch {
+                    val ok = try {
+                        targetGroupsRepository.removeGroup(group.groupId)
+                    } catch (_: Exception) {
+                        false
+                    }
+                    snackbarHostState.showSnackbar(
+                        if (ok) "Deleted \"${group.name}\"" else "Couldn't delete \"${group.name}\"."
+                    )
+                }
+            }
+        )
     }
 
     // ---- Bulk presets (confirmation required; 0 matches = explanatory message) ----
@@ -851,7 +1085,7 @@ internal fun AppPickerScreen(
             Spacer(Modifier.height(4.dp))
 
             // TopAppBar-style header: back arrow + title + search action.
-            StaggeredFadeSlide(visible = entered, index = 0) {
+            StaggeredFadeSlide(visible = entered, index = 0, screenKey = "app_picker") {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -893,17 +1127,42 @@ internal fun AppPickerScreen(
                     query = searchQuery,
                     onQueryChange = { searchQuery.value = it },
                     placeholder = if (selectedTab == PickerTab.APPLICATIONS) {
-                        "Search installed apps…"
+                        "Search installed appsâ€¦"
                     } else {
-                        "Search websites…"
+                        "Search websitesâ€¦"
                     },
                     focusRequester = searchFocusRequester
                 )
                 Spacer(Modifier.height(8.dp))
             }
 
+            // Selection mode bar: one shared selection across apps AND websites.
+            if (selectionMode) {
+                StaggeredFadeSlide(visible = entered, index = 2, screenKey = "app_picker") {
+                    SelectionActionBar(
+                        count = selectedKeys.value.size,
+                        onCancel = exitSelection,
+                        onMerge = mergeSelected,
+                    )
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+
+            // Merged groups: every existing bucket with today's combined total + limit,
+            // plus the entry point for a new merge. Shared by both tabs.
+            StaggeredFadeSlide(visible = entered, index = 2, screenKey = "app_picker") {
+                MergedGroupsSection(
+                    groups = targetGroups,
+                    usageByGroup = groupUsageToday,
+                    onNew = openNewGroup,
+                    onEdit = openEditGroup,
+                    onDelete = requestDeleteGroup,
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+
             // Seamless M3 tabs (no segmented pills, no divider line).
-            StaggeredFadeSlide(visible = entered, index = 1) {
+            StaggeredFadeSlide(visible = entered, index = 1, screenKey = "app_picker") {
                 PrimaryTabRow(
                     selectedTabIndex = if (selectedTab == PickerTab.APPLICATIONS) 0 else 1,
                     containerColor = Color.Transparent,
@@ -922,24 +1181,13 @@ internal fun AppPickerScreen(
                 }
             }
 
-            // Tab bodies crossfade with a subtle slide; hoisted list states survive
-            // the transition, so scroll position is preserved across tab switches.
-            AnimatedContent(
-                targetState = selectedTab,
-                transitionSpec = {
-                    (fadeIn(animationSpec = MotionTokens.FadeFloat) +
-                        slideInVertically(
-                            animationSpec = MotionTokens.SpatialOffset,
-                            initialOffsetY = { it / 12 }
-                        )) togetherWith fadeOut(animationSpec = MotionTokens.FadeFloat)
-                },
-                label = "pickerTabs"
-            ) { tab ->
-                when (tab) {
+            // Tab bodies switch instantly (direct when, no AnimatedContent crossfade);
+            // hoisted list states survive, so scroll position is preserved.
+            when (selectedTab) {
                 PickerTab.APPLICATIONS -> {
-                    // Single Column child: AnimatedContent stacks multiple top-level children
-                    // like a Box, so presets + count + list must share one Column. The chips
-                    // strip stays pinned above the list with an opaque background.
+                    // Single Column child per tab body so presets + count + list share
+                    // one Column. The chips strip stays pinned above the list with an
+                    // opaque background.
                     Column(modifier = Modifier.fillMaxSize()) {
                     Spacer(Modifier.height(12.dp))
 
@@ -999,14 +1247,14 @@ internal fun AppPickerScreen(
                     ) {
                         Text(
                             text = when {
-                                loadState is AppsLoadState.Loading -> "Loading installed apps…"
+                                loadState is AppsLoadState.Loading -> "Loading installed appsâ€¦"
                                 loadState is AppsLoadState.Error -> "Couldn't load installed apps"
                                 appsStorageLoaded -> if (rankedApps.size == mergedAppRows.size) {
                                     "Showing ${mergedAppRows.size} apps"
                                 } else {
                                     "Showing ${rankedApps.size} of ${mergedAppRows.size} apps"
                                 }
-                                else -> "Loading boundaries…"
+                                else -> "Loading boundariesâ€¦"
                             },
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1038,7 +1286,7 @@ internal fun AppPickerScreen(
                     ) {
                     when {
                         loadState is AppsLoadState.Loading -> {
-                            LoadingState("Loading installed apps…")
+                            LoadingState("Loading installed appsâ€¦")
                         }
                         loadState is AppsLoadState.Error -> {
                             AppsErrorState(message = loadState.message, onRetry = { loadAttempt++ })
@@ -1054,7 +1302,7 @@ internal fun AppPickerScreen(
                             Column(modifier = Modifier.fillMaxSize()) {
                             if (staleUninstalledBlockedCount > 0) {
                                 Text(
-                                    text = "$staleUninstalledBlockedCount blocked app(s) not currently installed — hidden from this list.",
+                                    text = "$staleUninstalledBlockedCount blocked app(s) not currently installed â€” hidden from this list.",
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.padding(bottom = 4.dp)
@@ -1074,6 +1322,42 @@ internal fun AppPickerScreen(
                                     contentPadding = PaddingValues(bottom = 24.dp),
                                     modifier = Modifier.weight(1f).fillMaxWidth()
                                 ) {
+                                    // "Recommended" leads the idle list: top used apps with the
+                                    // exact same row behavior as category rows (distinct keys so
+                                    // the two sections never collide). Hidden while searching
+                                    // and hidden entirely when there is no usage data.
+                                    if (!isSearching && recommendedApps.isNotEmpty()) {
+                                        item(
+                                            key = "recommended-header",
+                                            contentType = "recommendedHeader"
+                                        ) {
+                                            RecommendedHeader(
+                                                modifier = Modifier.animateItem()
+                                            )
+                                        }
+                                        items(
+                                            items = recommendedApps,
+                                            key = { "recommended-${it.packageName}" },
+                                            contentType = { "app" }
+                                        ) { app ->
+                                            AppRowWithOverrides(
+                                                app = app,
+                                                limits = limits,
+                                                appOverrides = appOverrides,
+                                                appPermanentOverrides = appPermanentOverrides,
+                                                onAppToggle = onAppToggle,
+                                                onAppPermanentToggle = onAppPermanentToggle,
+                                                onLimitClick = onLimitClick,
+                                                boundariesFrozen = boundariesFrozen,
+                                                lockedMessage = removalLockedMessage,
+                                                selectionMode = selectionMode,
+                                                selected = selectedKeys.value.contains("app:${app.packageName.lowercase()}"),
+                                                onSelectionToggle = { toggleSelection("app:${app.packageName.lowercase()}") },
+                                                onLongPress = { enterSelection("app:${app.packageName.lowercase()}") },
+                                                modifier = Modifier.animateItem()
+                                            )
+                                        }
+                                    }
                                     groups.forEach { group ->
                                         // During search every matching category is expanded;
                                         // otherwise the remembered override wins, defaulting to
@@ -1103,33 +1387,21 @@ internal fun AppPickerScreen(
                                                 key = { it.packageName },
                                                 contentType = { "app" }
                                             ) { app ->
-                                                // Optimistic overrides are applied per item and
-                                                // remembered here, so one toggle invalidates only
-                                                // that row.
-                                                val override = appOverrides.value[app.packageName]
-                                                val permanentOverride =
-                                                    appPermanentOverrides.value[app.packageName]
-                                                val effectiveApp = remember(app, override, permanentOverride) {
-                                                    app.copy(
-                                                        isBlocked = override ?: app.isBlocked,
-                                                        isPermanent = permanentOverride ?: app.isPermanent
-                                                    )
-                                                }
-                                                InstalledAppRow(
-                                                    app = effectiveApp,
-                                                    limitMinutes = limits[app.packageName]?.dailyMinutes
-                                                        ?.takeIf { it > 0 },
-                                                    onToggle = onAppToggle,
-                                                    onPermanentToggle = {
-                                                        onAppPermanentToggle(
-                                                            effectiveApp,
-                                                            !effectiveApp.isPermanent
-                                                        )
-                                                    },
+                                                AppRowWithOverrides(
+                                                    app = app,
+                                                    limits = limits,
+                                                    appOverrides = appOverrides,
+                                                    appPermanentOverrides = appPermanentOverrides,
+                                                    onAppToggle = onAppToggle,
+                                                    onAppPermanentToggle = onAppPermanentToggle,
                                                     onLimitClick = onLimitClick,
-                                                    modifier = Modifier.animateItem(),
                                                     boundariesFrozen = boundariesFrozen,
-                                                    lockedMessage = removalLockedMessage
+                                                    lockedMessage = removalLockedMessage,
+                                                    selectionMode = selectionMode,
+                                                    selected = selectedKeys.value.contains("app:${app.packageName.lowercase()}"),
+                                                    onSelectionToggle = { toggleSelection("app:${app.packageName.lowercase()}") },
+                                                    onLongPress = { enterSelection("app:${app.packageName.lowercase()}") },
+                                                    modifier = Modifier.animateItem()
                                                 )
                                             }
                                         }
@@ -1144,8 +1416,8 @@ internal fun AppPickerScreen(
                 }
 
                 PickerTab.WEBSITES -> {
-                    // Same single-Column treatment as APPLICATIONS: AnimatedContent stacks
-                    // siblings, so the header/presets/list share one Column here too.
+                    // Same single-Column treatment as APPLICATIONS: the header/presets/list
+                    // share one Column here too.
                     Column(modifier = Modifier.fillMaxSize()) {
                     Spacer(Modifier.height(12.dp))
 
@@ -1164,7 +1436,7 @@ internal fun AppPickerScreen(
                                     "Showing ${filteredWebsites.size} of ${visibleWebsites.size} sites"
                                 }
                             } else {
-                                "Loading website boundaries…"
+                                "Loading website boundariesâ€¦"
                             },
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1238,7 +1510,7 @@ internal fun AppPickerScreen(
                             .fillMaxWidth()
                     ) {
                     when {
-                        !websitesStorageLoaded -> LoadingState("Loading website boundaries…")
+                        !websitesStorageLoaded -> LoadingState("Loading website boundariesâ€¦")
                         visibleWebsites.isEmpty() -> ListStateMessage(
                             message = "No websites yet. Add a domain or use a preset above.",
                             actionLabel = "Add Website",
@@ -1268,7 +1540,11 @@ internal fun AppPickerScreen(
                                     onDeleteRequest = onWebsiteDeleteRequest,
                                     modifier = Modifier.animateItem(),
                                     boundariesFrozen = boundariesFrozen,
-                                    lockedMessage = removalLockedMessage
+                                    lockedMessage = removalLockedMessage,
+                                    selectionMode = selectionMode,
+                                    selected = selectedKeys.value.contains("website:${site.domain.lowercase()}"),
+                                    onSelectionToggle = { toggleSelection("website:${site.domain.lowercase()}") },
+                                    onLongPress = { enterSelection("website:${site.domain.lowercase()}") }
                                 )
                             }
                         }
@@ -1276,8 +1552,7 @@ internal fun AppPickerScreen(
                     } // Box (weighted content region)
                     } // Column (tab body)
                 }
-            } // when(tab)
-        } // AnimatedContent
+            } // when(selectedTab)
         }
 
         SnackbarHost(
@@ -1326,7 +1601,7 @@ internal fun AppPickerScreen(
                         modifier = Modifier.fillMaxWidth()
                     )
                     Text(
-                        "Only the hostname is saved — schemes, paths, and ports are trimmed.",
+                        "Only the hostname is saved â€” schemes, paths, and ports are trimmed.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1352,7 +1627,7 @@ internal fun AppPickerScreen(
                                     showAddWebsiteDialog = false
                                     snackbarHostState.showSnackbar("Added $cleaned to blocked websites")
                                 } else {
-                                    websiteInputError = "Couldn't add that domain — try another"
+                                    websiteInputError = "Couldn't add that domain â€” try another"
                                 }
                             }
                         }
@@ -1478,11 +1753,128 @@ internal fun AppPickerScreen(
             }
         )
     }
+
+    // Dialog: create/edit a merged group (name + combined daily limit + member picker).
+    groupEditor?.let { request ->
+        // All-device catalog folded into the local candidate lists, deduped by the same
+        // "kind:key" identity the dialog uses. Remote-only targets (a Windows exe, an
+        // extension-only domain) become selectable with their label and provenance;
+        // local rows that also appear remotely inherit the device provenance.
+        val knownChoices: List<GroupMemberChoice> = remember(knownTargets) {
+            knownTargets.mapNotNull { target ->
+                val kind = if (target.targetKind.trim().lowercase() == "website") "website" else "app"
+                val key = normalizedMemberKey(kind, target.targetKey) ?: return@mapNotNull null
+                val labels = target.devices
+                    .map { deviceLabel(it.name, it.platform) }
+                    .distinct()
+                GroupMemberChoice(
+                    kind = kind,
+                    key = key,
+                    label = target.targetLabel.trim().ifEmpty { key },
+                    deviceLabels = if (labels.size > 3) labels.take(3) + "+${labels.size - 3} more" else labels,
+                )
+            }.distinctBy { it.selectionKey }
+        }
+        val knownByKey = remember(knownChoices) { knownChoices.associateBy { it.selectionKey } }
+        val appChoices = remember(mergedAppRows, knownByKey) {
+            val local = mergedAppRows.mapNotNull { row ->
+                normalizedMemberKey("app", row.packageName)?.let { key ->
+                    GroupMemberChoice(
+                        "app",
+                        key,
+                        row.appName,
+                        knownByKey["app:$key"]?.deviceLabels.orEmpty(),
+                    )
+                }
+            }
+            (local + knownByKey.values.filter { it.kind == "app" }).distinctBy { it.selectionKey }
+        }
+        val websiteChoices = remember(visibleWebsites, knownByKey) {
+            val local = visibleWebsites.mapNotNull { site ->
+                normalizedMemberKey("website", site.domain)?.let { key ->
+                    GroupMemberChoice(
+                        "website",
+                        key,
+                        site.displayName,
+                        knownByKey["website:$key"]?.deviceLabels.orEmpty(),
+                    )
+                }
+            }
+            (local + knownByKey.values.filter { it.kind == "website" }).distinctBy { it.selectionKey }
+        }
+        // Targets already merged elsewhere are shown disabled: the repository (like the
+        // server) keeps the first group per target, so offering them would silently
+        // shrink the new group below its two-member minimum.
+        val claimedBy = remember(targetGroups, request.groupId) {
+            buildMap {
+                for (group in targetGroups) {
+                    if (group.groupId == request.groupId) continue
+                    for (member in group.members) {
+                        put("${member.targetKind}:${member.targetKey}", group.name)
+                    }
+                }
+            }
+        }
+        GroupEditorDialog(
+            request = request,
+            appChoices = appChoices,
+            websiteChoices = websiteChoices,
+            claimedBy = claimedBy,
+            onDismiss = { groupEditor = null },
+            onSave = { name, limitMinutes, limitEnabled, members ->
+                scope.launch {
+                    val result = try {
+                        targetGroupsRepository.upsertGroup(
+                            TargetGroup(
+                                groupId = request.groupId ?: UUID.randomUUID().toString(),
+                                name = name,
+                                members = members.map {
+                                    TargetGroupMember(it.kind, it.key, it.label)
+                                },
+                                dailyLimitMinutes = limitMinutes,
+                                limitEnabled = limitEnabled,
+                                updatedAt = request.updatedAt,
+                            )
+                        )
+                    } catch (_: Exception) {
+                        UpsertResult(saved = false)
+                    }
+                    when {
+                        !result.saved -> {
+                            // Keep the editor open so the input is not lost; nothing was
+                            // written and the sync clock was not stamped.
+                            snackbarHostState.showSnackbar("Couldn't save â€” try again")
+                        }
+                        result.groupDiscarded -> {
+                            groupEditor = null
+                            exitSelection()
+                            snackbarHostState.showSnackbar(
+                                "A group needs at least 2 members â€” \"$name\" wasn't created."
+                            )
+                        }
+                        result.droppedMemberLabels.isNotEmpty() -> {
+                            groupEditor = null
+                            exitSelection()
+                            snackbarHostState.showSnackbar(
+                                "Saved \"$name\" â€” already merged elsewhere: " +
+                                    result.droppedMemberLabels.joinToString(", ") + "."
+                            )
+                        }
+                        else -> {
+                            groupEditor = null
+                            exitSelection()
+                            snackbarHostState.showSnackbar("Saved \"$name\"")
+                        }
+                    }
+                }
+            }
+        )
+    }
 }
 
 /**
  * Search input extracted from [AppPickerScreen]. [query] is passed as a state object
- * rather than a String so the value read happens here — only this field recomposes per
+ * rather than a String so the value read happens here â€” only this field recomposes per
  * keystroke, not the screen root or the filtered app list. Filled container, no outline.
  */
 @Composable
@@ -1620,10 +2012,11 @@ private fun ListStateMessage(
 
 /**
  * Collapsible category section header. Styled like the shared SectionHeader (small
- * semibold onSurfaceVariant label) but it owns a 48dp tap target, a rotating chevron
- * and the count that shows "X of Y" while searching or "N blocked" when the category
- * has blocked apps. The extra 16dp top padding spaces groups apart without inflating
- * the 10dp gap between rows inside a group.
+ * semibold onSurfaceVariant label) but it owns a 48dp tap target, a leading 32dp
+ * tonal category [IconBadge], a rotating trailing chevron and the count that shows
+ * "X of Y" while searching or "N blocked" when the category has blocked apps.
+ * The extra 16dp top padding spaces groups apart without inflating the 10dp gap
+ * between rows inside a group.
  */
 @Composable
 private fun CategoryHeader(
@@ -1635,6 +2028,7 @@ private fun CategoryHeader(
 ) {
     val chevronRotation by animateFloatAsState(
         targetValue = if (expanded) 0f else -90f,
+        animationSpec = MotionTokens.ChevronFloat,
         label = "categoryChevron"
     )
     val pressInteraction = remember { MutableInteractionSource() }
@@ -1658,19 +2052,12 @@ private fun CategoryHeader(
                 .padding(horizontal = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(
-                imageVector = Icons.Rounded.ExpandMore,
-                contentDescription = if (expanded) {
-                    "Collapse ${group.category}"
-                } else {
-                    "Expand ${group.category}"
-                },
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier
-                    .size(20.dp)
-                    .rotate(chevronRotation)
+            IconBadge(
+                icon = categoryIcon(group.category),
+                contentDescription = null,
+                size = 32.dp
             )
-            Spacer(Modifier.width(6.dp))
+            Spacer(Modifier.width(8.dp))
             Text(
                 text = group.category,
                 style = MaterialTheme.typography.titleSmall.copy(
@@ -1698,17 +2085,130 @@ private fun CategoryHeader(
                 },
                 maxLines = 1
             )
+            Spacer(Modifier.width(4.dp))
+            Icon(
+                imageVector = Icons.Rounded.ExpandMore,
+                contentDescription = if (expanded) {
+                    "Collapse ${group.category}"
+                } else {
+                    "Expand ${group.category}"
+                },
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .size(20.dp)
+                    .graphicsLayer { rotationZ = chevronRotation }
+            )
         }
     }
 }
 
 /**
- * Website row: same treatment as app rows — toggleable tonal card, [IconBadge] squircle
+ * Non-collapsible header for the "Recommended" section: same row rhythm as
+ * [CategoryHeader] (32dp tonal badge + semibold label) with a quiet "Most used"
+ * trailing label instead of a chevron/count, since the section is a fixed
+ * top-5 with no collapse behavior.
+ */
+@Composable
+private fun RecommendedHeader(
+    modifier: Modifier = Modifier
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(top = 16.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 48.dp)
+                .padding(horizontal = 4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconBadge(
+                icon = Icons.Rounded.Star,
+                contentDescription = null,
+                size = 32.dp
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = "Recommended",
+                style = MaterialTheme.typography.titleSmall.copy(
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.1.sp
+                ),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                text = "Most used",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1
+            )
+        }
+    }
+}
+
+/**
+ * One app row with optimistic block/permanent overrides applied per item (and
+ * remembered), so a single toggle invalidates only that row. Shared verbatim by
+ * the "Recommended" section and the category groups, so both behave identically
+ * (toggle, limit dialog, always-block lock, freeze gating).
+ */
+@Composable
+private fun AppRowWithOverrides(
+    app: AppRowItem,
+    limits: Map<String, AppLimit>,
+    appOverrides: MutableState<Map<String, Boolean>>,
+    appPermanentOverrides: MutableState<Map<String, Boolean>>,
+    onAppToggle: (AppRowItem, Boolean) -> Unit,
+    onAppPermanentToggle: (AppRowItem, Boolean) -> Unit,
+    onLimitClick: (AppRowItem) -> Unit,
+    boundariesFrozen: Boolean,
+    lockedMessage: String,
+    selectionMode: Boolean = false,
+    selected: Boolean = false,
+    onSelectionToggle: (() -> Unit)? = null,
+    onLongPress: (() -> Unit)? = null,
+    modifier: Modifier = Modifier
+) {
+    val override = appOverrides.value[app.packageName]
+    val permanentOverride = appPermanentOverrides.value[app.packageName]
+    val effectiveApp = remember(app, override, permanentOverride) {
+        app.copy(
+            isBlocked = override ?: app.isBlocked,
+            isPermanent = permanentOverride ?: app.isPermanent
+        )
+    }
+    InstalledAppRow(
+        app = effectiveApp,
+        limitMinutes = limits[app.packageName]?.dailyMinutes?.takeIf { it > 0 },
+        onToggle = onAppToggle,
+        onPermanentToggle = {
+            onAppPermanentToggle(effectiveApp, !effectiveApp.isPermanent)
+        },
+        onLimitClick = onLimitClick,
+        modifier = modifier,
+        boundariesFrozen = boundariesFrozen,
+        lockedMessage = lockedMessage,
+        selectionMode = selectionMode,
+        selected = selected,
+        onSelectionToggle = onSelectionToggle,
+        onLongPress = onLongPress
+    )
+}
+
+/**
+ * Website row: same treatment as app rows â€” toggleable tonal card, [IconBadge] squircle
  * for the domain glyph, single-line ellipsized metadata, a quiet middle cluster (delete
- * for customs, permanent lock) and one strong trailing control (the Switch). The switch
- * sits in a plain Box while unfrozen so taps fall through to the row toggleable exactly
- * once; the Box only becomes clickable while frozen, to surface the refusal message.
- * Inner icon buttons keep their own onClick and consume the tap without toggling.
+ * for customs, permanent lock) and one strong trailing control (the Switch). A long-press
+ * enters merge selection mode; in selection mode taps toggle the checkbox and the other
+ * controls are hidden. The switch sits in a plain Box while unfrozen so taps fall through
+ * to the row handler exactly once; the Box only becomes clickable while frozen, to
+ * surface the refusal message. Inner icon buttons keep their own onClick and consume the
+ * tap without toggling.
  */
 @Composable
 private fun WebsiteRow(
@@ -1718,22 +2218,36 @@ private fun WebsiteRow(
     onDeleteRequest: (BlockedWebsite) -> Unit,
     modifier: Modifier = Modifier,
     boundariesFrozen: Boolean = false,
-    lockedMessage: String = ""
+    lockedMessage: String = "",
+    selectionMode: Boolean = false,
+    selected: Boolean = false,
+    onSelectionToggle: (() -> Unit)? = null,
+    onLongPress: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val switchEnabled = !(boundariesFrozen && site.isBlocked)
+    val rowEnabled = selectionMode || switchEnabled
+    val interactionSource = remember { MutableInteractionSource() }
     Card(
         colors = CardDefaults.cardColors(
-            containerColor = if (site.isBlocked) MaterialTheme.colorScheme.surfaceContainerHighest else MaterialTheme.colorScheme.surfaceContainer
+            containerColor = when {
+                selectionMode && selected -> MaterialTheme.colorScheme.secondaryContainer
+                site.isBlocked -> MaterialTheme.colorScheme.surfaceContainerHighest
+                else -> MaterialTheme.colorScheme.surfaceContainer
+            }
         ),
         shape = RoundedCornerShape(16.dp),
         modifier = modifier
             .fillMaxWidth()
-            .toggleable(
-                value = site.isBlocked,
-                enabled = switchEnabled,
-                role = Role.Switch,
-                onValueChange = { checked -> onToggle(site.domain, checked) }
+            .combinedClickable(
+                interactionSource = interactionSource,
+                indication = LocalIndication.current,
+                enabled = rowEnabled,
+                role = if (selectionMode) Role.Checkbox else Role.Switch,
+                onLongClick = onLongPress,
+                onClick = {
+                    if (selectionMode) onSelectionToggle?.invoke() else onToggle(site.domain, !site.isBlocked)
+                }
             )
     ) {
         Row(
@@ -1770,9 +2284,9 @@ private fun WebsiteRow(
                 )
                 Text(
                     text = buildString {
-                        if (site.isPermanent) append("Always blocked · ")
+                        if (site.isPermanent) append("Always blocked Â· ")
                         append(site.domain)
-                        append(" · ")
+                        append(" Â· ")
                         append(if (site.isBlocked) "Blocked" else "Allowed")
                     },
                     style = MaterialTheme.typography.bodyMedium,
@@ -1782,7 +2296,7 @@ private fun WebsiteRow(
                 )
             }
 
-            if (site.isCustom) {
+            if (site.isCustom && !selectionMode) {
                 IconButton(onClick = { onDeleteRequest(site) }) {
                     Icon(
                         Icons.Rounded.Delete,
@@ -1795,50 +2309,62 @@ private fun WebsiteRow(
                 }
             }
 
-            PermanentLockButton(
-                isPermanent = site.isPermanent,
-                label = site.displayName,
-                onClick = onPermanentToggle,
-                enabled = !boundariesFrozen
-            )
+            if (!selectionMode) {
+                PermanentLockButton(
+                    isPermanent = site.isPermanent,
+                    label = site.displayName,
+                    onClick = onPermanentToggle,
+                    enabled = !boundariesFrozen
+                )
+            }
 
-            // Plain Box while unfrozen so switch-area taps fall through to the row
-            // toggleable exactly once (a disabled clickable would still swallow them).
-            // Only while frozen does the Box become clickable, to surface the refusal.
-            Box(
-                modifier = if (switchEnabled) {
-                    Modifier
-                } else {
-                    Modifier.clickable {
-                        Toast.makeText(
-                            context,
-                            lockedMessage,
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    }
-                }
-            ) {
-                Switch(
-                    checked = site.isBlocked,
-                    onCheckedChange = null,
-                    enabled = switchEnabled,
-                    thumbContent = if (site.isBlocked) {
-                        {
-                            Icon(
-                                imageVector = Icons.Rounded.Check,
-                                contentDescription = null,
-                                modifier = Modifier.size(SwitchDefaults.IconSize)
-                            )
-                        }
-                    } else null,
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
-                        checkedTrackColor = MaterialTheme.colorScheme.primary
-                    ),
+            if (selectionMode) {
+                Checkbox(
+                    checked = selected,
+                    onCheckedChange = { onSelectionToggle?.invoke() },
                     modifier = Modifier.semantics {
-                        contentDescription = "${site.displayName} website block toggle"
+                        contentDescription = "Select ${site.displayName}"
                     }
                 )
+            } else {
+                // Plain Box while unfrozen so switch-area taps fall through to the row
+                // handler exactly once (a disabled clickable would still swallow them).
+                // Only while frozen does the Box become clickable, to surface the refusal.
+                Box(
+                    modifier = if (switchEnabled) {
+                        Modifier
+                    } else {
+                        Modifier.clickable {
+                            Toast.makeText(
+                                context,
+                                lockedMessage,
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+                ) {
+                    Switch(
+                        checked = site.isBlocked,
+                        onCheckedChange = null,
+                        enabled = switchEnabled,
+                        thumbContent = if (site.isBlocked) {
+                            {
+                                Icon(
+                                    imageVector = Icons.Rounded.Check,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(SwitchDefaults.IconSize)
+                                )
+                            }
+                        } else null,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+                            checkedTrackColor = MaterialTheme.colorScheme.primary
+                        ),
+                        modifier = Modifier.semantics {
+                            contentDescription = "${site.displayName} website block toggle"
+                        }
+                    )
+                }
             }
         }
     }
@@ -1885,10 +2411,12 @@ private fun PermanentLockButton(
 }
 
 /**
- * App row: the whole card is a switch ([toggleable] with [Role.Switch]) so a tap anywhere
- * toggles blocking; the trailing [Switch] is the row's one strong control. The switch
+ * App row: the whole card is a switch ([combinedClickable] with [Role.Switch]) so a tap
+ * anywhere toggles blocking and a long-press enters merge selection mode; the trailing
+ * [Switch] is the row's one strong control. In selection mode the card taps toggle the
+ * merge checkbox instead and the blocking/limit/lock controls are hidden. The switch
  * sits in a plain Box while unfrozen so taps on the track/thumb fall through to the row
- * toggleable exactly once; the Box only becomes clickable while frozen, to surface the
+ * handler exactly once; the Box only becomes clickable while frozen, to surface the
  * refusal message. Leading [AppIconTileForPackage] is a seamless 40dp squircle (no
  * container/ring); the middle cluster ("+ Limit" text action and the always-block lock)
  * stays quiet and aligned so it never competes with the switch. Inner icon buttons keep
@@ -1904,22 +2432,36 @@ private fun InstalledAppRow(
     onLimitClick: (AppRowItem) -> Unit,
     modifier: Modifier = Modifier,
     boundariesFrozen: Boolean = false,
-    lockedMessage: String = ""
+    lockedMessage: String = "",
+    selectionMode: Boolean = false,
+    selected: Boolean = false,
+    onSelectionToggle: (() -> Unit)? = null,
+    onLongPress: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val switchEnabled = !(boundariesFrozen && app.isBlocked)
+    val rowEnabled = selectionMode || switchEnabled
+    val interactionSource = remember { MutableInteractionSource() }
     Card(
         colors = CardDefaults.cardColors(
-            containerColor = if (app.isBlocked) MaterialTheme.colorScheme.surfaceContainerHighest else MaterialTheme.colorScheme.surfaceContainer
+            containerColor = when {
+                selectionMode && selected -> MaterialTheme.colorScheme.secondaryContainer
+                app.isBlocked -> MaterialTheme.colorScheme.surfaceContainerHighest
+                else -> MaterialTheme.colorScheme.surfaceContainer
+            }
         ),
         shape = RoundedCornerShape(16.dp),
         modifier = modifier
             .fillMaxWidth()
-            .toggleable(
-                value = app.isBlocked,
-                enabled = switchEnabled,
-                role = Role.Switch,
-                onValueChange = { checked -> onToggle(app, checked) }
+            .combinedClickable(
+                interactionSource = interactionSource,
+                indication = LocalIndication.current,
+                enabled = rowEnabled,
+                role = if (selectionMode) Role.Checkbox else Role.Switch,
+                onLongClick = onLongPress,
+                onClick = {
+                    if (selectionMode) onSelectionToggle?.invoke() else onToggle(app, !app.isBlocked)
+                }
             )
     ) {
         Row(
@@ -1951,10 +2493,10 @@ private fun InstalledAppRow(
                     text = if (!app.isInstalled) {
                         "Not installed"
                     } else buildString {
-                        if (app.isPermanent) append("Always blocked · ")
+                        if (app.isPermanent) append("Always blocked Â· ")
                         append(app.category)
-                        if (app.todayMinutes > 0) append(" · ${app.todayMinutes}m today")
-                        if (limitMinutes != null) append(" · ${limitMinutes}m limit")
+                        if (app.todayMinutes > 0) append(" Â· ${app.todayMinutes}m today")
+                        if (limitMinutes != null) append(" Â· ${limitMinutes}m limit")
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1963,61 +2505,73 @@ private fun InstalledAppRow(
                 )
             }
 
-            LimitTextButton(
-                appName = app.appName,
-                limitMinutes = limitMinutes,
-                usedMinutes = app.todayMinutes,
-                onClick = { onLimitClick(app) }
-            )
+            if (!selectionMode) {
+                LimitTextButton(
+                    appName = app.appName,
+                    limitMinutes = limitMinutes,
+                    usedMinutes = app.todayMinutes,
+                    onClick = { onLimitClick(app) }
+                )
 
-            PermanentLockButton(
-                isPermanent = app.isPermanent,
-                label = app.appName,
-                onClick = onPermanentToggle,
-                enabled = !boundariesFrozen
-            )
+                PermanentLockButton(
+                    isPermanent = app.isPermanent,
+                    label = app.appName,
+                    onClick = onPermanentToggle,
+                    enabled = !boundariesFrozen
+                )
+            }
 
-            // Plain Box while unfrozen so switch-area taps fall through to the row
-            // toggleable exactly once (a disabled clickable would still swallow them).
-            // Only while frozen does the Box become clickable, to surface the refusal.
-            Box(
-                modifier = if (switchEnabled) {
-                    Modifier
-                } else {
-                    Modifier.clickable {
-                        Toast.makeText(
-                            context,
-                            lockedMessage,
-                            Toast.LENGTH_SHORT
-                        ).show()
-                    }
-                }
-            ) {
-                Switch(
-                    checked = app.isBlocked,
-                    onCheckedChange = null,
-                    enabled = switchEnabled,
-                    thumbContent = if (app.isBlocked) {
-                        {
-                            Icon(
-                                imageVector = Icons.Rounded.Check,
-                                contentDescription = null,
-                                modifier = Modifier.size(SwitchDefaults.IconSize)
-                            )
-                        }
-                    } else null,
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
-                        checkedTrackColor = MaterialTheme.colorScheme.primary
-                    ),
+            if (selectionMode) {
+                Checkbox(
+                    checked = selected,
+                    onCheckedChange = { onSelectionToggle?.invoke() },
                     modifier = Modifier.semantics {
-                        contentDescription = buildString {
-                            append(app.appName)
-                            append(" block toggle")
-                            if (!app.isInstalled) append(", app not installed")
-                        }
+                        contentDescription = "Select ${app.appName}"
                     }
                 )
+            } else {
+                // Plain Box while unfrozen so switch-area taps fall through to the row
+                // handler exactly once (a disabled clickable would still swallow them).
+                // Only while frozen does the Box become clickable, to surface the refusal.
+                Box(
+                    modifier = if (switchEnabled) {
+                        Modifier
+                    } else {
+                        Modifier.clickable {
+                            Toast.makeText(
+                                context,
+                                lockedMessage,
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    }
+                ) {
+                    Switch(
+                        checked = app.isBlocked,
+                        onCheckedChange = null,
+                        enabled = switchEnabled,
+                        thumbContent = if (app.isBlocked) {
+                            {
+                                Icon(
+                                    imageVector = Icons.Rounded.Check,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(SwitchDefaults.IconSize)
+                                )
+                            }
+                        } else null,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+                            checkedTrackColor = MaterialTheme.colorScheme.primary
+                        ),
+                        modifier = Modifier.semantics {
+                            contentDescription = buildString {
+                                append(app.appName)
+                                append(" block toggle")
+                                if (!app.isInstalled) append(", app not installed")
+                            }
+                        }
+                    )
+                }
             }
         }
     }
@@ -2152,7 +2706,7 @@ private fun AppLimitDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
-                "Daily limit — ${app.appName}",
+                "Daily limit â€” ${app.appName}",
                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
             )
         },
@@ -2164,7 +2718,7 @@ private fun AppLimitDialog(
                             if (app.isInstalled) {
                                 "FocusLock blocks ${app.appName} after this much use each day."
                             } else {
-                                "${app.appName} isn't installed right now — the limit applies when you reinstall it."
+                                "${app.appName} isn't installed right now â€” the limit applies when you reinstall it."
                             }
                         )
                         append(" Used today: ${app.todayMinutes}m.")
@@ -2229,5 +2783,689 @@ private fun AppLimitDialog(
             }
         },
         shape = MaterialTheme.shapes.large
+    )
+}
+
+/**
+ * Selection-mode action bar shown while merging: "N selected" + Cancel + Merge. Merge
+ * stays disabled below two selected targets (the repository/server minimum for a group),
+ * and a selection can span both apps and websites.
+ */
+@Composable
+private fun SelectionActionBar(
+    count: Int,
+    onCancel: () -> Unit,
+    onMerge: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        shape = RoundedCornerShape(16.dp),
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 14.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                text = "$count selected",
+                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                maxLines = 1,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(onClick = onCancel) { Text("Cancel") }
+            Button(
+                onClick = onMerge,
+                enabled = count >= 2,
+                shape = RoundedCornerShape(50),
+                contentPadding = PaddingValues(horizontal = 16.dp),
+            ) {
+                Text("Merge")
+            }
+        }
+    }
+}
+
+/**
+ * Merged-groups section shared by both picker tabs: header with a "New" action plus one
+ * row per group (name, member count, member chips, today's combined cross-device time
+ * and the combined `used / limit` line). The list is height-capped and scrolls
+ * internally so it can never squeeze the tab body away.
+ */
+@Composable
+private fun MergedGroupsSection(
+    groups: List<TargetGroup>,
+    usageByGroup: Map<String, Long>,
+    onNew: () -> Unit,
+    onEdit: (TargetGroup) -> Unit,
+    onDelete: (TargetGroup) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 44.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconBadge(
+                icon = Icons.Rounded.Group,
+                contentDescription = null,
+                size = 32.dp,
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = "Merged groups",
+                style = MaterialTheme.typography.titleSmall.copy(
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 0.1.sp,
+                ),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                modifier = Modifier.weight(1f),
+            )
+            if (groups.isNotEmpty()) {
+                Text(
+                    text = "${groups.size}",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+                Spacer(Modifier.width(4.dp))
+            }
+            TextButton(
+                onClick = onNew,
+                contentPadding = PaddingValues(horizontal = 10.dp),
+                modifier = Modifier.heightIn(min = 44.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Add,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                )
+                Spacer(Modifier.width(4.dp))
+                Text("New", style = MaterialTheme.typography.labelLarge)
+            }
+        }
+        if (groups.isEmpty()) {
+            Text(
+                text = "Merge an app and a website (e.g. the YouTube app + youtube.com) into one bucket with a shared daily limit.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 4.dp),
+            )
+        } else {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 280.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                groups.forEach { group ->
+                    MergedGroupRow(
+                        group = group,
+                        usageSeconds = usageByGroup[group.groupId] ?: 0L,
+                        onEdit = { onEdit(group) },
+                        onDelete = { onDelete(group) },
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** One merged group: combined today total, member chips and the combined limit line. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun MergedGroupRow(
+    group: TargetGroup,
+    usageSeconds: Long,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val limitMinutes = group.dailyLimitMinutes?.takeIf { it > 0 }
+    val limitActive = group.limitEnabled && limitMinutes != null
+    val overLimit = limitActive && usageSeconds >= limitMinutes * 60L
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        ),
+        shape = RoundedCornerShape(16.dp),
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                IconBadge(
+                    icon = Icons.Rounded.Group,
+                    contentDescription = null,
+                    size = UiTokens.IconTileSize,
+                )
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text(
+                        text = group.name,
+                        style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = if (group.members.size == 1) "1 member" else "${group.members.size} members",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
+                }
+                Column(horizontalAlignment = Alignment.End) {
+                    Text(
+                        text = if (usageSeconds > 0L) formatUsageSeconds(usageSeconds) else "â€”",
+                        style = MaterialTheme.typography.titleSmall.copy(
+                            fontWeight = FontWeight.SemiBold,
+                            fontFeatureSettings = "tnum",
+                        ),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                    )
+                    if (limitActive) {
+                        Text(
+                            text = "${formatUsageSeconds(usageSeconds)} / ${limitMinutes}m today",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (overLimit) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            maxLines = 1,
+                        )
+                    }
+                }
+            }
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                group.members.take(4).forEach { member ->
+                    Surface(
+                        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        shape = RoundedCornerShape(50),
+                    ) {
+                        Text(
+                            text = member.targetLabel.take(22),
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                if (group.members.size > 4) {
+                    Text(
+                        text = "+${group.members.size - 4} more",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 2.dp),
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = onEdit) {
+                    Icon(
+                        imageVector = Icons.Rounded.Edit,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text("Edit")
+                }
+                TextButton(
+                    onClick = onDelete,
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Delete,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text("Delete")
+                }
+            }
+        }
+    }
+}
+
+/** Quiet label separating the app and website halves of the member picker. */
+@Composable
+private fun GroupMemberSectionLabel(text: String) {
+    Text(
+        text = text,
+        style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(start = 4.dp, top = 6.dp, bottom = 2.dp),
+    )
+}
+
+/**
+ * One member-picker row. Rows whose target already belongs to another group are shown
+ * disabled with an explanatory note instead of being silently dropped on save.
+ */
+@Composable
+private fun GroupMemberChoiceRow(
+    choice: GroupMemberChoice,
+    selected: Boolean,
+    claimedByName: String?,
+    onToggle: () -> Unit,
+) {
+    val enabled = claimedByName == null
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 48.dp)
+            .toggleable(
+                value = selected,
+                enabled = enabled,
+                role = Role.Checkbox,
+                onValueChange = { onToggle() },
+            )
+            .padding(horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Checkbox(
+            checked = selected,
+            onCheckedChange = null,
+            enabled = enabled,
+        )
+        Spacer(Modifier.width(8.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = choice.label,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = if (enabled) choice.key else "Already in \"$claimedByName\"",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            // Provenance from the all-device catalog; local-only candidates show nothing.
+            if (choice.deviceLabels.isNotEmpty()) {
+                Text(
+                    text = choice.deviceLabels.joinToString(", "),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        Icon(
+            imageVector = if (choice.kind == "website") Icons.Rounded.Language else Icons.Rounded.Apps,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.size(16.dp),
+        )
+    }
+}
+
+/**
+ * Create/edit dialog for a merged group: name, combined daily limit (presets + custom +
+ * Off) and a searchable member picker spanning installed apps and websites. Confirming
+ * requires a name and at least two members, because a "group" with fewer is not a merge
+ * (the repository and server both drop it).
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun GroupEditorDialog(
+    request: GroupEditorRequest,
+    appChoices: List<GroupMemberChoice>,
+    websiteChoices: List<GroupMemberChoice>,
+    claimedBy: Map<String, String>,
+    onDismiss: () -> Unit,
+    onSave: (name: String, limitMinutes: Int?, limitEnabled: Boolean, members: List<GroupMemberChoice>) -> Unit,
+) {
+    var name by remember(request) { mutableStateOf(request.initialName) }
+    var limitInput by remember(request) {
+        mutableStateOf(request.initialLimitMinutes?.takeIf { it > 0 }?.toString() ?: "")
+    }
+    var limitEnabled by remember(request) {
+        mutableStateOf(request.initialLimitEnabled && request.initialLimitMinutes != null)
+    }
+    var memberQuery by remember(request) { mutableStateOf("") }
+    val selected = remember(request) {
+        mutableStateOf<Map<String, GroupMemberChoice>>(
+            LinkedHashMap<String, GroupMemberChoice>().apply {
+                request.initialMembers.forEach { choice ->
+                    if (claimedBy[choice.selectionKey] == null) put(choice.selectionKey, choice)
+                }
+            }
+        )
+    }
+
+    val parsedLimit = limitInput.trim().toIntOrNull()?.takeIf { it in 1..1440 }
+    val limitTextInvalid = limitInput.isNotBlank() && parsedLimit == null
+    val canSave = name.isNotBlank() && selected.value.size >= 2 && !limitTextInvalid
+
+    val trimmedQuery = memberQuery.trim()
+    val filteredApps = remember(appChoices, trimmedQuery) {
+        if (trimmedQuery.isEmpty()) appChoices
+        else appChoices.filter { it.matches(trimmedQuery) }
+    }
+    val filteredWebsites = remember(websiteChoices, trimmedQuery) {
+        if (trimmedQuery.isEmpty()) websiteChoices
+        else websiteChoices.filter { it.matches(trimmedQuery) }
+    }
+    /** Add-only path shared by the candidate rows and the manual raw-key entry. */
+    val addMember: (GroupMemberChoice) -> Unit = { choice ->
+        selected.value = selected.value + (choice.selectionKey to choice)
+    }
+    val onToggleMember: (GroupMemberChoice) -> Unit = { choice ->
+        if (choice.selectionKey in selected.value) {
+            selected.value = selected.value - choice.selectionKey
+        } else {
+            addMember(choice)
+        }
+    }
+    // Manual raw-key entry state: for a target whose exact key is not in the list
+    // (typically an app/domain only ever seen on another device).
+    var manualKind by remember(request) { mutableStateOf("app") }
+    var manualKeyInput by remember(request) { mutableStateOf("") }
+    var manualError by remember(request) { mutableStateOf<String?>(null) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = if (request.groupId == null) "Merge into a group" else "Edit merged group",
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 440.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it.take(80) },
+                    label = { Text("Group name") },
+                    placeholder = { Text("e.g. YouTube") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
+                Text(
+                    text = "Combined daily limit",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    listOf(15, 30, 60, 120).forEach { preset ->
+                        TonalChoiceChip(
+                            selected = limitEnabled && parsedLimit == preset,
+                            label = "${preset}m",
+                            onClick = {
+                                limitEnabled = true
+                                limitInput = preset.toString()
+                            },
+                        )
+                    }
+                    TonalChoiceChip(
+                        selected = !limitEnabled,
+                        label = "Off",
+                        onClick = { limitEnabled = false },
+                    )
+                }
+                OutlinedTextField(
+                    value = limitInput,
+                    onValueChange = { new ->
+                        limitInput = new.filter(Char::isDigit).take(4)
+                        if (limitInput.isNotBlank()) limitEnabled = true
+                    },
+                    label = { Text("Custom minutes") },
+                    singleLine = true,
+                    isError = limitTextInvalid,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    supportingText = {
+                        if (limitTextInvalid) {
+                            Text("Enter a number from 1 to 1440")
+                        }
+                    },
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
+                HorizontalDivider(
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                )
+
+                Text(
+                    text = "Members (${selected.value.size})",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (selected.value.isNotEmpty()) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        selected.value.values.forEach { choice ->
+                            InputChip(
+                                selected = true,
+                                onClick = { selected.value = selected.value - choice.selectionKey },
+                                label = {
+                                    Text(
+                                        text = choice.label.take(24),
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                },
+                                trailingIcon = {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Close,
+                                        contentDescription = "Remove ${choice.label}",
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                },
+                            )
+                        }
+                    }
+                }
+                OutlinedTextField(
+                    value = memberQuery,
+                    onValueChange = { memberQuery = it },
+                    placeholder = { Text("Search apps & websites") },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Rounded.Search,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    },
+                    singleLine = true,
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                // Manual raw-key entry: a target whose exact key is not in the list above
+                // (typically something only ever seen on another device). Websites are
+                // normalized like the repository/server: lowercase, no leading "www.".
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        FilterChip(
+                            selected = manualKind == "app",
+                            onClick = {
+                                manualKind = "app"
+                                manualError = null
+                            },
+                            label = { Text("App") },
+                        )
+                        FilterChip(
+                            selected = manualKind == "website",
+                            onClick = {
+                                manualKind = "website"
+                                manualError = null
+                            },
+                            label = { Text("Website") },
+                        )
+                        OutlinedTextField(
+                            value = manualKeyInput,
+                            onValueChange = {
+                                manualKeyInput = it
+                                manualError = null
+                            },
+                            placeholder = {
+                                Text(if (manualKind == "website") "e.g. youtube.com" else "e.g. chrome.exe")
+                            },
+                            singleLine = true,
+                            isError = manualError != null,
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.weight(1f),
+                        )
+                        Button(
+                            onClick = {
+                                val normalized = normalizedMemberKey(manualKind, manualKeyInput)
+                                when {
+                                    normalized == null -> manualError = "Enter a key first"
+                                    normalized in selected.value -> manualError = "Already added"
+                                    else -> {
+                                        addMember(
+                                            GroupMemberChoice(
+                                                kind = manualKind,
+                                                key = normalized,
+                                                label = manualKeyInput.trim().ifEmpty { normalized },
+                                            )
+                                        )
+                                        manualKeyInput = ""
+                                        manualError = null
+                                    }
+                                }
+                            },
+                            enabled = manualKeyInput.isNotBlank(),
+                            shape = MaterialTheme.shapes.medium,
+                        ) {
+                            Text("Add")
+                        }
+                    }
+                    val manualErrorText = manualError
+                    if (manualErrorText != null) {
+                        Text(
+                            text = manualErrorText,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    Text(
+                        text = "Use this for a target whose exact key isn't listed — e.g. an app " +
+                            "that runs on another device. It counts whenever any device's tracked " +
+                            "key matches after normalization (lowercase; websites ignore a leading \u201Cwww.\u201D).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 96.dp, max = 220.dp),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    if (filteredApps.isNotEmpty()) {
+                        item(key = "member-apps-label") { GroupMemberSectionLabel("Apps") }
+                        items(filteredApps, key = { "member-app-${it.selectionKey}" }) { choice ->
+                            GroupMemberChoiceRow(
+                                choice = choice,
+                                selected = choice.selectionKey in selected.value,
+                                claimedByName = claimedBy[choice.selectionKey],
+                                onToggle = { onToggleMember(choice) },
+                            )
+                        }
+                    }
+                    if (filteredWebsites.isNotEmpty()) {
+                        item(key = "member-websites-label") { GroupMemberSectionLabel("Websites") }
+                        items(filteredWebsites, key = { "member-site-${it.selectionKey}" }) { choice ->
+                            GroupMemberChoiceRow(
+                                choice = choice,
+                                selected = choice.selectionKey in selected.value,
+                                claimedByName = claimedBy[choice.selectionKey],
+                                onToggle = { onToggleMember(choice) },
+                            )
+                        }
+                    }
+                    if (filteredApps.isEmpty() && filteredWebsites.isEmpty()) {
+                        item(key = "member-none") {
+                            Text(
+                                text = "No matches",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(start = 4.dp, top = 8.dp),
+                            )
+                        }
+                    }
+                }
+                if (selected.value.size < 2) {
+                    Text(
+                        text = "Pick at least 2 members to merge â€” you can mix apps and websites.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                Text(
+                    text = "The limit applies to the combined total of every member, across devices.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    onSave(
+                        name.trim(),
+                        parsedLimit,
+                        limitEnabled && parsedLimit != null,
+                        selected.value.values.toList(),
+                    )
+                },
+                enabled = canSave,
+                shape = MaterialTheme.shapes.medium,
+            ) {
+                Text(if (request.groupId == null) "Create" else "Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        },
+        shape = MaterialTheme.shapes.large,
     )
 }

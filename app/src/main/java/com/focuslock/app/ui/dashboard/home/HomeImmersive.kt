@@ -49,11 +49,11 @@ fun LazyListScope.HomeImmersiveContent(
     state: FocusHomeState,
     callbacks: FocusHomeCallbacks,
 ) {
-    HeaderItem(state, callbacks)
-    SetupBannerItem(state, callbacks)
+    HeaderItem(state, callbacks, screenKey = "home_immersive")
+    SetupBannerItem(state, callbacks, screenKey = "home_immersive")
 
     item(key = "immersive-hero") {
-        HomeEntrance(index = 2, modifier = Modifier.animateItem()) {
+        HomeEntrance(index = 2, screenKey = "home_immersive") {
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -126,7 +126,7 @@ fun LazyListScope.HomeImmersiveContent(
     }
 
     item(key = "immersive-quick") {
-        HomeEntrance(index = 3, modifier = Modifier.animateItem()) {
+        HomeEntrance(index = 3, screenKey = "home_immersive") {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -154,7 +154,7 @@ fun LazyListScope.HomeImmersiveContent(
     }
 
     item(key = "immersive-sessions-header") {
-        HomeEntrance(index = 4, modifier = Modifier.animateItem()) {
+        HomeEntrance(index = 4, screenKey = "home_immersive") {
             val sessions = state.focusRecords
             SectionHeader(
                 title = "Today's sessions",
@@ -186,7 +186,7 @@ fun LazyListScope.HomeImmersiveContent(
     }
 
     item(key = "immersive-toggle") {
-        HomeEntrance(index = 5, modifier = Modifier.animateItem()) {
+        HomeEntrance(index = 5, screenKey = "home_immersive") {
             HistoryToggleButton(
                 expanded = state.showAllHistory,
                 onToggle = callbacks.onToggleHistory,
@@ -194,6 +194,6 @@ fun LazyListScope.HomeImmersiveContent(
         }
     }
 
-    DayChartItem(state, entranceIndex = 6, key = "immersive-day")
+    DayChartItem(state, entranceIndex = 6, key = "immersive-day", screenKey = "home_immersive")
     BankItem(state)
 }

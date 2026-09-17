@@ -18,12 +18,6 @@ import androidx.activity.SystemBarStyle
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.activity.viewModels
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -68,7 +62,10 @@ import com.focuslock.app.sync.DeviceInfo
 import com.focuslock.app.sync.SyncStatus
 import com.focuslock.app.sync.UsageSummary
 import com.focuslock.app.ui.apps.BoundariesScreen
+import com.focuslock.app.ui.components.CrossDeviceUsageSection
+import com.focuslock.app.ui.components.PendingMergeTarget
 import com.focuslock.app.ui.components.SectionHeader
+import com.focuslock.app.ui.components.formatUsageSeconds
 import com.focuslock.app.ui.dashboard.DashboardScreen
 import com.focuslock.app.ui.debug.DebugDataScreen
 import com.focuslock.app.ui.permissions.PermissionHelper
@@ -221,6 +218,10 @@ class MainActivity : ComponentActivity() {
                 } else {
                     var currentTab by rememberSaveable { mutableStateOf(NavigationItem.DASHBOARD) }
                     var showDebug by rememberSaveable { mutableStateOf(false) }
+                    // Cross-device "New bucket…": a usage row asks to open the merge editor
+                    // in the Boundaries picker. Plain state; consumed (cleared) by the
+                    // picker as soon as it opens the editor.
+                    var pendingMergeTarget by remember { mutableStateOf<PendingMergeTarget?>(null) }
                     val isSubScreen = showDebug ||
                         currentTab == NavigationItem.SETTINGS ||
                         currentTab == NavigationItem.ACCOUNT
@@ -320,30 +321,21 @@ class MainActivity : ComponentActivity() {
                         if (showDebug) {
                             DebugDataScreen(onBack = { showDebug = false })
                         } else {
-                        // Bottom-nav tabs crossfade with a subtle slide; the tab enum,
-                        // back handling, and screen wiring below are unchanged.
-                        AnimatedContent(
-                            targetState = currentTab,
-                            transitionSpec = {
-                                (fadeIn(
-                                    animationSpec = spring(dampingRatio = 1f, stiffness = 1600f)
-                                ) + slideInVertically(
-                                    animationSpec = spring(dampingRatio = 0.8f, stiffness = 380f),
-                                    initialOffsetY = { it / 12 }
-                                )) togetherWith fadeOut(
-                                    animationSpec = spring(dampingRatio = 1f, stiffness = 1600f)
-                                )
-                            },
-                            label = "bottomNavTabs"
-                        ) { tab ->
-                        when (tab) {
+                        // Bottom-nav tabs switch instantly (direct when): the previous
+                        // AnimatedContent crossfade kept outgoing+incoming screens
+                        // composed simultaneously, which produced the "views closing /
+                        // appearing weirdly" effect and extra composition cost.
+                        when (currentTab) {
                             NavigationItem.DASHBOARD -> DashboardScreen(
                                 onOpenTickTick = { openTickTick() },
                                 onNavigatePermissions = { currentTab = NavigationItem.SETTINGS },
                                 onOpenSettings = { currentTab = NavigationItem.SETTINGS },
                                 onOpenAccount = { currentTab = NavigationItem.ACCOUNT }
                             )
-                            NavigationItem.APPS -> BoundariesScreen()
+                            NavigationItem.APPS -> BoundariesScreen(
+                                pendingMergeTarget = pendingMergeTarget,
+                                onPendingMergeConsumed = { pendingMergeTarget = null },
+                            )
                             NavigationItem.STRICT -> StrictModeScreen()
                             NavigationItem.SETTINGS -> SettingsScreen(
                                 // highlightKind omitted (defaults null): the screen derives
@@ -360,9 +352,12 @@ class MainActivity : ComponentActivity() {
                                     authViewModel.signOut()
                                 },
                                 authViewModel = authViewModel,
+                                onOpenMergeInBoundaries = { target ->
+                                    pendingMergeTarget = target
+                                    currentTab = NavigationItem.APPS
+                                },
                             )
                         }
-                        } // AnimatedContent
                         }
                         }
                     }
@@ -414,7 +409,8 @@ class MainActivity : ComponentActivity() {
         syncStatusFlow: Flow<SyncStatus>,
         onSyncNow: () -> Unit,
         onSignOut: () -> Unit,
-        authViewModel: AuthViewModel
+        authViewModel: AuthViewModel,
+        onOpenMergeInBoundaries: (PendingMergeTarget) -> Unit,
     ) {
         val syncStatus by syncStatusFlow.collectAsStateWithLifecycle(initialValue = SyncStatus.Idle)
         val syncText = when (val s = syncStatus) {
@@ -493,7 +489,10 @@ class MainActivity : ComponentActivity() {
             CrossDeviceSection(
                 state = crossDeviceState,
                 localDeviceId = localDeviceId,
+                client = convex.takeIf { convexUrl.isNotBlank() },
+                signedIn = authState == FocusAuthState.SignedIn,
                 onRetry = { refreshTick++ },
+                onNewBucket = onOpenMergeInBoundaries,
                 modifier = Modifier
                     .padding(horizontal = 20.dp)
                     .padding(bottom = 24.dp)
@@ -527,7 +526,10 @@ class MainActivity : ComponentActivity() {
     private fun CrossDeviceSection(
         state: CrossDeviceState,
         localDeviceId: String?,
+        client: ConvexSyncClient?,
+        signedIn: Boolean,
         onRetry: () -> Unit,
+        onNewBucket: (PendingMergeTarget) -> Unit,
         modifier: Modifier = Modifier
     ) {
         Column(modifier, verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -571,6 +573,14 @@ class MainActivity : ComponentActivity() {
                     CrossDeviceListCard(state.devices, localDeviceId)
                 }
             }
+            // Full cross-device view: range selector + merged buckets + group limits.
+            // Fetches independently of the devices card above (its own graceful states).
+            // onNewBucket opens the merge editor in the Boundaries picker pre-filled.
+            CrossDeviceUsageSection(
+                client = client,
+                signedIn = signedIn,
+                onNewBucket = onNewBucket,
+            )
         }
     }
 
@@ -633,7 +643,7 @@ class MainActivity : ComponentActivity() {
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                             Text(
-                                formatDuration(device.trackedSeconds),
+                                formatUsageSeconds(device.trackedSeconds),
                                 style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
                                 color = MaterialTheme.colorScheme.onSurface
                             )
@@ -653,7 +663,9 @@ class MainActivity : ComponentActivity() {
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                             Text(
-                                formatDuration(usage?.totalTrackedSeconds ?: rows.sumOf { it.trackedSeconds }),
+                                formatUsageSeconds(
+                                    usage?.totalTrackedSeconds ?: rows.sumOf { it.trackedSeconds }
+                                ),
                                 style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
                                 color = MaterialTheme.colorScheme.onSurface
                             )
@@ -780,11 +792,6 @@ class MainActivity : ComponentActivity() {
         "windows" -> Icons.Rounded.Computer
         "browser" -> Icons.Rounded.Language
         else -> Icons.Rounded.PhoneAndroid
-    }
-
-    private fun formatDuration(seconds: Long): String {
-        val minutes = (seconds / 60L).coerceAtLeast(0L)
-        return if (minutes < 60L) "${minutes}m" else "${minutes / 60L}h ${minutes % 60L}m"
     }
 
     /** Local copy of DashboardScreen's tiny formatter (that one is file-private). */

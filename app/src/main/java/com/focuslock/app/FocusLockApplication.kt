@@ -11,6 +11,7 @@ import com.focuslock.app.data.repository.BlockSchedulesRepository
 import com.focuslock.app.data.repository.CreditBankRepository
 import com.focuslock.app.data.repository.FrogRepository
 import com.focuslock.app.data.repository.SettingsRepository
+import com.focuslock.app.data.repository.TargetGroupsRepository
 import com.focuslock.app.sync.FocusSyncManager
 import com.focuslock.app.work.DailyReminderScheduler
 import kotlinx.coroutines.CoroutineScope
@@ -39,6 +40,9 @@ class FocusLockApplication : Application() {
     lateinit var frogRepository: FrogRepository
         private set
 
+    lateinit var targetGroupsRepository: TargetGroupsRepository
+        private set
+
     lateinit var syncManager: FocusSyncManager
         private set
 
@@ -54,7 +58,13 @@ class FocusLockApplication : Application() {
         blockSchedulesRepository = BlockSchedulesRepository(applicationContext)
         blockLogRepository = BlockLogRepository(applicationContext)
         frogRepository = FrogRepository(applicationContext)
-        syncManager = FocusSyncManager(applicationContext, creditBankRepository, settingsRepository)
+        targetGroupsRepository = TargetGroupsRepository(applicationContext)
+        syncManager = FocusSyncManager(
+            applicationContext,
+            creditBankRepository,
+            settingsRepository,
+            targetGroupsRepository,
+        )
 
         // Clerk auth (optional until configured). Key comes from BuildConfig via
         // local.properties `clerk.publishableKey` — see README. Empty = offline mode.

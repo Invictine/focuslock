@@ -413,6 +413,16 @@ button {
   color: var(--fl-on-surface-variant);
   font-size: 11px;
 }
+.device-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.device-chip {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--fl-surface-container-high);
+}
 .stats-row {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -1473,5 +1483,371 @@ input[type="range"] {
   }
   .account-sync-row {
     align-items: flex-start;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Merged buckets (groups), usage range selector, multi-select merge.
+   Reuses the existing charcoal tokens/classes above; no new design system.
+--------------------------------------------------------------------------- */
+.segment.usage-range {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  max-width: 420px;
+  margin: 14px 0 0;
+}
+.usage-range-note {
+  margin: 8px 0 0;
+  color: var(--fl-on-surface-variant);
+  font-size: 11px;
+}
+.merge-badge {
+  padding: 1px 7px;
+  border-radius: 999px;
+  color: var(--fl-on-secondary-container);
+  background: var(--fl-secondary-container);
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.limit-pill {
+  padding: 1px 8px;
+  border-radius: 999px;
+  color: var(--fl-on-primary-container);
+  background: var(--fl-primary-container);
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.limit-pill.exceeded {
+  color: var(--fl-on-error-container);
+  background: var(--fl-error-container);
+}
+.usage-row.limit-exceeded .bar i {
+  background: var(--fl-error);
+}
+.usage-row.limit-exceeded .usage-copy strong {
+  color: var(--fl-error);
+}
+.group-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.group-toggle:hover {
+  color: var(--fl-primary);
+}
+.usage-copy strong {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.usage-members {
+  display: grid;
+  gap: 4px;
+  margin-top: 7px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--fl-surface-container-low);
+}
+.usage-member {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: var(--fl-on-surface-variant);
+  font-size: 11px;
+}
+.usage-member-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--fl-on-surface);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Groups section (Boundaries) */
+.group-section {
+  margin-top: 18px;
+}
+.group-heading-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.secondary-button.active {
+  color: var(--fl-on-primary-container);
+  background: var(--fl-primary-container);
+}
+.group-hint {
+  margin: 10px 0 0;
+  color: var(--fl-on-surface-variant);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.group-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+}
+.group-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--fl-outline-variant);
+  border-radius: 14px;
+  background: var(--fl-surface-container-high);
+}
+.group-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.group-card-head strong {
+  display: block;
+  color: var(--fl-on-surface);
+  font-size: 14px;
+}
+.group-card-head p {
+  margin: 3px 0 0;
+  color: var(--fl-on-surface-variant);
+  font-size: 11px;
+}
+.group-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.group-card-actions .secondary-button {
+  padding: 7px 12px;
+}
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.member-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--fl-outline-variant);
+  border-radius: 999px;
+  color: var(--fl-on-surface);
+  background: var(--fl-surface-container-high);
+  font-size: 12px;
+  line-height: 1.2;
+}
+.member-chip.website {
+  background: var(--fl-surface-container-highest);
+}
+button.member-chip {
+  cursor: pointer;
+}
+button.member-chip:hover {
+  border-color: var(--fl-error);
+  color: var(--fl-error);
+}
+
+/* Multi-select merge tray */
+.selection-tray {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px dashed var(--fl-outline);
+  border-radius: 14px;
+  background: var(--fl-surface-container-low);
+}
+.selection-hint {
+  color: var(--fl-on-surface-variant);
+  font-size: 12px;
+}
+.selection-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.selection-actions .secondary-button {
+  padding: 7px 12px;
+}
+.pick-box {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--fl-outline);
+  border-radius: 7px;
+  color: transparent;
+  background: var(--fl-surface-container-lowest);
+  cursor: pointer;
+  flex: none;
+}
+.pick-box.selected {
+  color: var(--fl-on-primary);
+  background: var(--fl-primary);
+  border-color: transparent;
+}
+.pick-box:disabled {
+  cursor: not-allowed;
+  opacity: 0.35;
+}
+.boundary-row.selecting {
+  grid-template-columns: 22px 42px 1fr auto;
+}
+
+/* Group create/edit dialog */
+.group-dialog {
+  width: min(680px, 100%);
+  max-height: min(86vh, 760px);
+  overflow-y: auto;
+}
+.group-field {
+  display: grid;
+  gap: 6px;
+}
+.group-field > span {
+  color: var(--fl-on-surface-variant);
+  font-size: 11px;
+  font-weight: 600;
+}
+.picker-list {
+  display: grid;
+  gap: 4px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--fl-outline-variant);
+  border-radius: var(--fl-radius-medium);
+  background: var(--fl-surface-container-lowest);
+}
+.picker-row {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr) 22px;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 9px;
+  color: var(--fl-on-surface);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+.picker-row:hover:not(:disabled) {
+  background: var(--fl-surface-container-high);
+}
+.picker-row:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.picker-row.picked {
+  background: var(--fl-surface-container-high);
+}
+.picker-icon {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
+  color: var(--fl-on-primary-container);
+  background: var(--fl-primary-container);
+}
+.picker-copy {
+  display: grid;
+  min-width: 0;
+}
+.picker-copy strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.picker-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fl-on-surface-variant);
+  font-size: 11px;
+}
+.picker-empty {
+  margin: 4px;
+  color: var(--fl-on-surface-variant);
+  font-size: 12px;
+}
+.group-rule {
+  margin: 0;
+  color: var(--fl-on-surface-variant);
+  font-size: 12px;
+}
+.group-rule.warn {
+  color: var(--fl-warning);
+}
+
+/* Focus usage list: hand one target to the Boundaries group editor */
+.merge-row-button {
+  padding: 1px 8px;
+  border: 1px solid var(--fl-outline-variant);
+  border-radius: 999px;
+  color: var(--fl-on-surface-variant);
+  background: transparent;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.merge-row-button:hover {
+  border-color: var(--fl-primary);
+  color: var(--fl-primary);
+}
+
+/* Group dialog: manual "add any key" row (kind + raw key + Add) */
+.key-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.key-entry .segment {
+  flex: none;
+  grid-template-columns: auto auto;
+  max-width: none;
+  margin: 0;
+}
+.key-entry input {
+  flex: 1;
+  min-width: 0;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--fl-outline-variant);
+  border-radius: var(--fl-radius-medium);
+  color: var(--fl-on-surface);
+  background: var(--fl-surface-container-lowest);
+}
+.key-entry .secondary-button {
+  flex: none;
+  padding: 8px 12px;
+}
+@media (max-width: 600px) {
+  .segment.usage-range {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .selection-actions {
+    justify-content: flex-start;
   }
 }

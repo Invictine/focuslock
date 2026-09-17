@@ -46,11 +46,11 @@ fun LazyListScope.HomeMinimalContent(
     state: FocusHomeState,
     callbacks: FocusHomeCallbacks,
 ) {
-    HeaderItem(state, callbacks)
-    SetupBannerItem(state, callbacks)
+    HeaderItem(state, callbacks, screenKey = "home_minimal")
+    SetupBannerItem(state, callbacks, screenKey = "home_minimal")
 
     item(key = "minimal-hero") {
-        HomeEntrance(index = 2, modifier = Modifier.animateItem()) {
+        HomeEntrance(index = 2, screenKey = "home_minimal") {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -84,7 +84,7 @@ fun LazyListScope.HomeMinimalContent(
     }
 
     item(key = "minimal-action") {
-        HomeEntrance(index = 3, modifier = Modifier.animateItem()) {
+        HomeEntrance(index = 3, screenKey = "home_minimal") {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Button(
                     onClick = callbacks.onOpenTimer,
@@ -124,7 +124,7 @@ fun LazyListScope.HomeMinimalContent(
     }
 
     item(key = "minimal-caption") {
-        HomeEntrance(index = 4, modifier = Modifier.animateItem()) {
+        HomeEntrance(index = 4, screenKey = "home_minimal") {
             val bankMinutes = state.liveBalanceSeconds / 60
             val bankSeconds = state.liveBalanceSeconds % 60
             Column(
@@ -168,7 +168,7 @@ fun LazyListScope.HomeMinimalContent(
     }
 
     item(key = "minimal-sessions-header") {
-        HomeEntrance(index = 5, modifier = Modifier.animateItem()) {
+        HomeEntrance(index = 5, screenKey = "home_minimal") {
             val sessions = state.focusRecords
             SectionHeader(
                 title = "Today's sessions",

@@ -1,19 +1,9 @@
 package com.focuslock.app.ui.dashboard.home
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -47,14 +37,10 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -70,18 +56,18 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.lifecycle.Lifecycle
-import androidx.lifecycle.LifecycleEventObserver
-import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.focuslock.app.data.model.TickTickWorkRecord
 import com.focuslock.app.data.repository.CreditBankRepository
+import com.focuslock.app.data.repository.TargetGroup
 import com.focuslock.app.service.AppUsageEntry
 import com.focuslock.app.service.DailyUsageSummary
 import com.focuslock.app.ui.components.AppIconTileForPackage
 import com.focuslock.app.ui.components.IconBadge
 import com.focuslock.app.ui.components.SectionHeader
+import com.focuslock.app.ui.components.StaggeredFadeSlide
+import com.focuslock.app.ui.components.pressScaleModifier
+import com.focuslock.app.ui.components.rememberDecorativePulse
 import com.focuslock.app.ui.dashboard.PixelWorkRecordItem
-import kotlinx.coroutines.delay
 
 /**
  * The five live-testable Focus-tab front pages. Persisted as [key] in
@@ -125,10 +111,17 @@ data class FocusHomeState(
     val topApp: AppUsageEntry?,
     val history: List<TickTickWorkRecord>?,
     val showAllHistory: Boolean,
-    val liveBalanceSeconds: Long,
+    val liveBalanceState: State<Long>,
     val nukeActive: Boolean,
     val accountInitial: String,
+    /** Merged cross-device groups (local repository mirror), plus today's synced per-group and total seconds. */
+    val crossDeviceGroups: List<TargetGroup> = emptyList(),
+    val groupUsageTodaySeconds: Map<String, Long> = emptyMap(),
+    val totalCrossDeviceSecondsToday: Long = 0L,
 ) {
+    /** Read only from balance captions so a ticking balance does not rebuild the home tree. */
+    val liveBalanceSeconds: Long get() = liveBalanceState.value
+
     val focusProgress: Float
         get() = if (focusMinutesLoaded) {
             (focusMinutes / focusGoalMinutes.coerceAtLeast(1).toFloat()).coerceIn(0f, 1f)
@@ -141,9 +134,10 @@ data class FocusHomeState(
 
     val focusPercent: Int get() = (focusProgress * 100).toInt()
 
-    /** Focus records only (same filter the dashboard hero uses). */
-    val focusRecords: List<TickTickWorkRecord>
-        get() = history.orEmpty().filter {
+    /** Focus records only (same filter the dashboard hero uses). Computed ONCE when the
+     *  state object is built (DashboardScreen remembers it), so access is O(1). */
+    val focusRecords: List<TickTickWorkRecord> =
+        history.orEmpty().filter {
             CreditBankRepository.isFocusRecord(it.source, it.durationMinutes)
         }
 }
@@ -181,29 +175,21 @@ fun LazyListScope.FocusHome(
     }
 }
 
-/**
- * Staggered spring entrance for home items: spatial spring(0.8f, 380f), fade
- * spring(1f, 1600f), ~60ms stagger capped at 300ms.
- */
+/** Shared 12dp entrance, 40ms stagger capped at 200ms; layout stays composed on tab returns. */
 @Composable
 fun HomeEntrance(
     index: Int,
     modifier: Modifier = Modifier,
+    screenKey: String? = null,
     content: @Composable () -> Unit,
 ) {
-    var visible by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        delay((index * 60L).coerceAtMost(300L))
-        visible = true
-    }
-    AnimatedVisibility(
-        visible = visible,
-        enter = fadeIn(spring(dampingRatio = 1f, stiffness = 1600f)) +
-            slideInVertically(spring(dampingRatio = 0.8f, stiffness = 380f)) { it / 4 },
+    StaggeredFadeSlide(
+        visible = true,
+        index = index,
         modifier = modifier,
-    ) {
-        content()
-    }
+        screenKey = screenKey,
+        content = content,
+    )
 }
 
 /** At-a-glance header: date + title + Nuke/settings/account squircle actions. */
@@ -246,30 +232,17 @@ fun FocusHomeHeader(
             // Nuke button (tap to arm, long-press for details). Error tone, same
             // 40dp squircle geometry as the other header actions.
             val nukeInteraction = remember { MutableInteractionSource() }
-            val nukePressed by nukeInteraction.collectIsPressedAsState()
-            val nukePressScale by animateFloatAsState(
-                targetValue = if (nukePressed) 0.88f else 1f,
-                animationSpec = tween(150),
-                label = "nuke-press",
-            )
-            val nukePulse = androidx.compose.animation.core.rememberInfiniteTransition(label = "nuke-pulse")
-            val nukeHaloAlphaState = nukePulse.animateFloat(
+            val nukeHaloAlphaState = rememberDecorativePulse(
                 initialValue = 0.10f,
                 targetValue = 0.28f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(1200),
-                    repeatMode = RepeatMode.Reverse,
-                ),
+                active = state.nukeActive,
                 label = "nuke-halo",
             )
             val nukeHaloColor = MaterialTheme.colorScheme.error
             Box(
                 modifier = Modifier
                     .size(48.dp)
-                    .graphicsLayer {
-                        scaleX = nukePressScale
-                        scaleY = nukePressScale
-                    }
+                    .then(pressScaleModifier(nukeInteraction))
                     .semantics {
                         contentDescription = "Nuke: emergency lockdown"
                     }
@@ -369,9 +342,13 @@ fun FocusHomeHeader(
     }
 }
 
-fun LazyListScope.HeaderItem(state: FocusHomeState, callbacks: FocusHomeCallbacks) {
+fun LazyListScope.HeaderItem(
+    state: FocusHomeState,
+    callbacks: FocusHomeCallbacks,
+    screenKey: String? = null,
+) {
     item(key = "header") {
-        HomeEntrance(index = 0, modifier = Modifier.animateItem()) {
+        HomeEntrance(index = 0, screenKey = screenKey) {
             FocusHomeHeader(state = state, callbacks = callbacks)
         }
     }
@@ -387,34 +364,12 @@ fun SetupBannerCard(
     callbacks: FocusHomeCallbacks,
     modifier: Modifier = Modifier,
 ) {
-    val lifecycleOwner = LocalLifecycleOwner.current
-    // Cheap pulse: only run the infinite transition while resumed; static otherwise.
-    var cardResumed by remember { mutableStateOf(true) }
-    DisposableEffect(lifecycleOwner) {
-        val observer = LifecycleEventObserver { _, event ->
-            when (event) {
-                Lifecycle.Event.ON_RESUME -> cardResumed = true
-                Lifecycle.Event.ON_PAUSE -> cardResumed = false
-                else -> {}
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-    }
-    val setupAlphaState: State<Float>? = if (cardResumed) {
-        val setupPulse = androidx.compose.animation.core.rememberInfiniteTransition(label = "setup-pulse")
-        setupPulse.animateFloat(
-            initialValue = 0.45f,
-            targetValue = 1f,
-            animationSpec = infiniteRepeatable(
-                animation = tween(1200),
-                repeatMode = RepeatMode.Reverse,
-            ),
-            label = "setup-pulse-alpha",
-        )
-    } else {
-        null
-    }
+    val setupAlphaState = rememberDecorativePulse(
+        initialValue = 0.45f,
+        targetValue = 1f,
+        staticValue = 1f,
+        label = "setup-pulse-alpha",
+    )
     Card(
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.errorContainer,
@@ -429,7 +384,7 @@ fun SetupBannerCard(
             // Pulse alpha is read in the layer lambda, never in composition.
             Box(
                 modifier = Modifier.graphicsLayer {
-                    alpha = setupAlphaState?.value ?: 1f
+                    alpha = setupAlphaState.value
                 },
             ) {
                 IconBadge(
@@ -475,10 +430,11 @@ fun LazyListScope.SetupBannerItem(
     state: FocusHomeState,
     callbacks: FocusHomeCallbacks,
     entranceIndex: Int = 1,
+    screenKey: String? = null,
 ) {
     if (state.permissionsChecked && !state.hasAllPermissions) {
         item(key = "perms") {
-            HomeEntrance(index = entranceIndex, modifier = Modifier.animateItem()) {
+            HomeEntrance(index = entranceIndex, screenKey = screenKey) {
                 SetupBannerCard(state = state, callbacks = callbacks)
             }
         }
@@ -556,9 +512,10 @@ fun LazyListScope.ActionsItem(
     callbacks: FocusHomeCallbacks,
     entranceIndex: Int = 3,
     key: String = "actions",
+    screenKey: String? = null,
 ) {
     item(key = key) {
-        HomeEntrance(index = entranceIndex, modifier = Modifier.animateItem()) {
+        HomeEntrance(index = entranceIndex, screenKey = screenKey) {
             LogTimerTasksRow(callbacks = callbacks)
         }
     }
@@ -824,9 +781,10 @@ fun EmptyHistoryCard(
 fun LazyListScope.HistoryItems(
     state: FocusHomeState,
     entranceIndex: Int = 5,
+    screenKey: String? = null,
 ) {
     item(key = "history") {
-        HomeEntrance(index = entranceIndex, modifier = Modifier.animateItem()) {
+        HomeEntrance(index = entranceIndex, screenKey = screenKey) {
             val history = state.history.orEmpty()
             SectionHeader(
                 title = "Recent work",
@@ -972,9 +930,10 @@ fun LazyListScope.DayChartItem(
     state: FocusHomeState,
     entranceIndex: Int = 4,
     key: String = "day",
+    screenKey: String? = null,
 ) {
     item(key = key) {
-        HomeEntrance(index = entranceIndex, modifier = Modifier.animateItem()) {
+        HomeEntrance(index = entranceIndex, screenKey = screenKey) {
             FocusDayChart(state = state)
         }
     }

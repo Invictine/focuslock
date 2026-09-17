@@ -223,7 +223,7 @@ fun PermissionOnboardingDialog(
                         onClick = {}
                     )
             ) {
-                StaggeredFadeSlide(visible = entered, index = 0) {
+                StaggeredFadeSlide(visible = entered, index = 0, screenKey = "perm_dialog") {
                     Column(
                         modifier = Modifier.padding(horizontal = 24.dp, vertical = 24.dp),
                         horizontalAlignment = Alignment.CenterHorizontally

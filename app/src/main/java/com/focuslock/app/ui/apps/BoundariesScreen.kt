@@ -65,6 +65,7 @@ import com.focuslock.app.service.InstalledAppsRepository
 import com.focuslock.app.ui.components.AppIconTileForPackage
 import com.focuslock.app.ui.components.IconBadge
 import com.focuslock.app.ui.components.MotionTokens
+import com.focuslock.app.ui.components.PendingMergeTarget
 import com.focuslock.app.ui.components.ScreenHeader
 import com.focuslock.app.ui.components.SectionHeader
 import com.focuslock.app.ui.components.StaggeredFadeSlide
@@ -109,9 +110,16 @@ internal fun boundariesFrozenMessage(
  * state instead of a nested NavHost keeps system back and tab switching predictable
  * inside the bottom-nav scaffold; MainActivity owns the Scaffold insets, so this
  * screen adds no status-bar padding of its own.
+ *
+ * [pendingMergeTarget] is the cross-device "New bucket…" hand-off: a usage row asks
+ * MainActivity to open this tab with one target, this screen opens the picker for it,
+ * and [AppPickerScreen] opens the merge editor pre-filled (then reports consumption).
  */
 @Composable
-fun BoundariesScreen() {
+fun BoundariesScreen(
+    pendingMergeTarget: PendingMergeTarget? = null,
+    onPendingMergeConsumed: () -> Unit = {},
+) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val app = context.applicationContext as FocusLockApplication
@@ -162,6 +170,18 @@ fun BoundariesScreen() {
     // null = overview; a value = that picker tab is open.
     var pickerTab by rememberSaveable { mutableStateOf<PickerTab?>(null) }
     BackHandler(enabled = pickerTab != null) { pickerTab = null }
+
+    // Cross-device "New bucket…" hand-off: keep the target locally (so it survives the
+    // tab switch inside this screen), open the Applications picker, and clear it in
+    // MainActivity immediately. AppPickerScreen consumes the local copy by opening the
+    // editor and clearing it here — including after cancel/back, so it never reopens.
+    var pendingMerge by remember { mutableStateOf<PendingMergeTarget?>(null) }
+    LaunchedEffect(pendingMergeTarget) {
+        val target = pendingMergeTarget ?: return@LaunchedEffect
+        pendingMerge = target
+        pickerTab = PickerTab.APPLICATIONS
+        onPendingMergeConsumed()
+    }
 
     // Optimistic unblock overrides, same shape/semantics as the picker's appOverrides:
     // the row leaves the list immediately, then the override is dropped once the
@@ -248,7 +268,9 @@ fun BoundariesScreen() {
         else -> AppPickerScreen(
             selectedTab = tab,
             onTabChange = { pickerTab = it },
-            onBack = { pickerTab = null }
+            onBack = { pickerTab = null },
+            pendingMerge = pendingMerge,
+            onPendingMergeConsumed = { pendingMerge = null },
         )
     }
 }
@@ -283,7 +305,7 @@ private fun BoundariesOverview(
             .verticalScroll(rememberScrollState())
             .padding(horizontal = UiTokens.ScreenPadding)
     ) {
-        StaggeredFadeSlide(visible = entered, index = 0) {
+            StaggeredFadeSlide(visible = entered, index = 0, screenKey = "boundaries_overview") {
             ScreenHeader(
                 title = "Your boundaries",
                 subtitle = "Choose what waits until after your work."
@@ -292,7 +314,7 @@ private fun BoundariesOverview(
 
         if (boundariesFrozen) {
             Spacer(Modifier.height(12.dp))
-            StaggeredFadeSlide(visible = entered, index = 1) {
+            StaggeredFadeSlide(visible = entered, index = 1, screenKey = "boundaries_overview") {
                 Surface(
                 shape = RoundedCornerShape(16.dp),
                 color = MaterialTheme.colorScheme.secondaryContainer,
@@ -329,12 +351,12 @@ private fun BoundariesOverview(
             }
         }
 
-        StaggeredFadeSlide(visible = entered, index = 1) {
+        StaggeredFadeSlide(visible = entered, index = 1, screenKey = "boundaries_overview") {
             SectionHeader("Blocking")
         }
         Spacer(Modifier.height(8.dp))
 
-        StaggeredFadeSlide(visible = entered, index = 2) {
+        StaggeredFadeSlide(visible = entered, index = 2, screenKey = "boundaries_overview") {
             Surface(
                 shape = RoundedCornerShape(20.dp),
                 color = MaterialTheme.colorScheme.surfaceContainer,
@@ -379,7 +401,7 @@ private fun BoundariesOverview(
         // Hidden entirely when nothing is blocked — no empty header or card.
         // Row entrances are staggered but capped (~6 items) so long lists settle fast.
         if (blockedApps.isNotEmpty()) {
-            StaggeredFadeSlide(visible = entered, index = 3) {
+            StaggeredFadeSlide(visible = entered, index = 3, screenKey = "boundaries_overview") {
                 SectionHeader("Blocked apps")
             }
             Spacer(Modifier.height(8.dp))
@@ -390,7 +412,8 @@ private fun BoundariesOverview(
                 blockedApps.forEachIndexed { rowIndex, blockedApp ->
                     StaggeredFadeSlide(
                         visible = entered,
-                        index = 4 + minOf(rowIndex, 4)
+                        index = 4 + minOf(rowIndex, 4),
+                        screenKey = "boundaries_overview"
                     ) {
                         BlockedAppToggleRow(
                             app = blockedApp,
@@ -406,11 +429,11 @@ private fun BoundariesOverview(
         // Real existing feature: per-app daily limits live inside the applications picker,
         // so the row only appears when at least one limit is configured.
         if (activeLimitCount > 0) {
-            StaggeredFadeSlide(visible = entered, index = 4) {
+            StaggeredFadeSlide(visible = entered, index = 4, screenKey = "boundaries_overview") {
                 SectionHeader("Limits")
             }
             Spacer(Modifier.height(8.dp))
-            StaggeredFadeSlide(visible = entered, index = 5) {
+            StaggeredFadeSlide(visible = entered, index = 5, screenKey = "boundaries_overview") {
                 Surface(
                 shape = RoundedCornerShape(20.dp),
                 color = MaterialTheme.colorScheme.surfaceContainer,

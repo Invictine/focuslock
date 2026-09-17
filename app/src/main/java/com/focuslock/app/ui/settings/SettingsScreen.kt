@@ -3,11 +3,7 @@ package com.focuslock.app.ui.settings
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
+import com.focuslock.app.ui.components.rememberDecorativePulse
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.clickable
@@ -1724,36 +1720,13 @@ fun PixelPermissionItem(
         .padding(horizontal = 6.dp, vertical = 6.dp)
 
     if (highlighted) {
-        // Cheap pulse: only run the infinite transition while resumed; static border otherwise.
-        var permResumed by remember { mutableStateOf(true) }
-        val permLifecycleOwner = LocalLifecycleOwner.current
-        DisposableEffect(permLifecycleOwner) {
-            val observer = LifecycleEventObserver { _, event ->
-                when (event) {
-                    Lifecycle.Event.ON_RESUME -> permResumed = true
-                    Lifecycle.Event.ON_PAUSE -> permResumed = false
-                    else -> {}
-                }
-            }
-            permLifecycleOwner.lifecycle.addObserver(observer)
-            onDispose { permLifecycleOwner.lifecycle.removeObserver(observer) }
-        }
-        // Keep the animated alpha as a State and read it only in the draw phase, so the
-        // pulse invalidates drawing instead of recomposing this row and its modifier chain.
-        val highlightAlpha: State<Float> = if (permResumed) {
-            val pulse = rememberInfiniteTransition(label = "perm-highlight")
-            pulse.animateFloat(
-                initialValue = 0.45f,
-                targetValue = 1f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(900),
-                    repeatMode = RepeatMode.Reverse
-                ),
-                label = "perm-pulse"
-            )
-        } else {
-            remember { mutableFloatStateOf(1f) }
-        }
+        // Shared lifecycle and reduced-motion gating; alpha is read only while drawing.
+        val highlightAlpha = rememberDecorativePulse(
+            initialValue = 0.45f,
+            targetValue = 1f,
+            staticValue = 1f,
+            label = "perm-pulse",
+        )
         val borderColor = MaterialTheme.colorScheme.primary
         rowModifier = Modifier
             .fillMaxWidth()

@@ -1,15 +1,5 @@
 package com.focuslock.app.auth
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.EnterTransition
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -40,7 +30,8 @@ import com.clerk.api.network.serialization.onSuccess
 import com.clerk.ui.auth.AuthView
 import com.clerk.ui.userbutton.UserButton
 import com.focuslock.app.ui.components.IconBadge
-import kotlinx.coroutines.delay
+import com.focuslock.app.ui.components.StaggeredFadeSlide
+import com.focuslock.app.ui.components.rememberDecorativePulse
 import kotlinx.coroutines.launch
 
 @Composable
@@ -105,7 +96,7 @@ fun SignInScreen(onContinueOffline: () -> Unit) {
                     .padding(horizontal = 24.dp, vertical = 8.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                StaggeredEnter(visible = entered, index = 0) { HeroEmblem(compact = true) }
+                StaggeredEnter(visible = entered, index = 0, screenKey = "auth") { HeroEmblem(compact = true) }
                 Spacer(Modifier.height(12.dp))
                 SignInHeadline(visible = entered)
                 Spacer(Modifier.height(20.dp))
@@ -159,13 +150,13 @@ fun SignInScreen(onContinueOffline: () -> Unit) {
                     .padding(horizontal = 24.dp, vertical = 8.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                StaggeredEnter(visible = entered, index = 0) { HeroEmblem() }
+                StaggeredEnter(visible = entered, index = 0, screenKey = "auth") { HeroEmblem() }
                 Spacer(Modifier.height(16.dp))
                 SignInHeadline(visible = entered)
                 Spacer(Modifier.height(20.dp))
 
                 // Feature Highlights
-                StaggeredEnter(visible = entered, index = 3, modifier = Modifier.fillMaxWidth()) {
+                StaggeredEnter(visible = entered, index = 3, modifier = Modifier.fillMaxWidth(), screenKey = "auth") {
                     Card(
                         colors = CardDefaults.cardColors(
                             containerColor = MaterialTheme.colorScheme.surfaceContainer
@@ -198,7 +189,7 @@ fun SignInScreen(onContinueOffline: () -> Unit) {
 
                 Spacer(Modifier.height(24.dp))
 
-                StaggeredEnter(visible = entered, index = 4, modifier = Modifier.fillMaxWidth()) {
+                StaggeredEnter(visible = entered, index = 4, modifier = Modifier.fillMaxWidth(), screenKey = "auth") {
                     Column(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalAlignment = Alignment.CenterHorizontally,
@@ -270,45 +261,24 @@ fun SignInScreen(onContinueOffline: () -> Unit) {
 }
 
 /**
- * Small staged-entrance wrapper. Each element waits ~60ms after the previous one and then
- * fades/slides in with interruptible-safe springs (finite specs, no blocking loops).
+ * Shared 12dp entrance with capped stagger and motion-scale gating.
+ * Content stays laid out; switching auth forms does not replay the cascade.
  */
 @Composable
 private fun StaggeredEnter(
     visible: Boolean,
     index: Int,
     modifier: Modifier = Modifier,
-    compact: Boolean = false,
+    screenKey: String? = null,
     content: @Composable () -> Unit,
 ) {
-    var revealed by remember { mutableStateOf(false) }
-    LaunchedEffect(visible) {
-        if (visible) {
-            if (index > 0) delay(index * 60L)
-            revealed = true
-        }
-    }
-
-    val enter: EnterTransition = if (compact) {
-        // Smaller elements settle faster so the tail of the cascade feels snappy.
-        slideInVertically(
-            animationSpec = spring(dampingRatio = 0.6f, stiffness = 800f),
-            initialOffsetY = { it / 6 }
-        ) + fadeIn(animationSpec = spring(dampingRatio = 1f, stiffness = 1800f))
-    } else {
-        slideInVertically(
-            animationSpec = spring(dampingRatio = 0.8f, stiffness = 380f),
-            initialOffsetY = { it / 4 }
-        ) + fadeIn(animationSpec = spring(dampingRatio = 1f, stiffness = 1600f))
-    }
-
-    AnimatedVisibility(
-        visible = revealed,
+    StaggeredFadeSlide(
+        visible = visible,
+        index = index,
         modifier = modifier,
-        enter = enter,
-    ) {
-        content()
-    }
+        screenKey = screenKey,
+        content = content,
+    )
 }
 
 @Composable
@@ -317,7 +287,7 @@ private fun SignInHeadline(visible: Boolean) {
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        StaggeredEnter(visible = visible, index = 1) {
+        StaggeredEnter(visible = visible, index = 1, screenKey = "auth") {
             Text(
                 "FocusLock Priority Account",
                 style = MaterialTheme.typography.headlineMedium.copy(
@@ -330,7 +300,7 @@ private fun SignInHeadline(visible: Boolean) {
             )
         }
         Spacer(Modifier.height(8.dp))
-        StaggeredEnter(visible = visible, index = 2, compact = true) {
+        StaggeredEnter(visible = visible, index = 2, screenKey = "auth") {
             Text(
                 "Activate cross-device discipline. Locking your phone instantly locks your computer companion.",
                 style = MaterialTheme.typography.bodyLarge,
@@ -344,7 +314,7 @@ private fun SignInHeadline(visible: Boolean) {
 
 @Composable
 private fun SignInFooter(visible: Boolean, onContinueOffline: () -> Unit) {
-    StaggeredEnter(visible = visible, index = 5, compact = true) {
+    StaggeredEnter(visible = visible, index = 5, screenKey = "auth") {
         Column(
             modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -379,24 +349,19 @@ private fun HeroEmblem(compact: Boolean = false) {
         Brush.linearGradient(colors = listOf(primary, tertiary))
     }
 
-    val halo = rememberInfiniteTransition(label = "signin-halo")
-    val haloAlpha by halo.animateFloat(
+    // Halo pulse is gated by the shared lifecycle/system-animator/motion-scale helper;
+    // idle reads a static value with no infinite transition running. Both State values
+    // are read only inside the layer/draw lambdas below so the pulse never recomposes.
+    val haloAlphaState = rememberDecorativePulse(
         initialValue = 0.10f,
         targetValue = 0.26f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1200),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "signin-halo-alpha"
+        label = "signin-halo-alpha",
     )
-    val haloScale by halo.animateFloat(
+    val haloScaleState = rememberDecorativePulse(
         initialValue = 0.94f,
         targetValue = 1.06f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1200),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "signin-halo-scale"
+        staticValue = 1f,
+        label = "signin-halo-scale",
     )
 
     val emblemSize = if (compact) 104.dp else 160.dp
@@ -429,11 +394,11 @@ private fun HeroEmblem(compact: Boolean = false) {
             modifier = Modifier
                 .size(haloSize)
                 .graphicsLayer {
-                    scaleX = haloScale
-                    scaleY = haloScale
+                    scaleX = haloScaleState.value
+                    scaleY = haloScaleState.value
                 }
                 .drawBehind {
-                    drawCircle(color = primary, alpha = haloAlpha)
+                    drawCircle(color = primary, alpha = haloAlphaState.value)
                 }
         )
 

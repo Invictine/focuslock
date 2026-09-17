@@ -197,7 +197,9 @@ fun LazyListScope.FrogCardItem(
     key: String = "frog",
 ) {
     item(key = key) {
-        HomeEntrance(index = entranceIndex, modifier = Modifier.animateItem()) {
+        // "frog" screen key: the entrance plays once per process, not on every
+        // Focus-tab return (the legacy null-key path replays it each time).
+        HomeEntrance(index = entranceIndex, screenKey = "frog") {
             FrogCard()
         }
     }

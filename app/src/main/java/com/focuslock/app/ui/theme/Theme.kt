@@ -72,9 +72,11 @@ fun FocusLockTheme(
     MaterialTheme(
         colorScheme = colorScheme,
         typography = Typography,
+        // Radii mirror design/theme.json{"small":8,"medium":12,"large":20,"extraLarge":24}
+        // so token-driven corners and M3 large surfaces agree. Keep in sync with that file.
         shapes = Shapes(
             small = RoundedCornerShape(8.dp), medium = RoundedCornerShape(12.dp),
-            large = RoundedCornerShape(20.dp), extraLarge = RoundedCornerShape(28.dp)
+            large = RoundedCornerShape(20.dp), extraLarge = RoundedCornerShape(24.dp)
         ),
         content = content
     )

@@ -86,10 +86,18 @@ private const val MIN_REFRESH_SPINNER_MS = 1_500L
 /**
  * Process-lifetime latch for the permission onboarding dialog. DashboardScreen leaves
  * composition on every tab switch, so a rememberSaveable "shown" flag alone re-arms the
- * dialog on each Focus return. Dismissal paths write through to this flag so Skip all /
- * Skip step / completing the flow suppresses re-showing until process restart.
+ * dialog on each Focus return. Every user advance (skip step, skip all, completing the
+ * flow — and advancing past a step via Grant) writes through to this flag, so mid-flow
+ * tab switches never resurrect the dialog until process restart.
  */
 private var permissionOnboardingDismissedForProcess = false
+
+/**
+ * Process-lifetime resume index for the onboarding flow: survives tab switches (which
+ * tear down composition and may not restore saveable state), so if the dialog is ever
+ * re-shown it resumes at the step the user actually reached.
+ */
+private var permissionOnboardingLastIndex = 0
 
 /**
  * One off-main binder pass over every permission kind (each probed exactly once per
@@ -137,6 +145,14 @@ fun DashboardScreen(
         .collectAsStateWithLifecycle(initialValue = SettingsRepository.DEFAULT_FOCUS_HOME_STYLE)
     val nukeActive by settings.nukeActiveFlow.collectAsStateWithLifecycle(initialValue = false)
     val clerkUser by Clerk.userFlow.collectAsState(initial = null)
+
+    // Merged cross-device groups + today's synced per-group usage. Both come from the
+    // already-running 30s sync cycle (no network call on the Focus tab); the home styles
+    // only read this snapshot.
+    val targetGroups by app.targetGroupsRepository.groups
+        .collectAsStateWithLifecycle(initialValue = emptyList())
+    val groupUsageTodaySeconds by app.syncManager.groupUsageTodaySeconds
+        .collectAsStateWithLifecycle(initialValue = emptyMap())
 
     // Refresh permission + usage state on every resume (fixes stale "Setup needed" pill)
     var permissionTick by remember { mutableIntStateOf(0) }
@@ -233,7 +249,10 @@ fun DashboardScreen(
     // Seeded from the process latch so a dismissal survives tab switches (which tear
     // down this composition); every set-to-true below writes the latch back through.
     var shownThisSession by rememberSaveable { mutableStateOf(permissionOnboardingDismissedForProcess) }
-    var dialogIndex by rememberSaveable { mutableIntStateOf(0) }
+    // Index persists across tab switches via rememberSaveable, and is additionally
+    // mirrored into the process-level [permissionOnboardingLastIndex] on every advance
+    // so a torn-down composition resumes at the right step.
+    var dialogIndex by rememberSaveable { mutableIntStateOf(permissionOnboardingLastIndex) }
     var showOnboarding by remember { mutableStateOf(false) }
     LaunchedEffect(missing) {
         if (missing.isEmpty()) {
@@ -250,7 +269,10 @@ fun DashboardScreen(
     // distinguish "loading" from a real empty result (no zero-state flash).
     var usageSummary by remember { mutableStateOf<DailyUsageSummary?>(null) }
     LaunchedEffect(permissionTick) {
-        usageSummary = UsageStatsRepository.getTodaySummary(context, maxApps = 8)
+        // UsageStats queries hit binder/PackageManager — keep them off Main.
+        usageSummary = withContext(Dispatchers.IO) {
+            UsageStatsRepository.getTodaySummary(context, maxApps = 8)
+        }
     }
 
     // In-app fallback auto-return: polls the permission the user just opened Settings for
@@ -260,14 +282,74 @@ fun DashboardScreen(
         PermissionReturnWatcher.fallbackWatch(context)
     }
 
-    var showManualLogDialog by remember { mutableStateOf(false) }
+    var showManualLogDialog by rememberSaveable { mutableStateOf(false) }
     var showFocusTimerDialog by rememberSaveable { mutableStateOf(false) }
-    var showAllHistory by remember { mutableStateOf(false) }
-    var isRefreshing by remember { mutableStateOf(false) }
+    var showAllHistory by rememberSaveable { mutableStateOf(false) }
+    var isRefreshing by rememberSaveable { mutableStateOf(false) }
+
+    // ---- Focus timer state, hoisted to screen level so a running countdown survives
+    // tab switches (the dialog tears down with the Focus tab, but this state does not).
+    // endAtMs is a wall-clock Long anchor (0 = idle); remainingSeconds recomputes from it
+    // every tick, so the countdown never drifts and survives process death via saveable.
+    var timerSelectedMinutes by rememberSaveable { mutableIntStateOf(25) }
+    var timerIsRunning by rememberSaveable { mutableStateOf(false) }
+    var timerRemainingSeconds by rememberSaveable { mutableIntStateOf(25 * 60) }
+    var timerEndAtMs by rememberSaveable { mutableLongStateOf(0L) }
+    var timerJustCompleted by remember { mutableStateOf(false) }
+
+    // Completion handling lives here — NOT inside the dialog — so the record is credited
+    // even if the dialog (or the whole Focus tab) left composition mid-countdown.
+    LaunchedEffect(timerJustCompleted) {
+        if (!timerJustCompleted) return@LaunchedEffect
+        timerJustCompleted = false
+        val focusedMinutes = timerSelectedMinutes
+        timerEndAtMs = 0L
+        timerRemainingSeconds = 0
+        timerIsRunning = false
+        showFocusTimerDialog = false
+        val ratio = settings.workRatioFlow.first()
+        val record = TickTickWorkRecord(
+            id = "timer_${System.currentTimeMillis()}_${UUID.randomUUID()}",
+            title = "Focus Timer Session",
+            durationMinutes = focusedMinutes,
+            source = WorkRecordSource.MANUAL_ENTRY,
+            projectName = "Focus Timer"
+        )
+        val earned = bank.recordWorkCredit(record, ratio, 0)
+        permissionTick++
+        Toast.makeText(context, "Focus done! +$earned min leisure earned", Toast.LENGTH_LONG).show()
+    }
+
+    // The ticking loop also lives at screen level: it keeps counting while the user is on
+    // another tab and fires the completion flag when the wall-clock anchor elapses.
+    LaunchedEffect(timerIsRunning) {
+        if (!timerIsRunning) return@LaunchedEffect
+        if (timerEndAtMs <= 0L) {
+            timerEndAtMs = System.currentTimeMillis() + timerRemainingSeconds * 1000L
+        }
+        var finishedNaturally = false
+        while (true) {
+            val remainingMs = timerEndAtMs - System.currentTimeMillis()
+            if (remainingMs <= 0L) {
+                finishedNaturally = true
+                break
+            }
+            // Display ceil(remaining) — recomputed from the anchor every tick (no
+            // += accumulation), so the timer honors the real wall-clock end time.
+            val nextSeconds = ((remainingMs + 999L) / 1000L).toInt()
+            if (nextSeconds != timerRemainingSeconds) timerRemainingSeconds = nextSeconds
+            // Sleep exactly until the next displayed second flips (never a busy loop).
+            val tickDelay = remainingMs % 1000L
+            delay(if (tickDelay == 0L) 1000L else tickDelay)
+        }
+        if (finishedNaturally) {
+            timerJustCompleted = true
+        }
+    }
 
     // Playful Nuke launcher states (header button); nukeActive is collected above.
-    var showNukeConfirm by remember { mutableStateOf(false) }
-    var showNukeInfo by remember { mutableStateOf(false) }
+    var showNukeConfirm by rememberSaveable { mutableStateOf(false) }
+    var showNukeInfo by rememberSaveable { mutableStateOf(false) }
     var nuking by remember { mutableStateOf(false) }
     fun launchNukeActivity() {
         try {
@@ -296,52 +378,92 @@ fun DashboardScreen(
     val accountName = listOfNotNull(clerkUser?.firstName, clerkUser?.lastName)
         .joinToString(" ").trim().ifBlank { null }
         ?: clerkUser?.primaryEmailAddress?.emailAddress
-    val homeState = FocusHomeState(
-        todayFormatted = todayFormatted,
-        permissionsChecked = permissionsChecked,
-        hasAllPermissions = hasAllPermissions,
-        missingLabels = buildList {
-            if (isAccessibilityOn != true) add("Accessibility")
-            if (isUsageAccessOn != true) add("Usage Access")
-            if (isNotificationOn != true) add("Notifications")
-        },
-        isUsageAccessGranted = isUsageAccessOn,
-        focusMinutes = focusMinutes,
-        focusMinutesLoaded = historySnapshot != null,
-        focusGoalMinutes = focusGoalMinutes,
-        tasksDone = tickTickTasksDone,
-        tasksLoaded = tickTickTasksState == TickTickTasksState.Loaded,
-        tasksGoal = dailyTasksGoalSetting.coerceAtLeast(1),
-        tasksState = when (tickTickTasksState) {
-            TickTickTasksState.Loading -> FocusHomeTasksState.Loading
-            TickTickTasksState.NoAccount -> FocusHomeTasksState.NoAccount
-            TickTickTasksState.Loaded -> FocusHomeTasksState.Loaded
-            TickTickTasksState.Error -> FocusHomeTasksState.Error
-        },
-        usageSummary = usageSummary,
-        topApp = topApp,
-        history = historySnapshot,
-        showAllHistory = showAllHistory,
-        liveBalanceSeconds = liveBalanceState.value,
-        nukeActive = nukeActive,
-        accountInitial = accountName?.firstOrNull { it.isLetterOrDigit() }
-            ?.uppercaseChar()?.toString() ?: "",
-    )
+    // Remembered on every value it embeds: identity only changes when real inputs change,
+    // so unrelated recompositions (e.g. the 1-second balance tick) don't hand the home
+    // tree a new FocusHomeState and defeat skipping.
+    val homeState = remember(
+        todayFormatted,
+        permissionsChecked,
+        hasAllPermissions,
+        isAccessibilityOn,
+        isUsageAccessOn,
+        isNotificationOn,
+        focusMinutes,
+        historySnapshot,
+        focusGoalMinutes,
+        tickTickTasksDone,
+        tickTickTasksState,
+        dailyTasksGoalSetting,
+        usageSummary,
+        topApp,
+        showAllHistory,
+        liveBalanceState,
+        nukeActive,
+        accountName,
+        targetGroups,
+        groupUsageTodaySeconds,
+    ) {
+        FocusHomeState(
+            todayFormatted = todayFormatted,
+            permissionsChecked = permissionsChecked,
+            hasAllPermissions = hasAllPermissions,
+            missingLabels = buildList {
+                if (isAccessibilityOn != true) add("Accessibility")
+                if (isUsageAccessOn != true) add("Usage Access")
+                if (isNotificationOn != true) add("Notifications")
+            },
+            isUsageAccessGranted = isUsageAccessOn,
+            focusMinutes = focusMinutes,
+            focusMinutesLoaded = historySnapshot != null,
+            focusGoalMinutes = focusGoalMinutes,
+            tasksDone = tickTickTasksDone,
+            tasksLoaded = tickTickTasksState == TickTickTasksState.Loaded,
+            tasksGoal = dailyTasksGoalSetting.coerceAtLeast(1),
+            tasksState = when (tickTickTasksState) {
+                TickTickTasksState.Loading -> FocusHomeTasksState.Loading
+                TickTickTasksState.NoAccount -> FocusHomeTasksState.NoAccount
+                TickTickTasksState.Loaded -> FocusHomeTasksState.Loaded
+                TickTickTasksState.Error -> FocusHomeTasksState.Error
+            },
+            usageSummary = usageSummary,
+            topApp = topApp,
+            history = historySnapshot,
+            showAllHistory = showAllHistory,
+            liveBalanceState = liveBalanceState,
+            nukeActive = nukeActive,
+            accountInitial = accountName?.firstOrNull { it.isLetterOrDigit() }
+                ?.uppercaseChar()?.toString() ?: "",
+            crossDeviceGroups = targetGroups,
+            groupUsageTodaySeconds = groupUsageTodaySeconds,
+            totalCrossDeviceSecondsToday = app.syncManager.totalTrackedSecondsToday,
+        )
+    }
     val openSettings: () -> Unit = onOpenSettings ?: onNavigatePermissions
     val openAccount: () -> Unit = onOpenAccount ?: openSettings
-    val homeCallbacks = FocusHomeCallbacks(
-        onOpenTickTick = onOpenTickTick,
-        onNavigatePermissions = onNavigatePermissions,
-        onOpenSettings = openSettings,
-        onOpenAccount = openAccount,
-        onOpenLog = { showManualLogDialog = true },
-        onOpenTimer = { showFocusTimerDialog = true },
-        onToggleHistory = { showAllHistory = !showAllHistory },
-        onRetryTasks = { startTickTickFetch(bypassCache = true) },
-        onShowNukeConfirm = { showNukeConfirm = true },
-        onShowNukeInfo = { showNukeInfo = true },
-        onLaunchNuke = { launchNukeActivity() },
-    )
+    // Stable callback object: remembered on the values the lambdas actually capture so a
+    // 1-second tick (or any unrelated recomposition) doesn't rebuild fresh lambdas and
+    // invalidate the whole home tree. The state-mutating lambdas close over `by remember`
+    // delegates (stable across recompositions), so they never need to be keys.
+    val homeCallbacks = remember(
+        onOpenTickTick,
+        onNavigatePermissions,
+        openSettings,
+        openAccount,
+    ) {
+        FocusHomeCallbacks(
+            onOpenTickTick = onOpenTickTick,
+            onNavigatePermissions = onNavigatePermissions,
+            onOpenSettings = openSettings,
+            onOpenAccount = openAccount,
+            onOpenLog = { showManualLogDialog = true },
+            onOpenTimer = { showFocusTimerDialog = true },
+            onToggleHistory = { showAllHistory = !showAllHistory },
+            onRetryTasks = { startTickTickFetch(bypassCache = true) },
+            onShowNukeConfirm = { showNukeConfirm = true },
+            onShowNukeInfo = { showNukeInfo = true },
+            onLaunchNuke = { launchNukeActivity() },
+        )
+    }
 
     PullToRefreshBox(
         isRefreshing = isRefreshing,
@@ -509,27 +631,45 @@ fun DashboardScreen(
         )
     }
 
-    // Built-in focus timer dialog (single session — works without TickTick)
+    // Built-in focus timer dialog (single session — works without TickTick). All timer
+    // state is hoisted above; the dialog is a pure view over it, so dismissing it (or
+    // tab-switching it away) never kills a running countdown.
     if (showFocusTimerDialog) {
         FocusTimerDialog(
-            onDismiss = { showFocusTimerDialog = false },
-            // Same record path as before: ONE work record per session, then the
-            // dialog closes.
-            onRecordWork = { focusedMinutes ->
-                scope.launch {
-                    val ratio = settings.workRatioFlow.first()
-                    val record = TickTickWorkRecord(
-                        id = "timer_${System.currentTimeMillis()}_${UUID.randomUUID()}",
-                        title = "Focus Timer Session",
-                        durationMinutes = focusedMinutes,
-                        source = WorkRecordSource.MANUAL_ENTRY,
-                        projectName = "Focus Timer"
-                    )
-                    val earned = bank.recordWorkCredit(record, ratio, 0)
-                    permissionTick++
-                    Toast.makeText(context, "Focus done! +$earned min leisure earned", Toast.LENGTH_LONG).show()
+            selectedMinutes = timerSelectedMinutes,
+            onSelectedMinutesChange = { timerSelectedMinutes = it },
+            isRunning = timerIsRunning,
+            remainingSeconds = timerRemainingSeconds,
+            onStart = {
+                timerRemainingSeconds = timerSelectedMinutes * 60
+                timerEndAtMs = 0L
+                timerIsRunning = true
+            },
+            onFinishEarly = {
+                // Partial credit for >= 5 min of focus, then close. Ceil on the
+                // remaining seconds (= floor of elapsed minutes) so the credited
+                // minutes can never exceed the full-completion path (selectedMinutes).
+                val doneMinutes = timerSelectedMinutes - ((timerRemainingSeconds + 59) / 60)
+                timerIsRunning = false
+                timerEndAtMs = 0L
+                if (doneMinutes >= 5) {
+                    scope.launch {
+                        val ratio = settings.workRatioFlow.first()
+                        val record = TickTickWorkRecord(
+                            id = "timer_${System.currentTimeMillis()}_${UUID.randomUUID()}",
+                            title = "Focus Timer Session",
+                            durationMinutes = doneMinutes,
+                            source = WorkRecordSource.MANUAL_ENTRY,
+                            projectName = "Focus Timer"
+                        )
+                        val earned = bank.recordWorkCredit(record, ratio, 0)
+                        permissionTick++
+                        Toast.makeText(context, "Focus done! +$earned min leisure earned", Toast.LENGTH_LONG).show()
+                    }
                 }
-            }
+                showFocusTimerDialog = false
+            },
+            onDismiss = { showFocusTimerDialog = false },
         )
     }
 
@@ -546,10 +686,23 @@ fun DashboardScreen(
                 // Only skip ahead if it was already granted when tapped.
                 if (PermissionHelper.isGranted(context, kind) && dialogIndex < missing.size - 1) {
                     dialogIndex++
+                    // Persist progress on every advance so a mid-flow tab switch never
+                    // re-arms the dialog from step 0 (and never re-shows after the user
+                    // has already moved past a step).
+                    permissionOnboardingLastIndex = dialogIndex
+                    shownThisSession = true
+                    permissionOnboardingDismissedForProcess = true
                 }
             },
             onDismiss = {
-                if (dialogIndex < missing.size - 1) dialogIndex++ else {
+                if (dialogIndex < missing.size - 1) {
+                    dialogIndex++
+                    permissionOnboardingLastIndex = dialogIndex
+                    // Mid-flow skip: latch the dialog off for this process too, so
+                    // tab-switching away and back doesn't resurrect the flow.
+                    shownThisSession = true
+                    permissionOnboardingDismissedForProcess = true
+                } else {
                     showOnboarding = false
                     shownThisSession = true
                     permissionOnboardingDismissedForProcess = true
@@ -564,50 +717,22 @@ fun DashboardScreen(
     }
 }
 
+/**
+ * Focus timer dialog — a pure view over screen-hoisted timer state (see
+ * DashboardScreen). Owns no countdown state itself: [isRunning]/[remainingSeconds]
+ * and the wall-clock anchor live at the DashboardScreen level so a running session
+ * survives tab switches and still credits the record when it completes.
+ */
 @Composable
 private fun FocusTimerDialog(
+    selectedMinutes: Int,
+    onSelectedMinutesChange: (Int) -> Unit,
+    isRunning: Boolean,
+    remainingSeconds: Int,
+    onStart: () -> Unit,
+    onFinishEarly: () -> Unit,
     onDismiss: () -> Unit,
-    onRecordWork: (Int) -> Unit
 ) {
-    var selectedMinutes by rememberSaveable { mutableIntStateOf(25) }
-    var isRunning by rememberSaveable { mutableStateOf(false) }
-    var remainingSeconds by rememberSaveable { mutableIntStateOf(25 * 60) }
-    // Wall-clock anchor of the running session (0 = none). Each tick recomputes the
-    // remaining time from this anchor instead of accumulating delay() jitter, so the
-    // countdown never drifts long. Reset when a run stops or completes.
-    var endAtMs by remember { mutableLongStateOf(0L) }
-
-    // Picking a different preset while idle resets the countdown.
-    LaunchedEffect(selectedMinutes) {
-        if (!isRunning) remainingSeconds = selectedMinutes * 60
-    }
-    LaunchedEffect(isRunning) {
-        if (!isRunning) return@LaunchedEffect
-        if (endAtMs <= 0L) endAtMs = System.currentTimeMillis() + remainingSeconds * 1000L
-        var finishedNaturally = false
-        while (true) {
-            val remainingMs = endAtMs - System.currentTimeMillis()
-            if (remainingMs <= 0L) {
-                finishedNaturally = true
-                break
-            }
-            // Display ceil(remaining) — recomputed from the anchor every tick (no
-            // += accumulation), so the timer honors the real wall-clock end time.
-            val nextSeconds = ((remainingMs + 999L) / 1000L).toInt()
-            if (nextSeconds != remainingSeconds) remainingSeconds = nextSeconds
-            // Sleep exactly until the next displayed second flips (never a busy loop).
-            val tickDelay = remainingMs % 1000L
-            delay(if (tickDelay == 0L) 1000L else tickDelay)
-        }
-        if (finishedNaturally) {
-            endAtMs = 0L
-            remainingSeconds = 0
-            isRunning = false
-            onRecordWork(selectedMinutes)
-            onDismiss()
-        }
-    }
-
     AlertDialog(
         onDismissRequest = { if (!isRunning) onDismiss() },
         title = { Text("Focus Timer", fontWeight = FontWeight.SemiBold) },
@@ -628,7 +753,7 @@ private fun FocusTimerDialog(
                         listOf(15, 25, 50).forEach { mins ->
                             FilterChip(
                                 selected = selectedMinutes == mins,
-                                onClick = { selectedMinutes = mins },
+                                onClick = { onSelectedMinutesChange(mins) },
                                 label = { Text("${mins}m") }
                             )
                         }
@@ -654,18 +779,9 @@ private fun FocusTimerDialog(
         },
         confirmButton = {
             if (!isRunning) {
-                Button(onClick = { isRunning = true }, shape = RoundedCornerShape(20.dp)) { Text("Start") }
+                Button(onClick = onStart, shape = RoundedCornerShape(20.dp)) { Text("Start") }
             } else {
-                TextButton(onClick = {
-                    isRunning = false
-                    // Partial credit for >= 5 min of focus, then close. Ceil on the
-                    // remaining seconds (= floor of elapsed minutes) so the credited
-                    // minutes can never exceed the full-completion path (selectedMinutes).
-                    val doneMinutes = selectedMinutes - ((remainingSeconds + 59) / 60)
-                    endAtMs = 0L
-                    if (doneMinutes >= 5) onRecordWork(doneMinutes)
-                    onDismiss()
-                }) { Text("Finish Early") }
+                TextButton(onClick = onFinishEarly) { Text("Finish Early") }
             }
         },
         dismissButton = {

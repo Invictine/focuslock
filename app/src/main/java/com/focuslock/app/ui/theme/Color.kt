@@ -39,11 +39,3 @@ val PixelSurfaceContainerLowDark = Color(0xFF181C20)
 val PixelSurfaceContainerDark = Color(0xFF1D2024)
 val PixelSurfaceContainerHighDark = Color(0xFF272A2F)
 val PixelSurfaceContainerHighestDark = Color(0xFF32353A)
-
-// Status / Accent Accents
-val PixelGoogleBlue = Color(0xFF4285F4)
-val PixelGoogleRed = Color(0xFFEA4335)
-val PixelGoogleYellow = Color(0xFFFBBC05)
-val PixelGoogleGreen = Color(0xFF34A853)
-val PixelPastelCoral = Color(0xFFFF8B80)
-val PixelPastelMint = Color(0xFF80E8B2)

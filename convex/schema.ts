@@ -53,9 +53,32 @@ export default defineSchema({
   // to distinguish "deleted everywhere" from "never synced".
   syncVersions: defineTable({
     userId: v.string(),
-    collection: v.union(v.literal("blockedApps"), v.literal("blockedWebsites"), v.literal("appLimits"), v.literal("blockSchedules")),
+    collection: v.union(v.literal("blockedApps"), v.literal("blockedWebsites"), v.literal("appLimits"), v.literal("blockSchedules"), v.literal("targetGroups")),
     updatedAt: v.number(),
   }).index("by_user_collection", ["userId", "collection"]),
+
+  // Merged buckets: several apps/websites that should count as ONE target
+  // (e.g. the YouTube app, the Morphe client and youtube.com). A target may
+  // belong to at most one group; the group's daily limit applies to the
+  // combined cross-device total of every member.
+  targetGroups: defineTable({
+    userId: v.string(),
+    groupId: v.string(),
+    name: v.string(),
+    category: v.optional(v.string()),
+    members: v.array(
+      v.object({
+        targetKind: v.union(v.literal("app"), v.literal("website")),
+        targetKey: v.string(),
+        targetLabel: v.string(),
+      }),
+    ),
+    dailyLimitMinutes: v.optional(v.number()), // 0/undefined = no limit
+    limitEnabled: v.optional(v.boolean()),
+    updatedAt: v.number(),
+  })
+    .index("by_user", ["userId"])
+    .index("by_user_group", ["userId", "groupId"]),
 
   // StayFree parity: per-app / per-site limits (daily cap + per-session cap).
   appLimits: defineTable({

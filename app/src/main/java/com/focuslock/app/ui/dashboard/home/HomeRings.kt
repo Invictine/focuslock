@@ -1,7 +1,6 @@
 package com.focuslock.app.ui.dashboard.home
 
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -27,6 +26,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.focuslock.app.ui.components.MotionTokens
 
 /**
  * RINGS ("Activity rings", Apple Watch / fitness proven pattern): the current
@@ -38,17 +38,17 @@ fun LazyListScope.HomeRingsContent(
     state: FocusHomeState,
     callbacks: FocusHomeCallbacks,
 ) {
-    HeaderItem(state, callbacks)
-    SetupBannerItem(state, callbacks)
+    HeaderItem(state, callbacks, screenKey = "home_rings")
+    SetupBannerItem(state, callbacks, screenKey = "home_rings")
 
     item(key = "hero") {
-        HomeEntrance(index = 2, modifier = Modifier.animateItem()) {
+        HomeEntrance(index = 2, screenKey = "home_rings") {
             RingsHero(state = state, callbacks = callbacks)
         }
     }
 
     item(key = "history-toggle") {
-        HomeEntrance(index = 3, modifier = Modifier.animateItem()) {
+        HomeEntrance(index = 3, screenKey = "home_rings") {
             HistoryToggleButton(
                 expanded = state.showAllHistory,
                 onToggle = callbacks.onToggleHistory,
@@ -56,8 +56,8 @@ fun LazyListScope.HomeRingsContent(
         }
     }
 
-    DayChartItem(state)
-    HistoryItems(state)
+    DayChartItem(state, screenKey = "home_rings")
+    HistoryItems(state, screenKey = "home_rings")
     BankItem(state)
 }
 
@@ -68,12 +68,12 @@ private fun RingsHero(
 ) {
     val focusSweep by animateFloatAsState(
         targetValue = state.focusProgress,
-        animationSpec = tween(800),
+        animationSpec = MotionTokens.ProgressFloat,
         label = "focus-sweep",
     )
     val tasksSweep by animateFloatAsState(
         targetValue = state.tasksProgress,
-        animationSpec = tween(800),
+        animationSpec = MotionTokens.ProgressFloat,
         label = "tasks-sweep",
     )
     val ringPink = MaterialTheme.colorScheme.primary

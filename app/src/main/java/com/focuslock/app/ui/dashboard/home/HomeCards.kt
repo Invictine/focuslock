@@ -46,11 +46,11 @@ fun LazyListScope.HomeCardsContent(
     state: FocusHomeState,
     callbacks: FocusHomeCallbacks,
 ) {
-    HeaderItem(state, callbacks)
-    SetupBannerItem(state, callbacks)
+    HeaderItem(state, callbacks, screenKey = "home_cards")
+    SetupBannerItem(state, callbacks, screenKey = "home_cards")
 
     item(key = "cards-focus") {
-        HomeEntrance(index = 2, modifier = Modifier.animateItem()) {
+        HomeEntrance(index = 2, screenKey = "home_cards") {
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
@@ -113,7 +113,7 @@ fun LazyListScope.HomeCardsContent(
     }
 
     item(key = "cards-tasks") {
-        HomeEntrance(index = 3, modifier = Modifier.animateItem()) {
+        HomeEntrance(index = 3, screenKey = "home_cards") {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -126,7 +126,7 @@ fun LazyListScope.HomeCardsContent(
     }
 
     item(key = "cards-bank") {
-        HomeEntrance(index = 4, modifier = Modifier.animateItem()) {
+        HomeEntrance(index = 4, screenKey = "home_cards") {
             val bankMinutes = state.liveBalanceSeconds / 60
             val bankSeconds = state.liveBalanceSeconds % 60
             Card(
@@ -177,7 +177,7 @@ fun LazyListScope.HomeCardsContent(
     }
 
     item(key = "cards-history") {
-        HomeEntrance(index = 5, modifier = Modifier.animateItem()) {
+        HomeEntrance(index = 5, screenKey = "home_cards") {
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.surfaceContainer,
@@ -246,14 +246,14 @@ fun LazyListScope.HomeCardsContent(
         }
     }
 
-    ActionsItem(callbacks, entranceIndex = 6, key = "cards-actions")
+    ActionsItem(callbacks, entranceIndex = 6, key = "cards-actions", screenKey = "home_cards")
 
     item(key = "cards-day-header") {
-        HomeEntrance(index = 7, modifier = Modifier.animateItem()) {
+        HomeEntrance(index = 7, screenKey = "home_cards") {
             SectionHeader(title = "Today at a glance")
         }
     }
 
-    DayChartItem(state, entranceIndex = 8, key = "cards-day")
+    DayChartItem(state, entranceIndex = 8, key = "cards-day", screenKey = "home_cards")
     BankItem(state)
 }

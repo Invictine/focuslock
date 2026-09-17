@@ -12,6 +12,9 @@ import com.focuslock.app.data.model.TickTickWorkRecord
 import com.focuslock.app.data.model.WorkRecordSource
 import com.focuslock.app.data.repository.CreditBankRepository
 import com.focuslock.app.data.repository.SettingsRepository
+import com.focuslock.app.data.repository.TargetGroup as LocalTargetGroup
+import com.focuslock.app.data.repository.TargetGroupMember as LocalTargetGroupMember
+import com.focuslock.app.data.repository.TargetGroupsRepository
 import com.focuslock.app.service.UsageStatsRepository
 import com.focuslock.app.service.UsageTrackerHelper
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -45,6 +48,7 @@ class FocusSyncManager(
     context: Context,
     private val bank: CreditBankRepository,
     private val settings: SettingsRepository,
+    private val targetGroups: TargetGroupsRepository,
 ) {
     private val appContext = context.applicationContext
     // Default CoroutineExceptionHandler: a bug in a launched cycle must log, not kill the process.
@@ -82,6 +86,54 @@ class FocusSyncManager(
 
     private val _status = MutableStateFlow<SyncStatus>(SyncStatus.Idle)
     val status: StateFlow<SyncStatus> = _status.asStateFlow()
+
+    /**
+     * Today's combined tracked seconds per group (`groupId -> trackedSeconds`), refreshed
+     * from `usage:getUsageSummary(today..today)` once per sync cycle. The accessibility
+     * service reads it synchronously on the enforcement hot path, so it deliberately never
+     * blocks; it can lag ~30s and it is not cleared when a fetch fails (stale is
+     * acceptable, but treating an outage as 0 would under-block).
+     */
+    private val _groupUsageTodaySeconds = MutableStateFlow<Map<String, Long>>(emptyMap())
+    val groupUsageTodaySeconds: StateFlow<Map<String, Long>> = _groupUsageTodaySeconds.asStateFlow()
+
+    /**
+     * All-time, all-device target catalog (`usage:listKnownTargets`), refreshed once per
+     * sync cycle. The merge picker unions this with its local app/website sources so a
+     * target that only ever existed on another device (a Windows exe, an extension-only
+     * domain) is still selectable. Empty until the first successful fetch and deliberately
+     * never cleared on a failed one: a remote-only candidate is lost for good if a
+     * transient error empties the list.
+     */
+    private val _knownTargets = MutableStateFlow<List<KnownTarget>>(emptyList())
+    val knownTargets: StateFlow<List<KnownTarget>> = _knownTargets.asStateFlow()
+
+    /** `"kind:key"` -> target over the last successful catalog fetch; empty until then. */
+    @Volatile
+    private var knownTargetIndex: Map<String, KnownTarget> = emptyMap()
+
+    /**
+     * Non-suspending lookup over the last successful catalog fetch. Website keys are
+     * matched with the repository's normalization (lowercase, leading `www.` stripped)
+     * so a locally-typed `www.foo.com` finds the stored `foo.com` row.
+     */
+    fun knownTargetFor(targetKind: String, targetKey: String): KnownTarget? {
+        val kind = targetKind.trim().lowercase()
+        var key = targetKey.trim().lowercase()
+        if (kind.isEmpty() || key.isEmpty()) return null
+        if (kind == "website") key = key.removePrefix("www.")
+        if (key.isEmpty()) return null
+        return knownTargetIndex["$kind:$key"]
+    }
+
+    /** Total tracked seconds across all targets today (same summary pull); 0 until first fetch. */
+    @Volatile
+    var totalTrackedSecondsToday: Long = 0L
+        private set
+
+    /** Non-suspending hot-path read: today's combined seconds for one group, 0 when unknown. */
+    fun groupUsageTodaySecondsFor(groupId: String): Long =
+        _groupUsageTodaySeconds.value[groupId] ?: 0L
 
     private fun clientFor(url: String): ConvexSyncClient {
         val existing = cachedClient
@@ -295,6 +347,18 @@ class FocusSyncManager(
             }
 
             try {
+                // Merged target groups: full-replace LWW (same shape as boundaries) plus
+                // the per-group usage cache for the accessibility enforcement fast path.
+                val groupsOutcome = syncTargetGroups(convex, startedAt)
+                pulled += groupsOutcome.pulled
+                pushed += groupsOutcome.pushed
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                android.util.Log.w("FocusSyncManager", "target-groups sync step failed", e)
+                stepErrors += "target groups: ${e.message?.take(120) ?: "network"}"
+            }
+
+            try {
             // Cross-platform prefs: work ratio + task bonus, each independently LWW.
             val remotePrefs = snapshot.prefs
 
@@ -395,6 +459,16 @@ class FocusSyncManager(
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 android.util.Log.w("FocusSyncManager", "device/usage sync step failed", e)
                 stepErrors += "device/usage: ${e.message?.take(120) ?: "network"}"
+            }
+
+            try {
+                // Known-target catalog for the merge picker: once per cycle. Its own
+                // failure domain — a catalog hiccup is UI-only, so it never reaches
+                // stepErrors (which would trip the sync backoff).
+                refreshKnownTargets(convex)
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                android.util.Log.w("FocusSyncManager", "known-targets refresh failed", e)
             }
 
             if (stepErrors.isNotEmpty()) {
@@ -518,6 +592,179 @@ class FocusSyncManager(
         } else if (settings.nukeActiveFlow.first()) {
             settings.clearNuke()
         }
+    }
+
+    private data class GroupsSyncOutcome(val pulled: Int, val pushed: Int)
+
+    /**
+     * Merged target groups + today's per-group usage cache.
+     *
+     * Groups sync exactly like blocked websites: full-replace LWW on an independent
+     * clock ([TargetGroupsRepository.Keys.TARGET_GROUPS_UPDATED_AT]), but the pull
+     * endpoint is `groups:groupsState`, which returns the authoritative collection
+     * version even when the list is empty. A failed read returns null and the whole
+     * group step is skipped: pushing on a failed read is what used to resurrect
+     * deleted groups and clobber newer remote lists.
+     *
+     * Decision table (remote = server state, local = this device):
+     * - remote.updatedAt > localUpdatedAt → pull: `replaceAll(remote.groups, remote.updatedAt)`.
+     *   An empty remote list with a newer version is a real "deleted everywhere": it
+     *   clears local groups and persists the new version.
+     * - remote.updatedAt < localUpdatedAt → push local. Persist/re-stamp the local clock
+     *   only when the server accepted (`applied == true`). On rejection the server has
+     *   newer data, so re-read and apply the pull rule; a failed mutation leaves both
+     *   sides untouched and the next cycle retries.
+     * - remote.updatedAt == localUpdatedAt → normally nothing, but if the normalized
+     *   lists differ, adopt the server list (source of truth) to avoid permanent
+     *   divergence.
+     *
+     * Fresh-install invariant: a new device starts with TARGET_GROUPS_UPDATED_AT == 0
+     * and zero local groups. If the server ever had groups its version is > 0, so the
+     * pull branch wins; if the server version is also 0 the server list is empty too,
+     * so the push branch (remote < local) is unreachable and a fresh install can never
+     * push an empty list over remote groups.
+     *
+     * The usage pull is wrapped in its own try so a summary hiccup can never fail the
+     * group sync or the cycle; on failure the previous cache is kept deliberately.
+     */
+    private suspend fun syncTargetGroups(convex: ConvexSyncClient, startedAt: Long): GroupsSyncOutcome {
+        var pulled = 0
+        var pushed = 0
+        val localGroups = targetGroups.currentGroups()
+        val localUpdatedAt = targetGroups.getUpdatedAt()
+
+        val remote = convex.groupsState()
+        if (remote == null) {
+            // Blank token, network error, HTTP failure or malformed payload: the server
+            // state is unknown, so never push local data over it.
+            android.util.Log.w("FocusSyncManager", "target-groups state unavailable; skipping group pull/push this cycle")
+        } else {
+            when {
+                remote.updatedAt > localUpdatedAt -> {
+                    // Pull wins, including the delete-everywhere case (empty list with a
+                    // newer clock): replaceAll(emptyList(), newerVersion) must clear local
+                    // groups while persisting the new version.
+                    targetGroups.replaceAll(remote.groups.map { it.toLocal() }, remote.updatedAt)
+                    pulled++
+                }
+                remote.updatedAt < localUpdatedAt -> {
+                    val writeTime = clampedWriteTime(startedAt, localUpdatedAt)
+                    val result = convex.saveGroups(localGroups.map { it.toRemote() }, writeTime)
+                    if (result.applied) {
+                        // Re-stamp locally so the pushed clock matches the server and the
+                        // next cycle does not re-push the same list.
+                        targetGroups.replaceAll(localGroups, writeTime)
+                        pushed++
+                    } else {
+                        // Rejected (the server has a newer version) or the mutation failed.
+                        // Re-read and apply the pull rule; never re-stamp on a rejection.
+                        val latest = convex.groupsState()
+                        when {
+                            latest == null -> android.util.Log.w(
+                                "FocusSyncManager",
+                                "target-groups push not applied and the re-read failed; keeping local state",
+                            )
+                            latest.updatedAt > localUpdatedAt -> {
+                                targetGroups.replaceAll(latest.groups.map { it.toLocal() }, latest.updatedAt)
+                                pulled++
+                            }
+                            latest.updatedAt == localUpdatedAt &&
+                                !groupsEquivalent(localGroups, latest.groups) -> {
+                                // Equal clocks but divergent content: server wins.
+                                targetGroups.replaceAll(latest.groups.map { it.toLocal() }, latest.updatedAt)
+                                pulled++
+                            }
+                            else -> android.util.Log.w(
+                                "FocusSyncManager",
+                                "target-groups push not applied and remote is not newer; will retry next cycle",
+                            )
+                        }
+                    }
+                }
+                else -> {
+                    // Same version: normally nothing to do, but if the normalized content
+                    // differs, adopting the server list avoids permanent divergence.
+                    if (!groupsEquivalent(localGroups, remote.groups)) {
+                        targetGroups.replaceAll(remote.groups.map { it.toLocal() }, remote.updatedAt)
+                        pulled++
+                    }
+                }
+            }
+        }
+
+        try {
+            val summary = convex.getUsageSummary(fromDate = today(), toDate = today())
+            if (summary != null) {
+                val byGroup = HashMap<String, Long>(summary.groups.size * 2)
+                for (group in summary.groups) {
+                    byGroup[group.groupId] = group.trackedSeconds.coerceAtLeast(0L)
+                }
+                for (target in summary.groupedTargets) {
+                    val groupId = target.groupId ?: continue
+                    byGroup.putIfAbsent(groupId, target.trackedSeconds.coerceAtLeast(0L))
+                }
+                _groupUsageTodaySeconds.value = byGroup
+                totalTrackedSecondsToday = summary.totalTrackedSeconds.coerceAtLeast(0L)
+            }
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            android.util.Log.w("FocusSyncManager", "group usage summary fetch failed", e)
+        }
+        return GroupsSyncOutcome(pulled, pushed)
+    }
+
+    /**
+     * Normalization-tolerant comparison for the equal-version tie-break: groupId, name,
+     * merged limit and the sorted member key set, ignoring list/member order and case.
+     * Raw equality would report divergence every cycle whenever the server canonicalizes
+     * (member order, `www.`-stripped website keys, clamped limits).
+     */
+    private fun groupsEquivalent(local: List<LocalTargetGroup>, remote: List<TargetGroup>): Boolean =
+        local.map { groupSignature(it.groupId, it.name, it.dailyLimitMinutes, it.members.map { m -> m.targetKind to m.targetKey }) }
+            .sorted() ==
+            remote.map { groupSignature(it.groupId, it.name, it.dailyLimitMinutes, it.members.map { m -> m.targetKind to m.targetKey }) }
+                .sorted()
+
+    private fun groupSignature(
+        groupId: String,
+        name: String,
+        limitMinutes: Int?,
+        memberKeys: List<Pair<String, String>>,
+    ): String = buildString {
+        append(groupId.trim())
+        append('\u0000')
+        append(name.trim())
+        append('\u0000')
+        append(limitMinutes ?: 0)
+        append('\u0000')
+        memberKeys
+            .map { (kind, key) -> "${kind.trim().lowercase()}:${key.trim().lowercase()}" }
+            .sorted()
+            .joinTo(this, ",")
+    }
+
+    /**
+     * Refreshes the all-device target catalog used by the merge picker. A null result
+     * means "server state unknown" (blank token, network error, malformed payload), so
+     * the previous catalog is kept — a failed fetch must never look like "no targets".
+     * [ConvexSyncClient.listKnownTargets] already swallows non-cancellation failures.
+     */
+    private suspend fun refreshKnownTargets(convex: ConvexSyncClient) {
+        val fetched = convex.listKnownTargets()
+        if (fetched == null) {
+            android.util.Log.w("FocusSyncManager", "known-targets fetch unavailable; keeping the previous catalog")
+            return
+        }
+        _knownTargets.value = fetched
+        val index = HashMap<String, KnownTarget>(fetched.size * 2)
+        for (target in fetched) {
+            val kind = target.targetKind.trim().lowercase()
+            var key = target.targetKey.trim().lowercase()
+            if (kind == "website") key = key.removePrefix("www.")
+            if (kind.isEmpty() || key.isEmpty()) continue
+            index.putIfAbsent("$kind:$key", target)
+        }
+        knownTargetIndex = index
     }
 
     private suspend fun syncDeviceAndUsage(convex: ConvexSyncClient, updatedAt: Long) {
@@ -663,4 +910,38 @@ private fun RemoteRecord.toLocal() = TickTickWorkRecord(
     source = try { WorkRecordSource.valueOf(source) } catch (_: Exception) { WorkRecordSource.MANUAL_ENTRY },
     earnedMinutesCredited = earnedMinutesCredited,
     projectName = projectName,
+)
+
+// Server group -> local group. Keys are lowercased here as well as in the repository
+// (defense in depth; the server already canonicalizes them).
+private fun TargetGroup.toLocal() = LocalTargetGroup(
+    groupId = groupId,
+    name = name,
+    category = category,
+    members = members.map { it.toLocal() },
+    dailyLimitMinutes = dailyLimitMinutes,
+    limitEnabled = limitEnabled ?: true,
+    updatedAt = updatedAt,
+)
+
+private fun TargetGroupMember.toLocal() = LocalTargetGroupMember(
+    targetKind = targetKind.trim().lowercase(),
+    targetKey = targetKey.trim().lowercase(),
+    targetLabel = targetLabel,
+)
+
+private fun LocalTargetGroup.toRemote() = TargetGroup(
+    groupId = groupId,
+    name = name,
+    category = category,
+    members = members.map { it.toRemote() },
+    dailyLimitMinutes = dailyLimitMinutes,
+    limitEnabled = limitEnabled,
+    updatedAt = updatedAt,
+)
+
+private fun LocalTargetGroupMember.toRemote() = TargetGroupMember(
+    targetKind = targetKind,
+    targetKey = targetKey,
+    targetLabel = targetLabel,
 )

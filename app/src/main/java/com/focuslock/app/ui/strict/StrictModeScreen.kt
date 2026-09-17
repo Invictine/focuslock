@@ -1,11 +1,6 @@
 package com.focuslock.app.ui.strict
 
 import android.widget.Toast
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -54,7 +49,6 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.focuslock.app.FocusLockApplication
 import com.focuslock.app.data.repository.SettingsRepository
 import com.focuslock.app.ui.components.IconBadge
-import com.focuslock.app.ui.components.MotionTokens
 import com.focuslock.app.ui.components.ScreenHeader
 import com.focuslock.app.ui.components.StaggeredFadeSlide
 import kotlinx.coroutines.delay
@@ -95,10 +89,10 @@ fun StrictModeScreen() {
         // copy is longer, so it stays a full body paragraph under the shared title.
         // No extra top padding here: the Scaffold insets own the status-bar protection
         // and ScreenHeader bakes in only a minimal 4dp rhythm gap.
-        StaggeredFadeSlide(visible = entered, index = 0) {
+        StaggeredFadeSlide(visible = entered, index = 0, screenKey = "strict") {
             ScreenHeader(title = "Strict Mode")
         }
-        StaggeredFadeSlide(visible = entered, index = 1) {
+        StaggeredFadeSlide(visible = entered, index = 1, screenKey = "strict") {
             Text(
                 text = "A 24-hour commitment: turn it on and FocusLock refuses every unlock " +
                     "until the day is up — no switching off, no emergency exit, no earned-credit bypass.",
@@ -107,52 +101,42 @@ fun StrictModeScreen() {
             )
         }
 
-        StaggeredFadeSlide(visible = entered, index = 2, modifier = Modifier.fillMaxWidth()) {
-            AnimatedContent(
-                targetState = strictMode,
-                transitionSpec = {
-                    (fadeIn(animationSpec = MotionTokens.FadeFloat) +
-                        slideInVertically(
-                            animationSpec = MotionTokens.SpatialOffset,
-                            initialOffsetY = { it / 12 }
-                        )) togetherWith fadeOut(animationSpec = MotionTokens.FadeFloat)
-                },
-                label = "strictHero"
-            ) { active ->
-                if (active) {
-                    StrictActiveCard(
-                        settings = settings,
-                        onDisableClick = {
-                            scope.launch {
-                                val canDisable = try {
-                                    settings.canDisableLockdownMode()
+        StaggeredFadeSlide(visible = entered, index = 2, modifier = Modifier.fillMaxWidth(), screenKey = "strict") {
+            // Instant hero switch (direct if/else): the previous AnimatedContent kept
+            // both hero cards composed during the fade and read as views opening/closing.
+            if (strictMode) {
+                StrictActiveCard(
+                    settings = settings,
+                    onDisableClick = {
+                        scope.launch {
+                            val canDisable = try {
+                                settings.canDisableLockdownMode()
+                            } catch (_: Exception) {
+                                true
+                            }
+                            if (!canDisable) {
+                                val remaining = try {
+                                    settings.lockdownCooldownRemainingMs()
                                 } catch (_: Exception) {
-                                    true
+                                    0L
                                 }
-                                if (!canDisable) {
-                                    val remaining = try {
-                                        settings.lockdownCooldownRemainingMs()
-                                    } catch (_: Exception) {
-                                        0L
-                                    }
-                                    Toast.makeText(
-                                        context,
-                                        "Strict Mode locked: ${formatLockdownRemaining(remaining)} remaining",
-                                        Toast.LENGTH_LONG
-                                    ).show()
-                                } else {
-                                    showDisableDialog = true
-                                }
+                                Toast.makeText(
+                                    context,
+                                    "Strict Mode locked: ${formatLockdownRemaining(remaining)} remaining",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            } else {
+                                showDisableDialog = true
                             }
                         }
-                    )
-                } else {
-                    StrictOffCard(onEnableClick = { showEnableDialog = true })
-                }
+                    }
+                )
+            } else {
+                StrictOffCard(onEnableClick = { showEnableDialog = true })
             }
         }
 
-        StaggeredFadeSlide(visible = entered, index = 3, modifier = Modifier.fillMaxWidth()) {
+        StaggeredFadeSlide(visible = entered, index = 3, modifier = Modifier.fillMaxWidth(), screenKey = "strict") {
             StrictRulesCard(visible = entered)
         }
 
@@ -366,7 +350,7 @@ private fun StrictRulesCard(visible: Boolean) {
                 )
             )
             rules.forEachIndexed { index, (icon, title, body) ->
-                StaggeredFadeSlide(visible = visible, index = 4 + minOf(index, 2)) {
+                StaggeredFadeSlide(visible = visible, index = 4 + minOf(index, 2), screenKey = "strict") {
                     StrictRuleRow(icon = icon, title = title, body = body)
                 }
             }

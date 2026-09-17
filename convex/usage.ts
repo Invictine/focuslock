@@ -153,6 +153,7 @@ export const getUsageSummary = query({
       targetKey: string;
       targetLabel: string;
       trackedSeconds: number;
+      blockedSeconds: number;
       deviceIds: Set<string>;
     }>();
 
@@ -173,12 +174,123 @@ export const getUsageSummary = query({
         targetKey: row.targetKey,
         targetLabel: row.targetLabel,
         trackedSeconds: 0,
+        blockedSeconds: 0,
         deviceIds: new Set<string>(),
       };
       target.trackedSeconds += row.trackedSeconds;
+      target.blockedSeconds += row.blockedSeconds ?? 0;
       target.deviceIds.add(row.deviceId);
       byTarget.set(key, target);
     }
+
+    // Merged buckets: fold every group's members into one logical target so a
+    // phone app and the matching desktop site report a single cumulative time.
+    const groups = await ctx.db
+      .query("targetGroups")
+      .withIndex("by_user", (q: any) => q.eq("userId", userId))
+      .collect();
+    const memberToGroup = new Map<string, string>();
+    for (const group of groups) {
+      for (const member of group.members) {
+        memberToGroup.set(`${member.targetKind}:${member.targetKey}`, group.groupId);
+      }
+    }
+
+    type GroupMemberOut = {
+      targetKind: "app" | "website";
+      targetKey: string;
+      targetLabel: string;
+      trackedSeconds: number;
+      deviceIds: string[];
+    };
+    type GroupOut = {
+      groupId: string;
+      name: string;
+      category?: string;
+      members: GroupMemberOut[];
+      trackedSeconds: number;
+      blockedSeconds: number;
+      deviceIds: string[];
+      dailyLimitMinutes?: number;
+      limitEnabled?: boolean;
+    };
+    type GroupedTargetOut = {
+      targetKind: "app" | "website" | "group";
+      targetKey: string;
+      targetLabel: string;
+      trackedSeconds: number;
+      blockedSeconds: number;
+      deviceIds: string[];
+      memberKeys: string[];
+      memberCount: number;
+      groupId?: string;
+      dailyLimitMinutes?: number;
+      limitEnabled?: boolean;
+      category?: string;
+    };
+
+    const groupSummaries: GroupOut[] = groups
+      .map((group: any) => {
+        const members: GroupMemberOut[] = [];
+        const deviceIds = new Set<string>();
+        let trackedSeconds = 0;
+        let blockedSeconds = 0;
+        for (const member of group.members) {
+          const target = byTarget.get(`${member.targetKind}:${member.targetKey}`);
+          members.push({
+            targetKind: member.targetKind,
+            targetKey: member.targetKey,
+            targetLabel: member.targetLabel,
+            trackedSeconds: target?.trackedSeconds ?? 0,
+            deviceIds: target ? [...target.deviceIds] : [],
+          });
+          trackedSeconds += target?.trackedSeconds ?? 0;
+          blockedSeconds += target?.blockedSeconds ?? 0;
+          if (target) for (const id of target.deviceIds) deviceIds.add(id);
+        }
+        members.sort((a, b) => b.trackedSeconds - a.trackedSeconds);
+        return {
+          groupId: group.groupId,
+          name: group.name,
+          category: group.category,
+          members,
+          trackedSeconds,
+          blockedSeconds,
+          deviceIds: [...deviceIds],
+          dailyLimitMinutes: group.dailyLimitMinutes,
+          limitEnabled: group.limitEnabled,
+        };
+      })
+      .sort((a: GroupOut, b: GroupOut) => b.trackedSeconds - a.trackedSeconds);
+
+    const groupedTargets: GroupedTargetOut[] = [
+      ...groupSummaries.map((group) => ({
+        targetKind: "group" as const,
+        targetKey: `group:${group.groupId}`,
+        targetLabel: group.name,
+        trackedSeconds: group.trackedSeconds,
+        blockedSeconds: group.blockedSeconds,
+        deviceIds: group.deviceIds,
+        memberKeys: group.members.map((member) => `${member.targetKind}:${member.targetKey}`),
+        memberCount: group.members.length,
+        groupId: group.groupId,
+        dailyLimitMinutes: group.dailyLimitMinutes,
+        limitEnabled: group.limitEnabled,
+        category: group.category,
+      })),
+      ...[...byTarget.entries()]
+        .filter(([key]) => !memberToGroup.has(key))
+        .map(([key, target]) => ({
+          targetKind: target.targetKind,
+          targetKey: target.targetKey,
+          targetLabel: target.targetLabel,
+          trackedSeconds: target.trackedSeconds,
+          blockedSeconds: target.blockedSeconds,
+          deviceIds: [...target.deviceIds],
+          memberKeys: [key],
+          memberCount: 1,
+        })),
+    ].sort((a, b) => b.trackedSeconds - a.trackedSeconds);
 
     return {
       totalTrackedSeconds: buckets.reduce((sum, row) => sum + row.trackedSeconds, 0),
@@ -195,6 +307,102 @@ export const getUsageSummary = query({
       targets: [...byTarget.values()]
         .map((target) => ({ ...target, deviceIds: [...target.deviceIds] }))
         .sort((a, b) => b.trackedSeconds - a.trackedSeconds),
+      // Merge-aware view: groups first (with member breakdown), then every
+      // target that does not belong to a group. Clients render this directly.
+      groupedTargets,
+      groups: groupSummaries,
     };
+  },
+});
+
+/**
+ * Every target this account has ever been observed using, from ANY device,
+ * regardless of date range. This is the enumeration the merge UI needs: a
+ * Windows app, an Android package and a domain are all just members of one
+ * user-declared bucket, and nothing about the key's origin should stop a user
+ * from saying "these are the same thing".
+ *
+ * `trackedSeconds` is all-time (server rows are not pruned; each device prunes
+ * only its own local store), and `groupId`/`groupName` let a picker show that
+ * a target is already part of another bucket.
+ */
+export const listKnownTargets = query({
+  args: {},
+  handler: async (ctx) => {
+    const userId = await requireUserId(ctx);
+
+    const buckets = await ctx.db
+      .query("deviceUsage")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .collect();
+    const devices = await ctx.db
+      .query("devices")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .collect();
+    const groups = await ctx.db
+      .query("targetGroups")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .collect();
+
+    const deviceMeta = new Map(
+      devices.map((device) => [
+        device.deviceId,
+        { deviceId: device.deviceId, name: device.name, platform: device.platform },
+      ]),
+    );
+    const memberToGroup = new Map<string, { groupId: string; name: string }>();
+    for (const group of groups) {
+      for (const member of group.members) {
+        memberToGroup.set(`${member.targetKind}:${member.targetKey}`, {
+          groupId: group.groupId,
+          name: group.name,
+        });
+      }
+    }
+
+    const byTarget = new Map<string, {
+      targetKind: "app" | "website";
+      targetKey: string;
+      targetLabel: string;
+      category?: string;
+      trackedSeconds: number;
+      lastDate: string;
+      deviceIds: Set<string>;
+    }>();
+
+    for (const row of buckets) {
+      const key = `${row.targetKind}:${row.targetKey}`;
+      const target = byTarget.get(key) ?? {
+        targetKind: row.targetKind,
+        targetKey: row.targetKey,
+        targetLabel: row.targetLabel,
+        category: row.category,
+        trackedSeconds: 0,
+        lastDate: row.date,
+        deviceIds: new Set<string>(),
+      };
+      target.trackedSeconds += row.trackedSeconds;
+      if (row.date > target.lastDate) target.lastDate = row.date;
+      target.deviceIds.add(row.deviceId);
+      byTarget.set(key, target);
+    }
+
+    return [...byTarget.entries()]
+      .map(([key, target]) => ({
+        targetKind: target.targetKind,
+        targetKey: target.targetKey,
+        targetLabel: target.targetLabel,
+        category: target.category,
+        trackedSeconds: target.trackedSeconds,
+        lastDate: target.lastDate,
+        deviceIds: [...target.deviceIds],
+        devices: [...target.deviceIds].map(
+          (deviceId) =>
+            deviceMeta.get(deviceId) ?? { deviceId, name: "Unknown device", platform: "unknown" },
+        ),
+        groupId: memberToGroup.get(key)?.groupId,
+        groupName: memberToGroup.get(key)?.name,
+      }))
+      .sort((a, b) => b.trackedSeconds - a.trackedSeconds);
   },
 });
