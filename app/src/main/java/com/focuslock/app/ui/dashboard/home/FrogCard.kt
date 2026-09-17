@@ -35,6 +35,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -43,6 +44,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.focuslock.app.FocusLockApplication
@@ -69,7 +73,7 @@ fun FrogPickerBody(
     val scope = rememberCoroutineScope()
     var refreshing by remember { mutableStateOf(false) }
     var fetchError by remember { mutableStateOf<String?>(null) }
-    var manualTitle by remember { mutableStateOf("") }
+    var manualTitle by rememberSaveable { mutableStateOf("") }
 
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(
@@ -78,7 +82,7 @@ fun FrogPickerBody(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                text = "Open tasks",
+                text = "Open tasks (${openTasks.size})",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -109,9 +113,9 @@ fun FrogPickerBody(
                     contentDescription = null,
                     modifier = Modifier.size(16.dp),
                 )
-                Spacer(modifier = Modifier.width(6.dp))
+                Spacer(modifier = Modifier.width(4.dp))
                 Text(
-                    text = if (refreshing) "Refreshing…" else "Refresh from TickTick",
+                    text = if (refreshing) "Refreshing…" else "Refresh",
                     style = MaterialTheme.typography.labelLarge,
                 )
             }
@@ -119,12 +123,18 @@ fun FrogPickerBody(
 
         if (openTasks.isEmpty()) {
             Text(
-                text = fetchError ?: "No cached open tasks yet — tap Refresh from TickTick.",
+                text = fetchError ?: "No open tasks loaded. Refresh from TickTick or enter one below.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         } else {
-            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 220.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
                 openTasks.forEach { task ->
                     Surface(
                         onClick = { onPick(task) },
@@ -139,7 +149,7 @@ fun FrogPickerBody(
                                     fontWeight = FontWeight.SemiBold,
                                 ),
                                 color = MaterialTheme.colorScheme.onSurface,
-                                maxLines = 1,
+                                maxLines = 2,
                                 overflow = TextOverflow.Ellipsis,
                             )
                             val meta = listOf(task.projectName, task.dueDate)
@@ -150,7 +160,7 @@ fun FrogPickerBody(
                                     text = meta,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
+                                maxLines = 2,
                                     overflow = TextOverflow.Ellipsis,
                                 )
                             }
@@ -172,6 +182,14 @@ fun FrogPickerBody(
             onValueChange = { manualTitle = it },
             label = { Text("Or type your own frog") },
             singleLine = true,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = {
+                val title = manualTitle.trim()
+                if (title.isNotEmpty()) {
+                    onManual(title)
+                    manualTitle = ""
+                }
+            }),
             shape = RoundedCornerShape(14.dp),
             modifier = Modifier.fillMaxWidth(),
         )
@@ -337,12 +355,7 @@ fun FrogCard(modifier: Modifier = Modifier) {
                 )
             },
             text = {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 420.dp)
-                        .verticalScroll(rememberScrollState())
-                ) {
+                Box(modifier = Modifier.fillMaxWidth()) {
                     FrogPickerBody(
                         openTasks = frogState?.openTasks.orEmpty(),
                         onPick = { task ->

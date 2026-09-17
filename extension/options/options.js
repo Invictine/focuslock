@@ -805,6 +805,10 @@
   function allSiteRows() {
     const rows = [];
     if (!state) return rows;
+    if (dashboard) {
+      return syncedSites().map(s => ({ site: s.domain, listId: '__shared', listName: 'Shared boundaries', enabled: Boolean(s.isBlocked), category: s.category || 'Web' }))
+        .sort((a, b) => a.site.localeCompare(b.site));
+    }
     for (const l of state.lists) {
       const locked = l.lockedUntil > Date.now();
       for (const site of l.sites) {
@@ -874,7 +878,7 @@
       return '<div class="site-row"><div><strong>' + esc(r.site) + '</strong><span class="mut">'
         + esc(r.listName) + ' · ' + esc(r.category) + (custom ? ' · custom' : '') + '</span></div>'
         + '<span class="badge ' + (r.enabled ? 'on' : '') + '">' + (r.enabled ? '● blocked' : '○ off') + '</span>'
-        + '<div class="btnrow" style="margin:0"><button type="button" class="red" data-del="' + esc(r.listId) + '|' + esc(r.site) + '">Delete</button></div></div>';
+        + '<div class="btnrow" style="margin:0"><button type="button" class="red" data-del="' + esc(r.listId) + '|' + esc(r.site) + '">' + (r.listId === '__shared' ? (r.enabled ? 'Unblock' : 'Block') : 'Delete') + '</button></div></div>';
     }).join('');
   }
 
@@ -898,6 +902,13 @@
     const btn = e.target.closest('[data-del]'); if (!btn) return;
     const parts = btn.dataset.del.split('|');
     const listId = parts[0], site = parts.slice(1).join('|');
+    if (listId === '__shared') {
+      const current = syncedSites().find(s => s.domain === site);
+      const result = await chrome.runtime.sendMessage({ type: 'setSharedSite', domain: site, isBlocked: !current?.isBlocked });
+      if (!result?.ok) return toast(result?.error || 'Could not sync website.');
+      await refreshFocus(); toast(current?.isBlocked ? 'Website unblocked on your account.' : 'Website blocked on your account.');
+      return;
+    }
     if (!confirm('Delete "' + site + '" from this list?')) return;
     await S.update(async (st) => { const l = st.lists.find(x => x.id === listId); if (l) l.sites = l.sites.filter(s => s !== site); return st; });
     await refresh();
@@ -933,6 +944,12 @@
     const err = $('addSiteError');
     const parsed = validateSite($('addSiteInput').value);
     if (parsed.error) { err.textContent = parsed.error; err.hidden = false; return; }
+    if (dashboard) {
+      const result = await chrome.runtime.sendMessage({ type: 'setSharedSite', domain: parsed.value, isBlocked: true });
+      if (!result?.ok) { err.textContent = result?.error || 'Could not sync website.'; err.hidden = false; return; }
+      await refreshFocus(); closeAddSite(); toast('Blocked ' + parsed.value + ' on your account.');
+      return;
+    }
     const listId = $('addSiteList').value;
     let outcome = 'added';
     await S.update(async (st) => {
@@ -952,6 +969,17 @@
   // Presets mapped onto the existing list/preset model.
   async function applyPreset(kind) {
     if (!state) return;
+    if (dashboard) {
+      const sites = kind === 'unblock' ? syncedSites().filter(s => s.isBlocked).map(s => s.domain)
+        : kind === 'social' ? S.PRESETS.social : S.PRESETS.video;
+      for (const site of sites) {
+        const result = await chrome.runtime.sendMessage({ type: 'setSharedSite', domain: site, isBlocked: kind !== 'unblock' });
+        if (!result?.ok) return toast(result?.error || 'Could not sync websites.');
+      }
+      await refreshFocus();
+      toast(kind === 'unblock' ? 'Shared websites unblocked.' : 'Shared websites blocked.');
+      return;
+    }
     if (kind === 'unblock') {
       if (state.security && state.security.hash) {
         const pw = prompt('Password to disable protection:');

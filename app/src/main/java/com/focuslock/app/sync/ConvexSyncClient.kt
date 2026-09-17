@@ -220,7 +220,7 @@ class ConvexSyncClient(
             .put("tasksCompletedToday", tasks)
             .put("lastResetDate", date)
             .put("updatedAt", updatedAt)
-        return post("/api/mutation", "focus:saveState", args) != null
+        return post("/api/mutation", "focus:saveState", args)?.optBoolean("applied", false) == true
     }
 
     suspend fun saveApps(apps: List<RemoteApp>, updatedAt: Long): Boolean {
@@ -229,7 +229,7 @@ class ConvexSyncClient(
             .put("packageName", it.packageName).put("appName", it.appName)
             .put("isBlocked", it.isBlocked).put("category", it.category)
             .put("specificShortsOnly", it.specificShortsOnly)) }
-        return post("/api/mutation", "focus:saveBlockedApps", JSONObject().put("apps", arr).put("updatedAt", updatedAt)) != null
+        return post("/api/mutation", "focus:saveBlockedApps", JSONObject().put("apps", arr).put("updatedAt", updatedAt))?.optBoolean("applied", false) == true
     }
 
     suspend fun saveSites(sites: List<RemoteSite>, updatedAt: Long): Boolean {
@@ -238,7 +238,7 @@ class ConvexSyncClient(
             .put("domain", it.domain).put("displayName", it.displayName)
             .put("isBlocked", it.isBlocked).put("category", it.category)
             .put("isCustom", it.isCustom)) }
-        return post("/api/mutation", "focus:saveBlockedWebsites", JSONObject().put("sites", arr).put("updatedAt", updatedAt)) != null
+        return post("/api/mutation", "focus:saveBlockedWebsites", JSONObject().put("sites", arr).put("updatedAt", updatedAt))?.optBoolean("applied", false) == true
     }
 
     /**

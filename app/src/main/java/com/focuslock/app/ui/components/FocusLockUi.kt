@@ -288,29 +288,27 @@ private fun String.monogramOrFallback(): String {
 
 /** Shared finite motion specs and restrained decorative/entrance timing. */
 object MotionTokens {
-    val SpatialFloat: FiniteAnimationSpec<Float> = spring<Float>(dampingRatio = 0.8f, stiffness = 380f)
+    val SpatialFloat: FiniteAnimationSpec<Float> = spring<Float>(dampingRatio = 1f, stiffness = 600f)
     /** Slide-offset spec for slideInVertically/slideOutVertically (animates IntOffset). */
     val SpatialOffset: FiniteAnimationSpec<IntOffset> =
-        spring<IntOffset>(dampingRatio = 0.8f, stiffness = 380f)
+        spring<IntOffset>(dampingRatio = 1f, stiffness = 600f)
     val SpatialIntSize: FiniteAnimationSpec<IntSize> =
-        spring<IntSize>(dampingRatio = 0.8f, stiffness = 380f)
-    val FastFloat: FiniteAnimationSpec<Float> = spring<Float>(dampingRatio = 0.6f, stiffness = 800f)
+        spring<IntSize>(dampingRatio = 1f, stiffness = 600f)
+    val FastFloat: FiniteAnimationSpec<Float> = spring<Float>(dampingRatio = 1f, stiffness = 800f)
     val FadeFloat: FiniteAnimationSpec<Float> = spring<Float>(dampingRatio = 1f, stiffness = 1600f)
 
-    val PressFloat: FiniteAnimationSpec<Float> = spring(dampingRatio = 0.85f, stiffness = 800f)
-    val ChevronFloat: FiniteAnimationSpec<Float> = spring(dampingRatio = 0.85f, stiffness = 800f)
-    val ProgressFloat: FiniteAnimationSpec<Float> = tween(durationMillis = 500)
+    val PressFloat: FiniteAnimationSpec<Float> = spring(dampingRatio = 1f, stiffness = 800f)
+    val ChevronFloat: FiniteAnimationSpec<Float> = spring(dampingRatio = 1f, stiffness = 800f)
+    val ProgressFloat: FiniteAnimationSpec<Float> = tween(durationMillis = 300)
     val PulseFloat = tween<Float>(durationMillis = 1200)
-    const val PressScale = 0.97f
-    val EntranceTravel = 12.dp
-    const val StaggerMs = 40L
-    const val MaxStaggerMs = 200L
+    const val PressScale = 0.985f
+    val EntranceTravel = 6.dp
 }
 
 /**
- * Small staged-entrance wrapper shared by the non-lazy screens (boundaries
- * overview, strict, permission dialog), home and auth. Elements stagger by 40ms
- * (200ms maximum), then fade/slide up to 12dp with shared spatial/fade springs.
+ * Short entrance wrapper shared by the non-lazy screens (boundaries overview,
+ * strict, permission dialog), home and auth. A small fade/slide avoids the
+ * cascading delay and overshoot that made tab transitions feel uneven.
  * Runs on first composition only: once [visible] flips true the element stays
  * revealed across recompositions, so scrolls and state flips never replay it.
  *
@@ -350,15 +348,8 @@ fun StaggeredFadeSlide(
             // Consume the process-wide slot up front, so a restart that cancels the
             // in-flight cascade (system animator scale flipping mid-run) cannot replay it.
             if (screenKey != null) seenEntranceScreens.add(screenKey)
-            // A Compose animation (rather than delay) respects live motion-scale changes,
-            // including a zero-scale override supplied by a host/test.
-            val stagger = (index.coerceIn(0, 5) * MotionTokens.StaggerMs)
-                .coerceAtMost(MotionTokens.MaxStaggerMs).toInt()
-            if (stagger > 0 && coroutineContext[MotionDurationScale]?.scaleFactor != 0f) {
-                Animatable(0f).animateTo(1f, tween(durationMillis = stagger))
-            }
-            launch { travel.animateTo(0f, MotionTokens.SpatialFloat) }
-            alpha.animateTo(1f, MotionTokens.FadeFloat)
+            launch { travel.animateTo(0f, tween(durationMillis = 180)) }
+            alpha.animateTo(1f, tween(durationMillis = 180))
         }
     }
     Box(

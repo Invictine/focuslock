@@ -48,7 +48,6 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -175,7 +174,7 @@ fun LazyListScope.FocusHome(
     }
 }
 
-/** Shared 12dp entrance, 40ms stagger capped at 200ms; layout stays composed on tab returns. */
+/** Shared short entrance; layout stays composed on tab returns. */
 @Composable
 fun HomeEntrance(
     index: Int,
@@ -364,12 +363,6 @@ fun SetupBannerCard(
     callbacks: FocusHomeCallbacks,
     modifier: Modifier = Modifier,
 ) {
-    val setupAlphaState = rememberDecorativePulse(
-        initialValue = 0.45f,
-        targetValue = 1f,
-        staticValue = 1f,
-        label = "setup-pulse-alpha",
-    )
     Card(
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.errorContainer,
@@ -381,19 +374,12 @@ fun SetupBannerCard(
             modifier = Modifier.padding(16.dp),
             verticalAlignment = Alignment.Top,
         ) {
-            // Pulse alpha is read in the layer lambda, never in composition.
-            Box(
-                modifier = Modifier.graphicsLayer {
-                    alpha = setupAlphaState.value
-                },
-            ) {
-                IconBadge(
-                    icon = Icons.Rounded.Warning,
-                    size = 44.dp,
-                    containerColor = MaterialTheme.colorScheme.error.copy(alpha = 0.18f),
-                    contentColor = MaterialTheme.colorScheme.error,
-                )
-            }
+            IconBadge(
+                icon = Icons.Rounded.Warning,
+                size = 44.dp,
+                containerColor = MaterialTheme.colorScheme.error.copy(alpha = 0.18f),
+                contentColor = MaterialTheme.colorScheme.error,
+            )
             Spacer(modifier = Modifier.width(12.dp))
             Column(
                 modifier = Modifier.weight(1f),

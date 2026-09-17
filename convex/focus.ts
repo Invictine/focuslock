@@ -166,6 +166,40 @@ export const saveBlockedWebsites = mutation({
   },
 });
 
+/** Update one site without replacing changes made on another device. */
+export const setBlockedWebsite = mutation({
+  args: {
+    domain: v.string(),
+    displayName: v.string(),
+    isBlocked: v.boolean(),
+    category: v.string(),
+    updatedAt: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    const domain = args.domain.trim().toLowerCase().replace(/^www\./, "");
+    if (!domain) throw new Error("A domain is required");
+    const version = await getCollectionVersion(ctx, userId, "blockedWebsites");
+    const updatedAt = Math.max(Date.now(), args.updatedAt, (version?.updatedAt ?? 0) + 1);
+    const existing = await ctx.db
+      .query("blockedWebsites")
+      .withIndex("by_user_domain", (q) => q.eq("userId", userId).eq("domain", domain))
+      .first();
+    const site = {
+      domain,
+      displayName: args.displayName.trim() || domain,
+      isBlocked: args.isBlocked,
+      category: args.category.trim() || "Web",
+      isCustom: true,
+      updatedAt,
+    };
+    if (existing) await ctx.db.patch(existing._id, site);
+    else await ctx.db.insert("blockedWebsites", { ...site, userId });
+    await setCollectionVersion(ctx, userId, "blockedWebsites", updatedAt);
+    return { applied: true, updatedAt };
+  },
+});
+
 /** Idempotent work-record insert (dedupe on recordId per user). */
 export const addWorkRecord = mutation({
   args: {

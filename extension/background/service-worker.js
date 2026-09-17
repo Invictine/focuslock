@@ -67,6 +67,14 @@ function verdictFor(urlStr, state, t) {
   try { domain = new URL(urlStr).hostname.toLowerCase(); } catch (e) { return { blocked: false }; }
   const shortDomain = domain.replace(/^www\./, '');
 
+  // Account boundaries are enforced even when they were edited on Android or
+  // Windows. Keep local extension lists as additional browser-only rules.
+  const sharedSite = (state.cloudSites || []).find((site) =>
+    site.isBlocked && self.FocusLockMatcher.matchesAny(urlStr, [site.domain]));
+  if (sharedSite && !domainAllowedBySnooze(state, shortDomain, t)) {
+    return { blocked: true, mode: 'blacklist', listId: '__shared', listName: 'Shared boundaries', reason: 'account' };
+  }
+
   // Today's per-domain seconds, read once per verdict so daily-limit checks
   // don't re-lookup/re-iterate the stats map for every list.
   const day = state.stats[Store.todayKey(new Date(t))] || {};
@@ -79,6 +87,9 @@ function verdictFor(urlStr, state, t) {
   }
 
   for (const list of state.lists) {
+    // The two seed lists are onboarding defaults. Once account boundaries have
+    // loaded, the shared website list owns those choices, including unblocks.
+    if (state.cloudSitesLoaded && (list.id === 'list_social' || list.id === 'list_video')) continue;
     const st = listIsActive(list, state, t);
     if (!st.active) continue;
     if (domainAllowedBySnooze(state, shortDomain, t)) continue;
@@ -171,7 +182,19 @@ async function flushActiveSlice(t) {
 async function syncCloud(reason) {
   try {
     const state = await ensureState();
-    return await self.FocusLockCloud.syncUsage(state, reason || 'background');
+    const result = await self.FocusLockCloud.syncUsage(state, reason || 'background');
+    if (result.ok && Array.isArray(result.sites)) {
+      state.cloudSites = result.sites.map((site) => ({ domain: site.domain, isBlocked: Boolean(site.isBlocked) }));
+      state.cloudSitesLoaded = true;
+      await Store.save(state);
+      mem.state = state;
+    } else if (!result.signedIn && state.cloudSitesLoaded) {
+      state.cloudSites = [];
+      state.cloudSitesLoaded = false;
+      await Store.save(state);
+      mem.state = state;
+    }
+    return result;
   } catch (error) {
     console.warn('[focuslock] cloud sync failed', error);
     return { signedIn: false, ok: false, error: error && error.message ? error.message : 'Sync failed' };
@@ -257,7 +280,7 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
 });
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
-  // Cloud sync has its own slower cadence (focuslock-sync, 5 min); the
+  // Cloud sync has its own cadence (focuslock-sync, 1 min); the
   // maintenance alarm drives blocking decisions and stays at 1 minute.
   if (alarm.name === 'focuslock-sync') {
     await flushActiveSlice(nowMs()); // sync the freshest slice, like the old combined alarm
@@ -331,9 +354,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ day: state.stats[key] || {}, blockedTotal: state.blockedTotal || 0, log: state.blockedLog.slice(0, 50) });
     } else if (msg.type === 'cloudSnapshot') {
       await flushActiveSlice(nowMs());
-      sendResponse(await self.FocusLockCloud.getSnapshot(await ensureState(), Boolean(msg.sync)));
+      if (msg.sync) await syncCloud('manual');
+      sendResponse(await self.FocusLockCloud.getSnapshot(await ensureState(), false));
     } else if (msg.type === 'cloudSignOut') {
-      sendResponse(await self.FocusLockCloud.signOut());
+      const result = await self.FocusLockCloud.signOut();
+      state.cloudSites = [];
+      state.cloudSitesLoaded = false;
+      await Store.save(state); mem.state = state;
+      sendResponse(result);
+    } else if (msg.type === 'setSharedSite') {
+      try {
+        const result = await self.FocusLockCloud.setWebsiteBlocked(msg.domain, msg.isBlocked);
+        if (result.ok) await syncCloud('boundary');
+        sendResponse(result);
+      } catch (e) { sendResponse({ ok: false, error: e?.message || 'Could not save website' }); }
     } else if (msg.type === 'getDashboard') {
       sendResponse(await self.FocusLockCloud.getDashboard(msg.fromDate, msg.toDate));
     } else if (msg.type === 'savePrefs') {
@@ -391,9 +425,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 chrome.runtime.onInstalled.addListener(async () => {
   mem.state = await Store.load();
   // Maintenance (expiry, badge, slice flush) must stay at 1 min — it drives
-  // verdict state. Cloud sync is network I/O only, so it runs every 5 min.
+  // verdict state. Cloud sync also refreshes cross-device boundaries.
   await chrome.alarms.create('focuslock-maint', { periodInMinutes: 1 });
-  await chrome.alarms.create('focuslock-sync', { periodInMinutes: 5 });
+  await chrome.alarms.create('focuslock-sync', { periodInMinutes: 1 });
   updateBadge(mem.state);
   await syncCloud('installed');
 });
@@ -401,7 +435,7 @@ chrome.runtime.onInstalled.addListener(async () => {
 chrome.runtime.onStartup.addListener(async () => {
   mem.state = await Store.load();
   await chrome.alarms.create('focuslock-maint', { periodInMinutes: 1 });
-  await chrome.alarms.create('focuslock-sync', { periodInMinutes: 5 });
+  await chrome.alarms.create('focuslock-sync', { periodInMinutes: 1 });
   updateBadge(mem.state);
   await syncCloud('startup');
 });

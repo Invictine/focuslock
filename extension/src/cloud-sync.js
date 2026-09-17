@@ -83,12 +83,27 @@ async function syncUsage(state, reason) {
     if (buckets.length) {
       await callConvex('mutation', 'usage:recordUsageBatch', { deviceId: device.deviceId, buckets }, authToken);
     }
+    const shared = await callConvex('query', 'focus:getSnapshot', {}, authToken);
     await saveMeta({ lastSyncAt: now, lastError: '' });
-    return { signedIn: true, ok: true, lastSyncAt: now };
+    return { signedIn: true, ok: true, lastSyncAt: now, sites: shared.sites || [] };
   } catch (error) {
     await saveMeta({ lastError: error?.message || 'Sync failed' });
     throw error;
   }
+}
+
+// A single-site mutation avoids replacing another device's entire boundaries
+// collection with a stale extension snapshot.
+async function setWebsiteBlocked(domain, isBlocked) {
+  const authToken = await token();
+  if (!authToken) return { signedIn: false, ok: false };
+  const normalized = String(domain || '').trim().toLowerCase().replace(/^www\./, '');
+  if (!normalized) throw new Error('Choose a website first');
+  const value = await callConvex('mutation', 'focus:setBlockedWebsite', {
+    domain: normalized, displayName: normalized, isBlocked: Boolean(isBlocked),
+    category: 'Web', updatedAt: Date.now(),
+  }, authToken);
+  return { signedIn: true, ok: true, value };
 }
 
 async function getSnapshot(state, shouldSync) {
@@ -205,5 +220,5 @@ async function savePrefs(prefs) {
 
 self.FocusLockCloud = {
   syncUsage, getSnapshot, signOut, status,
-  getDashboard, addWorkRecord, logFocusSession, savePrefs,
+  getDashboard, addWorkRecord, logFocusSession, savePrefs, setWebsiteBlocked,
 };

@@ -1035,6 +1035,7 @@ function DesktopApp() {
   const deviceId = snapshot?.device.id || getStoredDeviceId();
   const lastUploadRef = useRef(0);
   const usageJsonRef = useRef<string | null>(null);
+  const uploadInFlightRef = useRef(false);
   // Refs mirror the latest props for the heartbeat interval below (and avoid
   // re-subscribing the effect on every tracker sample).
   const snapshotRef = useRef<NativeSnapshot | null>(snapshot);
@@ -1064,7 +1065,7 @@ function DesktopApp() {
     let cancelled = false;
     const push = async () => {
       const snap = snapshotRef.current;
-      if (!snap) return;
+      if (!snap || uploadInFlightRef.current) return;
       const usageJson = JSON.stringify(snap.usage);
       const usageChanged = usageJson !== usageJsonRef.current;
       if (!usageChanged && Date.now() - lastUploadRef.current < 25000) return;
@@ -1084,9 +1085,9 @@ function DesktopApp() {
             };
           })
         : [];
-      if (usageChanged) usageJsonRef.current = usageJson;
-      lastUploadRef.current = Date.now();
-      heartbeat({
+      uploadInFlightRef.current = true;
+      try {
+        await heartbeat({
         deviceId,
         name: snap.device.name,
         platform: "windows",
@@ -1094,19 +1095,18 @@ function DesktopApp() {
         trackingStatus: snap.running ? "active" : "paused",
         statusDetail: trackerErrorRef.current || undefined,
         lastSeen: Date.now(),
-      })
-        .then(() =>
-          buckets.length ? recordUsage({ deviceId, buckets }) : undefined,
-        )
-        .then(() => {
-          if (!cancelled) setLastSyncAt(Date.now());
-        })
-        .catch((err) =>
-          console.warn(
-            "[focuslock] heartbeat/usage upload failed; bucket dropped",
-            err,
-          ),
-        );
+        });
+        if (buckets.length) await recordUsage({ deviceId, buckets });
+        // Advance both clocks only after Convex accepts the upload. A failed
+        // request must be retried with the same cumulative usage snapshot.
+        usageJsonRef.current = usageJson;
+        lastUploadRef.current = Date.now();
+        if (!cancelled) setLastSyncAt(Date.now());
+      } catch (err) {
+        console.warn("[focuslock] heartbeat/usage upload failed; retrying", err);
+      } finally {
+        uploadInFlightRef.current = false;
+      }
     };
     push();
     // Fallback tick so heartbeats continue while the tracker is paused and
@@ -2981,10 +2981,11 @@ function BoundariesPage({
     try {
       // Upload only server-known rows plus the toggled targets so observed-only
       // Windows apps are never persisted as isBlocked:false (list pollution).
-      await saveApps({
+      const result = await saveApps({
         apps: serverAppsForUpload(apps, toAppItems(toggled)),
         updatedAt: Date.now(),
       });
+      if (result?.applied === false) throw new Error("Another device updated your app boundaries. Reload and retry.");
       await applyNative(nextApps, sites);
       setNotice(message);
     } catch (e) {
@@ -2997,10 +2998,11 @@ function BoundariesPage({
   async function persistSites(nextSites: SiteItem[], message: string) {
     setBusy(true);
     try {
-      await saveSites({
+      const result = await saveSites({
         sites: nextSites.map(stripSite),
         updatedAt: Date.now(),
       });
+      if (result?.applied === false) throw new Error("Another device updated your websites. Reload and retry.");
       await applyNative(appRows, nextSites);
       setNotice(message);
     } catch (e) {
@@ -3110,7 +3112,8 @@ function BoundariesPage({
           isCustom: true,
         },
       ];
-      await saveSites({ sites: nextSites.map(stripSite), updatedAt: Date.now() });
+      const result = await saveSites({ sites: nextSites.map(stripSite), updatedAt: Date.now() });
+      if (result?.applied === false) throw new Error("Another device updated your websites. Reload and retry.");
       await applyNative(appRows, nextSites);
       setShowAddSite(false);
       setSiteInput("");

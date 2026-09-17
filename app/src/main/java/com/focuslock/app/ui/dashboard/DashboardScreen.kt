@@ -254,14 +254,18 @@ fun DashboardScreen(
     // so a torn-down composition resumes at the right step.
     var dialogIndex by rememberSaveable { mutableIntStateOf(permissionOnboardingLastIndex) }
     var showOnboarding by remember { mutableStateOf(false) }
+    // Keep the original steps for this onboarding run. The live `missing` list shrinks
+    // after each grant; using it as the dialog's sequence resets the counter to 1/N.
+    var onboardingSteps by remember { mutableStateOf<List<PermissionKind>>(emptyList()) }
     LaunchedEffect(missing) {
         if (missing.isEmpty()) {
             showOnboarding = false
-        } else {
-            // Re-derive the step from live grant state on every resume so the dialog
-            // never points at a stale/out-of-range index after returning from Settings.
-            dialogIndex = dialogIndex.coerceIn(0, missing.size - 1)
-            if (!shownThisSession && !permissionOnboardingDismissedForProcess) showOnboarding = true
+        } else if (!shownThisSession && !permissionOnboardingDismissedForProcess) {
+            if (onboardingSteps.isEmpty()) {
+                onboardingSteps = missing
+                dialogIndex = 0
+            }
+            showOnboarding = true
         }
     }
 
@@ -674,18 +678,18 @@ fun DashboardScreen(
     }
 
     // Step-through permission onboarding dialogs (one per missing permission)
-    if (showOnboarding && missing.isNotEmpty()) {
+    if (showOnboarding && onboardingSteps.isNotEmpty()) {
         PermissionOnboardingDialog(
-            missing = missing,
-            currentIndex = dialogIndex.coerceIn(0, missing.size - 1),
+            missing = onboardingSteps,
+            currentIndex = dialogIndex.coerceIn(0, onboardingSteps.size - 1),
             onGrant = { kind ->
                 PermissionHelper.openPermissionWithHighlight(context, kind)
                 // Do not advance just for opening Settings: PermissionReturnWatcher pulls the
                 // app back automatically once the grant lands, and the resume re-check then
                 // re-derives `missing` and flips the dialog action to Next/Done.
                 // Only skip ahead if it was already granted when tapped.
-                if (PermissionHelper.isGranted(context, kind) && dialogIndex < missing.size - 1) {
-                    dialogIndex++
+                if (PermissionHelper.isGranted(context, kind)) {
+                    if (dialogIndex < onboardingSteps.size - 1) dialogIndex++ else showOnboarding = false
                     // Persist progress on every advance so a mid-flow tab switch never
                     // re-arms the dialog from step 0 (and never re-shows after the user
                     // has already moved past a step).
@@ -695,7 +699,7 @@ fun DashboardScreen(
                 }
             },
             onDismiss = {
-                if (dialogIndex < missing.size - 1) {
+                if (dialogIndex < onboardingSteps.size - 1) {
                     dialogIndex++
                     permissionOnboardingLastIndex = dialogIndex
                     // Mid-flow skip: latch the dialog off for this process too, so

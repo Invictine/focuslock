@@ -581,7 +581,7 @@ internal fun AppPickerScreen(
         }
     }
 
-    // ---- Multi-select merge mode: long-press any app/website row to start ----
+    // ---- Multi-select merge mode: Select is visible in the toolbar; long-press is a shortcut. ----
     // One shared key space so a selection can span both kinds: "app:<pkg>" / "website:<domain>".
     val enterSelection: (String) -> Unit = { selKey ->
         selectionMode = true
@@ -818,13 +818,26 @@ internal fun AppPickerScreen(
         val choices = selectedKeys.value
             .mapNotNull { resolveMemberChoice(it) }
             .distinctBy { it.selectionKey }
-        if (choices.size < 2) {
-            scope.launch { snackbarHostState.showSnackbar("Pick at least 2 apps or websites to merge.") }
-        } else {
-            groupEditor = GroupEditorRequest(initialMembers = choices)
+        val alreadyGrouped = choices.firstOrNull { choice ->
+            targetGroups.any { group -> group.members.any { member ->
+                member.targetKind == choice.kind && member.targetKey == choice.key
+            } }
+        }
+        when {
+            choices.size < 2 -> scope.launch {
+                snackbarHostState.showSnackbar("Pick at least 2 apps or websites to merge.")
+            }
+            alreadyGrouped != null -> scope.launch {
+                snackbarHostState.showSnackbar("${alreadyGrouped.label} is already in a merged group. Edit that group to change it.")
+            }
+            else -> groupEditor = GroupEditorRequest(initialMembers = choices)
         }
     }
-    val openNewGroup: () -> Unit = { groupEditor = GroupEditorRequest() }
+    val openNewGroup: () -> Unit = {
+        val choices = selectedKeys.value.mapNotNull { resolveMemberChoice(it) }
+            .distinctBy { it.selectionKey }
+        groupEditor = GroupEditorRequest(initialMembers = choices)
+    }
     val openEditGroup: (TargetGroup) -> Unit = { group ->
         groupEditor = GroupEditorRequest(
             groupId = group.groupId,
@@ -1106,6 +1119,11 @@ internal fun AppPickerScreen(
                         maxLines = 1,
                         modifier = Modifier.weight(1f)
                     )
+                    if (!selectionMode) {
+                        TextButton(onClick = { selectionMode = true }) {
+                            Text("Select")
+                        }
+                    }
                     IconButton(
                         onClick = {
                             searchActive = !searchActive
@@ -1146,20 +1164,28 @@ internal fun AppPickerScreen(
                     )
                 }
                 Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "Choose apps and websites below. Your selection stays when you switch tabs.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(bottom = 8.dp),
+                )
             }
 
             // Merged groups: every existing bucket with today's combined total + limit,
             // plus the entry point for a new merge. Shared by both tabs.
-            StaggeredFadeSlide(visible = entered, index = 2, screenKey = "app_picker") {
-                MergedGroupsSection(
-                    groups = targetGroups,
-                    usageByGroup = groupUsageToday,
-                    onNew = openNewGroup,
-                    onEdit = openEditGroup,
-                    onDelete = requestDeleteGroup,
-                )
+            if (!selectionMode) {
+                StaggeredFadeSlide(visible = entered, index = 2, screenKey = "app_picker") {
+                    MergedGroupsSection(
+                        groups = targetGroups,
+                        usageByGroup = groupUsageToday,
+                        onNew = openNewGroup,
+                        onEdit = openEditGroup,
+                        onDelete = requestDeleteGroup,
+                    )
+                }
+                Spacer(Modifier.height(4.dp))
             }
-            Spacer(Modifier.height(4.dp))
 
             // Seamless M3 tabs (no segmented pills, no divider line).
             StaggeredFadeSlide(visible = entered, index = 1, screenKey = "app_picker") {
@@ -1362,7 +1388,7 @@ internal fun AppPickerScreen(
                                         // During search every matching category is expanded;
                                         // otherwise the remembered override wins, defaulting to
                                         // expanded when the category holds a blocked app.
-                                        val expanded = isSearching ||
+                                        val expanded = isSearching || selectionMode ||
                                             (categoryExpansion.value[group.category]
                                                 ?: (group.blockedCount > 0))
                                         item(
@@ -2226,7 +2252,7 @@ private fun WebsiteRow(
 ) {
     val context = LocalContext.current
     val switchEnabled = !(boundariesFrozen && site.isBlocked)
-    val rowEnabled = selectionMode || switchEnabled
+    val rowEnabled = true
     val interactionSource = remember { MutableInteractionSource() }
     Card(
         colors = CardDefaults.cardColors(
@@ -2246,7 +2272,11 @@ private fun WebsiteRow(
                 role = if (selectionMode) Role.Checkbox else Role.Switch,
                 onLongClick = onLongPress,
                 onClick = {
-                    if (selectionMode) onSelectionToggle?.invoke() else onToggle(site.domain, !site.isBlocked)
+                    when {
+                        selectionMode -> onSelectionToggle?.invoke()
+                        switchEnabled -> onToggle(site.domain, !site.isBlocked)
+                        else -> Toast.makeText(context, lockedMessage, Toast.LENGTH_SHORT).show()
+                    }
                 }
             )
     ) {
@@ -2440,7 +2470,7 @@ private fun InstalledAppRow(
 ) {
     val context = LocalContext.current
     val switchEnabled = !(boundariesFrozen && app.isBlocked)
-    val rowEnabled = selectionMode || switchEnabled
+    val rowEnabled = true
     val interactionSource = remember { MutableInteractionSource() }
     Card(
         colors = CardDefaults.cardColors(
@@ -2460,7 +2490,11 @@ private fun InstalledAppRow(
                 role = if (selectionMode) Role.Checkbox else Role.Switch,
                 onLongClick = onLongPress,
                 onClick = {
-                    if (selectionMode) onSelectionToggle?.invoke() else onToggle(app, !app.isBlocked)
+                    when {
+                        selectionMode -> onSelectionToggle?.invoke()
+                        switchEnabled -> onToggle(app, !app.isBlocked)
+                        else -> Toast.makeText(context, lockedMessage, Toast.LENGTH_SHORT).show()
+                    }
                 }
             )
     ) {
@@ -3165,7 +3199,7 @@ private fun GroupEditorDialog(
 
     val parsedLimit = limitInput.trim().toIntOrNull()?.takeIf { it in 1..1440 }
     val limitTextInvalid = limitInput.isNotBlank() && parsedLimit == null
-    val canSave = name.isNotBlank() && selected.value.size >= 2 && !limitTextInvalid
+    val canSave = name.isNotBlank() && selected.value.size >= 2 && (!limitEnabled || !limitTextInvalid)
 
     val trimmedQuery = memberQuery.trim()
     val filteredApps = remember(appChoices, trimmedQuery) {
@@ -3320,7 +3354,6 @@ private fun GroupEditorDialog(
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         FilterChip(
@@ -3339,6 +3372,12 @@ private fun GroupEditorDialog(
                             },
                             label = { Text("Website") },
                         )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
                         OutlinedTextField(
                             value = manualKeyInput,
                             onValueChange = {
@@ -3358,7 +3397,9 @@ private fun GroupEditorDialog(
                                 val normalized = normalizedMemberKey(manualKind, manualKeyInput)
                                 when {
                                     normalized == null -> manualError = "Enter a key first"
-                                    normalized in selected.value -> manualError = "Already added"
+                                    "$manualKind:$normalized" in selected.value -> manualError = "Already added"
+                                    "$manualKind:$normalized" in claimedBy ->
+                                        manualError = "Already in ${claimedBy["$manualKind:$normalized"]}"
                                     else -> {
                                         addMember(
                                             GroupMemberChoice(

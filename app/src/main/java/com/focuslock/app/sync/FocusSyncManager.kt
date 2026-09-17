@@ -309,12 +309,10 @@ class FocusSyncManager(
             try {
             val localApps = settings.getBlockedApps()
             val localAppsUpdatedAt = settings.getBlockedAppsUpdatedAt()
-            val hasCustomizedLocalApps = localApps != BlockedApp.DEFAULT_DOOMSCROLL_APPS
-            if (snapshot.appsUpdatedAt > localAppsUpdatedAt &&
-                !(lastSuccessfulSync == 0L && localAppsUpdatedAt == 0L && hasCustomizedLocalApps)) {
+            if (snapshot.appsUpdatedAt > localAppsUpdatedAt) {
                 settings.applyRemoteBlockedApps(snapshot.apps.map(RemoteApp::toLocal), snapshot.appsUpdatedAt)
                 pulled++
-            } else if (snapshot.appsUpdatedAt == 0L || localAppsUpdatedAt > snapshot.appsUpdatedAt || lastSuccessfulSync == 0L) {
+            } else if (snapshot.appsUpdatedAt == 0L || localAppsUpdatedAt > snapshot.appsUpdatedAt) {
                 val writeTime = clampedWriteTime(startedAt, localAppsUpdatedAt)
                 require(convex.saveApps(localApps.map { it.toRemote() }, writeTime)) { "Could not save app boundaries" }
                 settings.applyRemoteBlockedApps(localApps, writeTime)
@@ -329,12 +327,10 @@ class FocusSyncManager(
             try {
             val localSites = settings.getBlockedWebsites()
             val localSitesUpdatedAt = settings.getBlockedWebsitesUpdatedAt()
-            val hasCustomizedLocalSites = localSites != BlockedWebsite.DEFAULT_BLOCKED_WEBSITES
-            if (snapshot.sitesUpdatedAt > localSitesUpdatedAt &&
-                !(lastSuccessfulSync == 0L && localSitesUpdatedAt == 0L && hasCustomizedLocalSites)) {
+            if (snapshot.sitesUpdatedAt > localSitesUpdatedAt) {
                 settings.applyRemoteBlockedWebsites(snapshot.sites.map(RemoteSite::toLocal), snapshot.sitesUpdatedAt)
                 pulled++
-            } else if (snapshot.sitesUpdatedAt == 0L || localSitesUpdatedAt > snapshot.sitesUpdatedAt || lastSuccessfulSync == 0L) {
+            } else if (snapshot.sitesUpdatedAt == 0L || localSitesUpdatedAt > snapshot.sitesUpdatedAt) {
                 val writeTime = clampedWriteTime(startedAt, localSitesUpdatedAt)
                 require(convex.saveSites(localSites.map { it.toRemote() }, writeTime)) { "Could not save website boundaries" }
                 settings.applyRemoteBlockedWebsites(localSites, writeTime)

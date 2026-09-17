@@ -247,7 +247,7 @@ fun PermissionOnboardingDialog(
                     )
                     Spacer(modifier = Modifier.height(16.dp))
                     LinearProgressIndicator(
-                        progress = { safeIndex / missing.size.toFloat() },
+                        progress = { (safeIndex + 1) / missing.size.toFloat() },
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(50))

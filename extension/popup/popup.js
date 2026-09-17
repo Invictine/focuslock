@@ -137,6 +137,13 @@ function bindEvents(signedIn) {
     flash('Allowed for 5 minutes.');
   });
   document.getElementById('block-site')?.addEventListener('click', async () => {
+    if (signedIn) {
+      const result = await chrome.runtime.sendMessage({ type: 'setSharedSite', domain, isBlocked: true });
+      if (!result?.ok) { flash(result?.error || 'Could not sync this website.'); return; }
+      localState = await S.load();
+      flash(`Blocked ${domain} on your account`);
+      return;
+    }
     await S.update((state) => {
       const list = state.lists.find((item) => item.id === 'list_social') || state.lists[0];
       if (!list || list.lockedUntil > Date.now()) return state;
