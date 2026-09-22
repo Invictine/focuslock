@@ -1325,6 +1325,42 @@ input[type="range"] {
   gap: 6px;
   text-decoration: none;
 }
+.approval-unlock-panel {
+  margin: 16px 0;
+  padding: 20px;
+  border: 1px solid var(--fl-outline-variant);
+  border-radius: var(--fl-radius-medium);
+  background: var(--fl-surface-container-lowest);
+}
+.approval-unlock-panel .settings-card-header,
+.approval-unlock-panel .inline-form,
+.approval-unlock-panel .approval-request-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.approval-unlock-panel .settings-card-header { justify-content: space-between; }
+.approval-unlock-panel h3 { margin: 0; font-size: 17px; }
+.approval-unlock-panel p { line-height: 1.5; }
+.approval-unlock-panel .settings-card-copy,
+.approval-unlock-panel .field-help { color: var(--fl-on-surface-variant); }
+.approval-unlock-panel .field-label { display: block; margin-bottom: 8px; font-weight: 600; }
+.approval-unlock-panel input {
+  flex: 1 1 220px;
+  min-width: 0;
+  padding: 12px;
+  color: var(--fl-on-surface);
+  background: var(--fl-surface);
+  border: 1px solid var(--fl-outline);
+  border-radius: 8px;
+}
+.approval-unlock-panel button { min-height: 44px; padding: 10px 16px; }
+.approval-unlock-panel input:focus-visible,
+.approval-unlock-panel button:focus-visible { outline: 2px solid var(--fl-primary); outline-offset: 3px; }
+.approval-unlock-panel .approval-request-row { margin-top: 16px; justify-content: space-between; }
+.approval-unlock-panel .error-text { color: var(--fl-error); }
+.approval-unlock-panel .status-pill { font-size: 12px; padding: 6px 10px; }
 .protection-check {
   display: flex;
   align-items: center;
@@ -1849,5 +1885,188 @@ button.member-chip:hover {
   }
   .selection-actions {
     justify-content: flex-start;
+  }
+}
+
+/* Calm desktop rhythm
+   Keep the existing token system and interaction states, but give each route
+   a clearer reading column and more deliberate separation between decisions. */
+body {
+  line-height: 1.45;
+}
+.app-frame {
+  grid-template-columns: 236px minmax(0, 1fr);
+}
+.rail {
+  gap: 32px;
+  padding: 28px 18px 22px;
+}
+.brand {
+  padding: 0 12px;
+}
+.rail nav {
+  gap: 6px;
+}
+.nav-button {
+  min-height: 44px;
+  padding: 12px 14px;
+}
+.workspace {
+  min-height: 100dvh;
+  background: color-mix(in srgb, var(--fl-background) 92%, var(--fl-surface-container-low));
+}
+.page {
+  width: min(100%, 1160px);
+  padding: 48px clamp(28px, 5vw, 72px) 88px;
+}
+.page.narrow {
+  max-width: 980px;
+}
+.page-header {
+  margin-bottom: 34px;
+}
+.page-header h1 {
+  margin-top: 8px;
+}
+.focus-overview {
+  margin-top: 0;
+  padding: 32px;
+}
+.rings-panel {
+  gap: 32px;
+}
+.overview-actions {
+  gap: 12px;
+  margin-top: 22px;
+}
+.history-jump {
+  margin-top: 12px;
+}
+.hero-balance {
+  gap: 34px;
+  margin-top: 26px;
+  padding: 34px;
+}
+.device-summary,
+.content-section,
+.settings-group {
+  margin-top: 26px;
+  padding: 28px;
+}
+.stats-row {
+  gap: 14px;
+  margin-top: 26px;
+}
+.stats-row article {
+  padding: 22px;
+}
+.day-graph-section {
+  margin-top: 26px;
+}
+.boundary-toolbar {
+  gap: 12px;
+  margin: 20px 0;
+}
+.boundary-list {
+  gap: 10px;
+}
+.boundary-row {
+  min-height: 66px;
+  padding: 14px 16px;
+}
+.settings-group {
+  margin-bottom: 22px;
+}
+.setting-row,
+.device-account-row {
+  min-height: 64px;
+  padding: 16px 0;
+}
+.account-hero,
+.account-note,
+.account-features {
+  margin-top: 22px;
+}
+
+/* Focus is an action-led screen: expose the timer and manual log before the
+   heavier analytics panels. The explicit order also keeps keyboard and
+   screen-reader traversal aligned with the visual hierarchy. */
+.focus-page {
+  display: flex;
+  flex-direction: column;
+}
+.focus-page > .page-header { order: 0; }
+.focus-page > .protection-warning { order: 1; }
+.focus-page > .hero-balance { order: 2; }
+.focus-page > #manual-log { order: 3; }
+.focus-page > .focus-overview { order: 4; }
+.focus-page > .device-summary { order: 5; }
+.focus-page > .stats-row { order: 6; }
+.focus-page > .day-graph-section { order: 7; }
+.focus-page > .content-section:not(.day-graph-section) { order: 8; }
+.focus-page > .scroll-bank-caption { order: 9; }
+
+/* Keep the first viewport useful on narrow windows while retaining touch and
+   keyboard targets. */
+@media (max-width: 900px) {
+  .app-frame {
+    grid-template-columns: 1fr;
+  }
+  .page {
+    padding: 34px 22px 104px;
+  }
+  .focus-overview,
+  .hero-balance,
+  .device-summary,
+  .content-section,
+  .settings-group {
+    padding: 24px;
+  }
+}
+@media (max-width: 600px) {
+  .page {
+    padding: 26px 16px 100px;
+  }
+  .page-header {
+    margin-bottom: 24px;
+  }
+  .focus-overview,
+  .hero-balance,
+  .device-summary,
+  .content-section,
+  .settings-group {
+    padding: 18px;
+    border-radius: var(--fl-radius-large);
+  }
+  .hero-balance {
+    gap: 22px;
+    margin-top: 18px;
+  }
+  .rings-panel {
+    justify-content: center;
+    gap: 22px;
+  }
+  .rings-cards {
+    min-width: min(100%, 240px);
+  }
+  .overview-actions {
+    display: grid;
+    gap: 8px;
+  }
+  .device-summary,
+  .content-section,
+  .settings-group,
+  .stats-row {
+    margin-top: 18px;
+  }
+}
+
+@media (forced-colors: active) {
+  .nav-button.active,
+  .primary-button,
+  .switch.on,
+  .timer-presets button.active,
+  .segment button.active {
+    border: 1px solid CanvasText;
   }
 }

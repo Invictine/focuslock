@@ -4,6 +4,9 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p convex/tsconfig.json",
+    "sync:check-config": "node scripts/check-sync-config.mjs",
     "theme:generate": "node scripts/generate-theme.mjs",
     "theme:check": "node scripts/generate-theme.mjs --check",
     "convex:dev": "convex dev",
@@ -13,6 +16,9 @@
     "convex": "^1.45.0"
   },
   "devDependencies": {
-    "typescript": "^5.6.0"
+    "@edge-runtime/vm": "^5.0.0",
+    "convex-test": "^0.0.59",
+    "typescript": "^5.6.0",
+    "vitest": "^5.0.1"
   }
 }

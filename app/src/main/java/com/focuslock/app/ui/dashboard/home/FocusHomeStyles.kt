@@ -36,6 +36,7 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
@@ -214,7 +215,7 @@ fun FocusHomeHeader(
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                text = "Make time.",
+                text = "Focus today",
                 style = MaterialTheme.typography.headlineMedium.copy(
                     fontWeight = FontWeight.Bold,
                     letterSpacing = (-0.4).sp,
@@ -345,6 +346,7 @@ fun LazyListScope.HeaderItem(
     state: FocusHomeState,
     callbacks: FocusHomeCallbacks,
     screenKey: String? = null,
+    includeFrog: Boolean = true,
 ) {
     item(key = "header") {
         HomeEntrance(index = 0, screenKey = screenKey) {
@@ -353,7 +355,7 @@ fun LazyListScope.HeaderItem(
     }
     // "Eat the frog" card: one shared placement for every front page, right under the
     // header (self-contained — collects its own frog flows, see FrogCard.kt).
-    FrogCardItem(entranceIndex = 1)
+    if (includeFrog) FrogCardItem(entranceIndex = 1)
 }
 
 /** Missing-permissions warning card (only after all checks resolved). */
@@ -363,51 +365,43 @@ fun SetupBannerCard(
     callbacks: FocusHomeCallbacks,
     modifier: Modifier = Modifier,
 ) {
+    val nextPermission = state.missingLabels.firstOrNull() ?: "Permission"
+    val moreCount = (state.missingLabels.size - 1).coerceAtLeast(0)
     Card(
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.errorContainer,
         ),
         shape = MaterialTheme.shapes.large,
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth().clickable { callbacks.onNavigatePermissions() },
     ) {
         Row(
-            modifier = Modifier.padding(16.dp),
-            verticalAlignment = Alignment.Top,
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             IconBadge(
                 icon = Icons.Rounded.Warning,
-                size = 44.dp,
+                size = 36.dp,
                 containerColor = MaterialTheme.colorScheme.error.copy(alpha = 0.18f),
                 contentColor = MaterialTheme.colorScheme.error,
             )
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.width(10.dp))
             Column(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
             ) {
                 Text(
-                    "Finish setting up",
+                    "Finish setup",
                     style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
                     color = MaterialTheme.colorScheme.onErrorContainer,
                 )
                 Text(
-                    "Missing: ${state.missingLabels.joinToString(", ")}. Blocking + screen-time stats need these.",
+                    if (moreCount == 0) "$nextPermission is needed for protection"
+                    else "$nextPermission and $moreCount more permissions needed",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.9f),
                 )
-                Spacer(modifier = Modifier.height(4.dp))
-                Button(
-                    onClick = callbacks.onNavigatePermissions,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error,
-                        contentColor = MaterialTheme.colorScheme.onError,
-                    ),
-                    shape = RoundedCornerShape(20.dp),
-                    contentPadding = PaddingValues(horizontal = 16.dp),
-                ) {
-                    Text("Setup", style = MaterialTheme.typography.labelLarge)
-                }
             }
+            Text("Set up", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
         }
     }
 }
@@ -432,6 +426,7 @@ fun LazyListScope.SetupBannerItem(
 fun LogTimerTasksRow(
     callbacks: FocusHomeCallbacks,
     modifier: Modifier = Modifier,
+    showTimer: Boolean = true,
 ) {
     val googleBlue = MaterialTheme.colorScheme.primary
     Row(
@@ -439,22 +434,22 @@ fun LogTimerTasksRow(
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Button(
+        FilledTonalButton(
             onClick = callbacks.onOpenLog,
             modifier = Modifier.weight(1f).height(52.dp),
             shape = MaterialTheme.shapes.large,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = googleBlue,
-                contentColor = MaterialTheme.colorScheme.onPrimary,
+            colors = ButtonDefaults.filledTonalButtonColors(
+                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
             ),
             contentPadding = PaddingValues(horizontal = 8.dp),
         ) {
             Icon(Icons.Rounded.Add, contentDescription = null, modifier = Modifier.size(20.dp))
             Spacer(modifier = Modifier.width(6.dp))
-            Text("Log", maxLines = 1)
+            Text(if (showTimer) "Log" else "Log work", maxLines = 1)
         }
         // Focus Timer: built-in single-session timer — no TickTick needed.
-        FilledTonalButton(
+        if (showTimer) FilledTonalButton(
             onClick = callbacks.onOpenTimer,
             modifier = Modifier.weight(1f).height(52.dp),
             shape = MaterialTheme.shapes.large,
@@ -489,7 +484,7 @@ fun LogTimerTasksRow(
                 modifier = Modifier.size(20.dp),
             )
             Spacer(modifier = Modifier.width(6.dp))
-            Text("Tasks", maxLines = 1)
+            Text(if (showTimer) "Tasks" else "Open tasks", maxLines = 1)
         }
     }
 }
@@ -499,10 +494,11 @@ fun LazyListScope.ActionsItem(
     entranceIndex: Int = 3,
     key: String = "actions",
     screenKey: String? = null,
+    showTimer: Boolean = true,
 ) {
     item(key = key) {
         HomeEntrance(index = entranceIndex, screenKey = screenKey) {
-            LogTimerTasksRow(callbacks = callbacks)
+            LogTimerTasksRow(callbacks = callbacks, showTimer = showTimer)
         }
     }
 }

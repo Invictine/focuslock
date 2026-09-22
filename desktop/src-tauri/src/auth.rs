@@ -19,6 +19,8 @@ const CLIENT_ID: &str = "3GpOIScXKeOnsuNd";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthProfile {
+    #[serde(default)]
+    pub id: String,
     pub name: String,
     pub email: String,
     pub image_url: Option<String>,
@@ -57,6 +59,7 @@ struct TokenResponse {
 
 #[derive(Debug, Deserialize)]
 struct UserInfo {
+    sub: String,
     name: Option<String>,
     email: Option<String>,
     picture: Option<String>,
@@ -91,7 +94,9 @@ impl BrowserAuthRuntime {
         }
         if let Some(value) = &session {
             let json = serde_json::to_vec(value).map_err(|error| error.to_string())?;
-            fs::write(&self.path, json).map_err(|error| error.to_string())?;
+            let pending_path = self.path.with_extension("json.pending");
+            fs::write(&pending_path, json).map_err(|error| error.to_string())?;
+            fs::rename(&pending_path, &self.path).map_err(|error| error.to_string())?;
         } else if self.path.exists() {
             fs::remove_file(&self.path).map_err(|error| error.to_string())?;
         }
@@ -133,14 +138,14 @@ fn fetch_profile(access_token: &str) -> Result<AuthProfile, String> {
         .json()
         .map_err(|error| format!("Invalid Clerk account response: {error}"))?;
     let email = info.email.or(info.preferred_username).unwrap_or_default();
-    Ok(AuthProfile { name: info.name.unwrap_or_else(|| email.clone()), email, image_url: info.picture })
+    Ok(AuthProfile { id: info.sub, name: info.name.unwrap_or_else(|| email.clone()), email, image_url: info.picture })
 }
 
 fn decode_jwt_exp(token: &str) -> Option<u64> {
     let payload = token.split('.').nth(1)?;
     let bytes = URL_SAFE_NO_PAD.decode(payload).ok()?;
     let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    claims.get("exp").and_then(|value| value.as_u64())
+    claims.get("exp").and_then(|value| value.as_u64()).map(|seconds| seconds.saturating_mul(1000))
 }
 
 fn apply_token_response(session: &mut StoredSession, response: TokenResponse) {
@@ -187,8 +192,21 @@ fn refresh_if_needed(runtime: &BrowserAuthRuntime) -> Result<Option<StoredSessio
 
 #[tauri::command]
 pub async fn get_browser_auth_state(runtime: State<'_, BrowserAuthRuntime>) -> Result<AuthState, String> {
-    let session = refresh_if_needed(&runtime)?;
-    Ok(AuthState { signed_in: session.is_some(), profile: session.map(|value| value.profile) })
+    // Loading the local account must work offline. Token refresh belongs to the
+    // actual network request, not to opening the persisted local workspace.
+    let session = runtime.session.lock().map_err(|_| "Auth session lock failed".to_string())?.clone();
+    let profile = session.map(|value| {
+        let mut profile = value.profile;
+        if profile.id.is_empty() {
+            profile.id = value.id_token.as_deref().and_then(|token| token.split('.').nth(1))
+                .and_then(|payload| URL_SAFE_NO_PAD.decode(payload).ok())
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|claims| claims.get("sub").and_then(|v| v.as_str()).map(str::to_owned))
+                .unwrap_or_default();
+        }
+        profile
+    });
+    Ok(AuthState { signed_in: profile.is_some(), profile })
 }
 
 #[tauri::command]
@@ -301,6 +319,13 @@ fn wait_for_callback(listener: TcpListener, redirect_uri: &str, verifier: &str, 
 #[cfg(test)]
 mod live_tests {
     use super::*;
+
+    #[test]
+    fn jwt_expiry_is_milliseconds() {
+        let claims = URL_SAFE_NO_PAD.encode(br#"{"exp":1800000000}"#);
+        assert_eq!(decode_jwt_exp(&format!("header.{claims}.signature")), Some(1_800_000_000_000));
+        assert_eq!(decode_jwt_exp("invalid"), None);
+    }
 
     #[test]
     #[ignore = "opens the system browser and requires an already signed-in test account"]

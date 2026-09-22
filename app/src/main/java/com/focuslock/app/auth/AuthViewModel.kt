@@ -8,6 +8,7 @@ import com.clerk.api.session.GetTokenOptions
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 sealed interface FocusAuthState {
@@ -48,6 +49,12 @@ class AuthViewModel : ViewModel() {
 
     fun isConfigured(): Boolean = configured
 
+    /** Stable Clerk subject used to scope the on-device sync cache. */
+    suspend fun getAccountId(): String? {
+        if (!configured) return null
+        return try { Clerk.userFlow.first()?.id?.trim()?.ifBlank { null } } catch (_: Exception) { null }
+    }
+
     /**
      * JWT for Convex (requires a "convex" JWT template in the Clerk dashboard).
      * Returns null when offline/unsigned — caller must skip sync.
@@ -56,11 +63,9 @@ class AuthViewModel : ViewModel() {
         if (!configured) return null
         return try {
             var token: String? = null
-            try {
-                Clerk.auth.getToken(GetTokenOptions(template = "convex")).onSuccess { token = it }
-            } catch (_: Exception) {
-                Clerk.auth.getToken().onSuccess { token = it }
-            }
+            // Convex must receive the Clerk JWT template audience. Falling back to the
+            // default session JWT produces an opaque 401 and makes sync look flaky.
+            Clerk.auth.getToken(GetTokenOptions(template = "convex")).onSuccess { token = it }
             token?.ifBlank { null }
         } catch (_: Exception) { null }
     }

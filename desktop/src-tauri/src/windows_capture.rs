@@ -42,6 +42,18 @@ pub fn normalized_domain(value: &str) -> Option<String> {
     }
     Some(host.strip_prefix("www.").unwrap_or(&host).to_string())
 }
+
+/// The value exposed by a browser's address bar is also the value being typed
+/// before navigation is committed. Do not turn that transient edit into a
+/// tracked domain; once the address bar loses keyboard focus, the committed
+/// page URL is still captured and normal website enforcement remains intact.
+fn browser_domain_value(value: &str, has_keyboard_focus: bool) -> Option<String> {
+    if has_keyboard_focus {
+        return None;
+    }
+    normalized_domain(value)
+}
+
 pub fn is_supported_browser(app_id: &str) -> bool {
     matches!(
         app_id.to_ascii_lowercase().as_str(),
@@ -76,7 +88,7 @@ mod platform {
     use windows::{
         core::{BOOL, PWSTR},
         Win32::{
-            Foundation::{CloseHandle, HWND, LPARAM},
+            Foundation::{CloseHandle, HWND, LPARAM, RECT},
             System::{
                 Com::{
                     CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
@@ -92,10 +104,15 @@ mod platform {
                     TreeScope_Descendants, UIA_ControlTypePropertyId, UIA_EditControlTypeId,
                     UIA_ValuePatternId,
                 },
-                Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO},
+                Input::KeyboardAndMouse::{
+                    keybd_event, GetLastInputInfo, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, LASTINPUTINFO,
+                    VK_MENU,
+                },
                 WindowsAndMessaging::{
-                    EnumWindows, GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW,
-                    GetWindowThreadProcessId, IsWindowVisible, ShowWindow, SW_MINIMIZE,
+                    EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowTextLengthW,
+                    GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
+                    SetForegroundWindow, SetWindowPos, ShowWindow, HWND_TOPMOST, SWP_NOMOVE,
+                    SWP_NOSIZE, SWP_SHOWWINDOW, SW_MINIMIZE,
                 },
             },
         },
@@ -154,6 +171,68 @@ mod platform {
             }
             let _ = ShowWindow(hwnd, SW_MINIMIZE);
             Ok(())
+        }
+    }
+
+    pub fn foreground_window() -> Option<isize> {
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.0.is_null() {
+                None
+            } else {
+                Some(hwnd.0 as isize)
+            }
+        }
+    }
+
+    /// Physical screen rectangle (`left`, `top`, `right`, `bottom`) of a window.
+    pub fn window_rect(hwnd: isize) -> Option<(i32, i32, i32, i32)> {
+        let hwnd = HWND(hwnd as *mut _);
+        if hwnd.0.is_null() {
+            return None;
+        }
+        unsafe {
+            let mut rect = RECT::default();
+            GetWindowRect(hwnd, &mut rect).ok()?;
+            Some((rect.left, rect.top, rect.right, rect.bottom))
+        }
+    }
+
+    pub fn minimize_window(hwnd: isize) -> Result<(), String> {
+        let hwnd = HWND(hwnd as *mut _);
+        if hwnd.0.is_null() {
+            return Err("No window to minimize".into());
+        }
+        unsafe {
+            if !IsWindow(Some(hwnd)).as_bool() {
+                return Err("Blocked window is no longer available".into());
+            }
+            let _ = ShowWindow(hwnd, SW_MINIMIZE);
+            Ok(())
+        }
+    }
+
+    /// Best-effort foreground grab for the blocker window. Windows refuses
+    /// `SetForegroundWindow` from a background process unless it recently
+    /// received input, so an ALT tap is used to lift that restriction.
+    pub fn focus_window(hwnd: isize) {
+        let hwnd = HWND(hwnd as *mut _);
+        if hwnd.0.is_null() {
+            return;
+        }
+        unsafe {
+            keybd_event(VK_MENU.0 as u8, 0, KEYBD_EVENT_FLAGS(0), 0);
+            keybd_event(VK_MENU.0 as u8, 0, KEYEVENTF_KEYUP, 0);
+            let _ = SetForegroundWindow(hwnd);
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+            );
         }
     }
 
@@ -281,6 +360,16 @@ mod platform {
                 if !likely {
                     continue;
                 }
+                // A focused address-like edit control contains an omnibox
+                // candidate, not necessarily the page the browser is showing.
+                // This also protects a React/Tauri picker when Chromium exposes
+                // its input in the same UI Automation branch. The next sample
+                // after Enter sees the same address bar unfocused and enforces
+                // a genuinely navigated blocked domain.
+                let has_keyboard_focus = element
+                    .CurrentHasKeyboardFocus()
+                    .map(|focused| focused.as_bool())
+                    .unwrap_or(false);
                 let pattern: IUIAutomationValuePattern =
                     match element.GetCurrentPatternAs(UIA_ValuePatternId) {
                         Ok(v) => v,
@@ -290,7 +379,7 @@ mod platform {
                     .CurrentValue()
                     .map(|v| v.to_string())
                     .unwrap_or_default();
-                if let Some(domain) = normalized_domain(&value) {
+                if let Some(domain) = browser_domain_value(&value, has_keyboard_focus) {
                     return Ok(Some(domain));
                 }
             }
@@ -311,11 +400,24 @@ mod platform {
     pub fn minimize_foreground() -> Result<(), String> {
         Ok(())
     }
+    pub fn foreground_window() -> Option<isize> {
+        None
+    }
+    pub fn window_rect(_: isize) -> Option<(i32, i32, i32, i32)> {
+        None
+    }
+    pub fn minimize_window(_: isize) -> Result<(), String> {
+        Ok(())
+    }
+    pub fn focus_window(_: isize) {}
     pub fn get_running_windows() -> Result<Vec<RunningApp>, String> {
         Ok(Vec::new())
     }
 }
-pub use platform::{capture_foreground, get_running_windows, idle_seconds, minimize_foreground};
+pub use platform::{
+    capture_foreground, focus_window, foreground_window, get_running_windows, idle_seconds,
+    minimize_foreground, minimize_window, window_rect,
+};
 
 #[cfg(test)]
 mod tests {
@@ -335,6 +437,11 @@ mod tests {
     fn rejects_search_and_files() {
         assert_eq!(normalized_domain("cats doing things"), None);
         assert_eq!(normalized_domain("file:///C:/private.txt"), None);
+    }
+    #[test]
+    fn ignores_focused_address_bar_candidates_but_tracks_committed_values() {
+        assert_eq!(browser_domain_value("x.com", true), None);
+        assert_eq!(browser_domain_value("x.com", false), Some("x.com".into()));
     }
     #[test]
     fn recognizes_browsers() {

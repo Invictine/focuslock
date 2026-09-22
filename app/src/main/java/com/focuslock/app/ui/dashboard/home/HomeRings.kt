@@ -9,12 +9,18 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Button
 import androidx.compose.material3.Text
+import androidx.compose.material.icons.rounded.Timer
+import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -38,12 +44,26 @@ fun LazyListScope.HomeRingsContent(
     state: FocusHomeState,
     callbacks: FocusHomeCallbacks,
 ) {
-    HeaderItem(state, callbacks, screenKey = "home_rings")
+    HeaderItem(state, callbacks, screenKey = "home_rings", includeFrog = false)
     SetupBannerItem(state, callbacks, screenKey = "home_rings")
 
     item(key = "hero") {
         HomeEntrance(index = 2, screenKey = "home_rings") {
             RingsHero(state = state, callbacks = callbacks)
+        }
+    }
+
+    FrogCardItem(entranceIndex = 3)
+
+    // Keep the secondary Log / Timer / Tasks choices below the primary hero action.
+    ActionsItem(callbacks, entranceIndex = 3, key = "rings-actions", screenKey = "home_rings", showTimer = false)
+
+    item(key = "today-details") {
+        HomeEntrance(index = 4, screenKey = "home_rings") {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                TopAppCard(state = state, callbacks = callbacks)
+                TasksSummaryCard(state = state, callbacks = callbacks)
+            }
         }
     }
 
@@ -71,34 +91,27 @@ private fun RingsHero(
         animationSpec = MotionTokens.ProgressFloat,
         label = "focus-sweep",
     )
-    val tasksSweep by animateFloatAsState(
-        targetValue = state.tasksProgress,
-        animationSpec = MotionTokens.ProgressFloat,
-        label = "tasks-sweep",
-    )
     val ringPink = MaterialTheme.colorScheme.primary
-    val ringCyan = MaterialTheme.colorScheme.tertiary
     val ringTrack = MaterialTheme.colorScheme.surfaceVariant
     val subtitleGray = MaterialTheme.colorScheme.onSurfaceVariant
-    val googleBlue = MaterialTheme.colorScheme.primary
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Row(
+    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        // Give the progress cue and summaries a comfortable reading width on phones.
+        // The former side-by-side layout squeezed two cards into a narrow column.
+        Column(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             // Ring variant: fixed Canvas — proper stroke/inset proportions.
             Box(
-                modifier = Modifier.size(140.dp),
+                modifier = Modifier.size(132.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 Canvas(modifier = Modifier.fillMaxSize()) {
                     val stroke = 12.dp.toPx()
-                    val gap = 8.dp.toPx()
                     val cx = size.width / 2
                     val cy = size.height / 2
                     val outerR = size.minDimension / 2 - stroke / 2
-                    val innerR = outerR - stroke - gap
                     fun topLeft(r: Float) = Offset(cx - r, cy - r)
                     fun arcSize(r: Float) = androidx.compose.ui.geometry.Size(r * 2, r * 2)
                     // Tracks
@@ -111,15 +124,6 @@ private fun RingsHero(
                         size = arcSize(outerR),
                         style = Stroke(width = stroke, cap = StrokeCap.Round),
                     )
-                    drawArc(
-                        color = ringTrack,
-                        startAngle = -90f,
-                        sweepAngle = 360f,
-                        useCenter = false,
-                        topLeft = topLeft(innerR),
-                        size = arcSize(innerR),
-                        style = Stroke(width = stroke, cap = StrokeCap.Round),
-                    )
                     // Progress arcs — skipped at zero so idle rings stay perfectly clean.
                     if (focusSweep > 0.001f) {
                         drawArc(
@@ -129,17 +133,6 @@ private fun RingsHero(
                             useCenter = false,
                             topLeft = topLeft(outerR),
                             size = arcSize(outerR),
-                            style = Stroke(width = stroke, cap = StrokeCap.Round),
-                        )
-                    }
-                    if (tasksSweep > 0.001f) {
-                        drawArc(
-                            color = ringCyan,
-                            startAngle = -90f,
-                            sweepAngle = 360f * tasksSweep,
-                            useCenter = false,
-                            topLeft = topLeft(innerR),
-                            size = arcSize(innerR),
                             style = Stroke(width = stroke, cap = StrokeCap.Round),
                         )
                     }
@@ -159,31 +152,26 @@ private fun RingsHero(
                         color = subtitleGray,
                     )
                 }
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .offset(y = 10.dp)
-                        .size(24.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(googleBlue),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = if (state.tasksLoaded) "+${state.tasksDone}" else "—",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onPrimary,
-                    )
-                }
             }
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+            Text(
+                text = "${if (state.focusMinutesLoaded) state.focusMinutes else "…"} min focused today",
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            if (state.tasksLoaded) Text(
+                text = "${state.tasksDone} of ${state.tasksGoal} tasks complete",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Button(
+                onClick = callbacks.onOpenTimer,
+                modifier = Modifier.fillMaxWidth().height(52.dp),
+                shape = MaterialTheme.shapes.large,
             ) {
-                TopAppCard(state = state, callbacks = callbacks)
-                TasksSummaryCard(state = state, callbacks = callbacks)
+                Icon(Icons.Rounded.Timer, contentDescription = null)
+                androidx.compose.foundation.layout.Spacer(modifier = Modifier.width(8.dp))
+                Text("Start focus timer", style = MaterialTheme.typography.titleMedium)
             }
         }
-        LogTimerTasksRow(callbacks = callbacks)
     }
 }

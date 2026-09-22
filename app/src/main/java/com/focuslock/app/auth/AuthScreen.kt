@@ -170,18 +170,18 @@ fun SignInScreen(onContinueOffline: () -> Unit) {
                         ) {
                             PriorityFeatureRow(
                                 icon = Icons.Rounded.Lock,
-                                title = "Multi-Device Nuke Lock",
-                                description = "Desktop companion & phone lock together during focus."
+                                title = "Multi-device focus lock",
+                                description = "Keep your phone and computer focused together."
                             )
                             PriorityFeatureRow(
                                 icon = Icons.Rounded.CloudSync,
-                                title = "Real-Time Cloud Sync",
-                                description = "Focus credits & daily habits sync seamlessly via Convex cloud."
+                                title = "Cloud sync",
+                                description = "Keep focus credits and habits in sync."
                             )
                             PriorityFeatureRow(
                                 icon = Icons.Rounded.Laptop,
-                                title = "Desktop Companion",
-                                description = "Enforce boundaries across macOS, Windows, and browsers."
+                                title = "Desktop companion",
+                                description = "Apply the same boundaries across your devices."
                             )
                         }
                     }
@@ -227,7 +227,7 @@ fun SignInScreen(onContinueOffline: () -> Unit) {
                             }
                             Spacer(Modifier.width(8.dp))
                             Text(
-                                if (signInLoading) "Opening sign-in…" else "Sign In to Priority Account",
+                                if (signInLoading) "Opening sign-in…" else "Sign in to FocusLock",
                                 style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
                             )
                         }
@@ -247,7 +247,7 @@ fun SignInScreen(onContinueOffline: () -> Unit) {
                         ) {
                             Icon(Icons.Rounded.Mail, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(8.dp))
-                            Text("Sign in with email form")
+                            Text("Use email instead")
                         }
                     }
                 }
@@ -289,7 +289,7 @@ private fun SignInHeadline(visible: Boolean) {
     ) {
         StaggeredEnter(visible = visible, index = 1, screenKey = "auth") {
             Text(
-                "FocusLock Priority Account",
+                "Stay focused everywhere",
                 style = MaterialTheme.typography.headlineMedium.copy(
                     fontWeight = FontWeight.Bold,
                     letterSpacing = (-0.4).sp
@@ -302,7 +302,7 @@ private fun SignInHeadline(visible: Boolean) {
         Spacer(Modifier.height(8.dp))
         StaggeredEnter(visible = visible, index = 2, screenKey = "auth") {
             Text(
-                "Activate cross-device discipline. Locking your phone instantly locks your computer companion.",
+                "Sign in to sync your focus boundaries, credits, and progress across devices.",
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
@@ -320,10 +320,10 @@ private fun SignInFooter(visible: Boolean, onContinueOffline: () -> Unit) {
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             TextButton(onClick = onContinueOffline) {
-                Text("Continue in Offline Mode (Local Only)", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Continue offline", color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Text(
-                "Offline mode keeps boundaries, credits, and stats on this device only. You can sign in later from Account.",
+                "Your boundaries and progress stay on this device. Sign in later from Account to sync.",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
@@ -478,13 +478,6 @@ fun AccountScreen(
     var showSignOutConfirm by remember { mutableStateOf(false) }
     // MainActivity surfaces SyncStatus.Syncing as "Syncing…" — use it to lock the button.
     val isSyncing = syncStatus.startsWith("Syncing")
-    // Memoize the brush so a new gradient isn't allocated on every recomposition.
-    val accountPrimary = MaterialTheme.colorScheme.primary
-    val accountTertiary = MaterialTheme.colorScheme.tertiary
-    val accountGradient = remember(accountPrimary, accountTertiary) {
-        Brush.linearGradient(colors = listOf(accountPrimary, accountTertiary))
-    }
-
     // No internal verticalScroll/fillMaxSize: renders at content height so it can be
     // hosted inside a scrollable parent (MainActivity's AccountTab owns the scrolling).
     Column(
@@ -494,15 +487,6 @@ fun AccountScreen(
             .padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Text(
-            "Account",
-            style = MaterialTheme.typography.headlineMedium.copy(
-                fontWeight = FontWeight.Bold,
-                letterSpacing = (-0.4).sp
-            ),
-            color = MaterialTheme.colorScheme.onSurface
-        )
-
         if (isSignedIn) {
             // Priority Account Active Hero Card
             Card(
@@ -645,7 +629,7 @@ fun AccountScreen(
                 Text("Sign Out")
             }
         } else {
-            // Signed-out Priority Account Card (The prominent "Priority Account" experience)
+            // Keep the signed-out state focused on one decision: sign in to sync.
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.surfaceContainer
@@ -655,7 +639,7 @@ fun AccountScreen(
             ) {
                 Column(
                     modifier = Modifier.padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
@@ -665,7 +649,7 @@ fun AccountScreen(
                             modifier = Modifier
                                 .size(48.dp)
                                 .background(
-                                    brush = accountGradient,
+                                    color = MaterialTheme.colorScheme.primaryContainer,
                                     shape = RoundedCornerShape(14.dp)
                                 ),
                             contentAlignment = Alignment.Center
@@ -673,19 +657,19 @@ fun AccountScreen(
                             Icon(
                                 imageVector = Icons.Rounded.Shield,
                                 contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onPrimary,
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
                                 modifier = Modifier.size(24.dp)
                             )
                         }
 
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "FocusLock Priority Account",
+                                text = "Sync across your devices",
                                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                             Text(
-                                text = "Cross-device sync & lock enforcement",
+                                text = "Sign in to keep boundaries and progress in sync.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -693,22 +677,6 @@ fun AccountScreen(
                     }
 
                     HorizontalDivider(color = MaterialTheme.colorScheme.surfaceContainerHighest)
-
-                    PriorityFeatureRow(
-                        icon = Icons.Rounded.Lock,
-                        title = "Multi-Device Nuke Lock",
-                        description = "Locking on mobile locks desktop companion & browser."
-                    )
-                    PriorityFeatureRow(
-                        icon = Icons.Rounded.CloudSync,
-                        title = "Real-Time Cloud Sync",
-                        description = "Credits, task records, and boundaries sync across devices."
-                    )
-                    PriorityFeatureRow(
-                        icon = Icons.Rounded.Computer,
-                        title = "Desktop Companion",
-                        description = "Connects with the macOS/Windows desktop companion app."
-                    )
 
                     Button(
                         onClick = {
@@ -723,42 +691,18 @@ fun AccountScreen(
                             containerColor = MaterialTheme.colorScheme.primary,
                             contentColor = MaterialTheme.colorScheme.onPrimary
                         ),
-                        modifier = Modifier.fillMaxWidth().height(50.dp)
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
                     ) {
                         Icon(Icons.Rounded.Stars, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(8.dp))
                         Text(
-                            "Sign In to Priority Account",
+                            "Sign in to sync",
                             style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
                         )
                     }
                 }
             }
 
-            // Current Mode Notice
-            Surface(
-                color = MaterialTheme.colorScheme.surfaceContainerLow,
-                shape = RoundedCornerShape(16.dp),
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier.padding(14.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Icon(
-                        Icons.Rounded.Info,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Text(
-                        "Currently running in Offline Mode. Focus credits, boundaries, and app locks are stored locally on this device.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
         }
     }
 

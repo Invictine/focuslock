@@ -70,8 +70,9 @@ import com.focuslock.app.service.InstalledAppsRepository
  * one-off dp literals so hierarchy (section gaps vs. item gaps) stays consistent.
  */
 object UiTokens {
-    val ScreenPadding = 16.dp
-    val SectionGap = 24.dp
+    // Shared edge rhythm keeps screens readable on compact phones.
+    val ScreenPadding = 20.dp
+    val SectionGap = 28.dp
     val ItemGap = 12.dp
     val IconTileSize = 40.dp
     val BadgeSize = 44.dp

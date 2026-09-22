@@ -1,15 +1,17 @@
 import { createClerkClient } from '@clerk/chrome-extension/client';
 
 const publishableKey = process.env.CLERK_PUBLISHABLE_KEY;
+const syncHost = process.env.CLERK_SYNC_HOST;
+const browserSignInUrl = process.env.CLERK_SIGN_IN_URL;
 const optionsUrl = chrome.runtime.getURL('options/options.html');
-const extensionRoot = chrome.runtime.getURL('.');
-const clerk = createClerkClient({ publishableKey });
+let clerk;
 
 const elements = {
   title: document.getElementById('accountTitle'),
   detail: document.getElementById('accountDetail'),
   state: document.getElementById('accountState'),
   signIn: document.getElementById('accountSignIn'),
+  emailSignIn: document.getElementById('accountEmailSignIn'),
   sync: document.getElementById('accountSync'),
   signOut: document.getElementById('accountSignOut'),
   error: document.getElementById('accountError'),
@@ -23,9 +25,14 @@ const elements = {
   devices: document.getElementById('accountDevices'),
 };
 
-let authMounted = false;
+let authTabId = null;
+let returnTabId = null;
+let authTimer = null;
+let authDeadline = 0;
+let checkingAuth = false;
 let cloud = null;
 let syncing = false;
+let openingBrowser = false;
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({
@@ -76,54 +83,78 @@ function renderDevices(devices) {
   }).join('');
 }
 
-function unmountAuth() {
-  if (!authMounted) return;
-  clerk.unmountSignIn(elements.auth);
-  authMounted = false;
-  elements.auth.hidden = true;
-  history.replaceState({}, '', optionsUrl);
-}
-
-function themeToken(name) {
-  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-}
-
-function showAuth() {
-  if (clerk.session) return;
-  elements.auth.hidden = false;
-  if (!authMounted) {
-    clerk.mountSignIn(elements.auth, {
-      routing: 'hash',
-      forceRedirectUrl: optionsUrl,
-      fallbackRedirectUrl: optionsUrl,
-      signUpForceRedirectUrl: optionsUrl,
-      signUpFallbackRedirectUrl: optionsUrl,
-      afterSignOutUrl: optionsUrl,
-      appearance: {
-        variables: {
-          colorPrimary: themeToken('--fl-primary'),
-          colorTextOnPrimary: themeToken('--fl-on-primary'),
-          colorText: themeToken('--fl-on-surface'),
-          colorTextSecondary: themeToken('--fl-on-surface-variant'),
-          colorBackground: themeToken('--fl-surface-container-low'),
-          colorInputBackground: themeToken('--fl-surface-container-lowest'),
-          colorInputText: themeToken('--fl-on-surface'),
-          borderRadius: '12px',
-        },
-        elements: {
-          socialButtonsRoot: { display: 'none' },
-          dividerRow: { display: 'none' },
-        },
-      },
-    });
-    authMounted = true;
+async function checkBrowserSignIn() {
+  if (checkingAuth || !authDeadline) return;
+  if (Date.now() > authDeadline) {
+    clearInterval(authTimer);
+    authDeadline = 0;
+    elements.signIn.disabled = false;
+    sessionStorage.removeItem('focuslock.browserAuthPending');
+    elements.error.textContent = 'Sign-in has not reached FocusLock. Return here and try again.';
+    elements.error.hidden = false;
+    return;
   }
-  elements.auth.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  checkingAuth = true;
+  try {
+    await clerk.client.reload();
+    if (!clerk.session || !clerk.user) return;
+    const background = await chrome.runtime.sendMessage({ type: 'cloudAuthRefresh' });
+    if (!background?.signedIn) throw new Error(background?.error || 'The background tracker has not connected yet');
+    clearInterval(authTimer);
+    authDeadline = 0;
+    sessionStorage.removeItem('focuslock.browserAuthPending');
+    render();
+    if (returnTabId != null) {
+      await chrome.tabs.update(returnTabId, { active: true });
+      if (authTabId != null) await chrome.tabs.remove(authTabId).catch(() => {});
+    }
+    await refreshCloud(true);
+  } catch (error) {
+    elements.error.textContent = `Waiting for account connection: ${error?.message || error}`;
+    elements.error.hidden = false;
+  } finally {
+    checkingAuth = false;
+  }
+}
+
+async function openBrowserSignIn() {
+  if (openingBrowser || authDeadline) return;
+  openingBrowser = true;
+  elements.signIn.disabled = true;
+  elements.error.hidden = true;
+  try {
+    if (!browserSignInUrl || !/^https?:\/\//i.test(browserSignInUrl)) {
+      elements.error.textContent = 'Browser sign-in is not configured. Rebuild the extension with its Clerk configuration.';
+      elements.error.hidden = false;
+      return;
+    }
+    render();
+    sessionStorage.setItem('focuslock.browserAuthPending', '1');
+    returnTabId = (await chrome.tabs.getCurrent())?.id ?? null;
+    authDeadline = Date.now() + 5 * 60 * 1000;
+    authTabId = (await chrome.tabs.create({ url: browserSignInUrl, active: true })).id;
+    clearInterval(authTimer);
+    authTimer = setInterval(() => void checkBrowserSignIn(), 2000);
+    void checkBrowserSignIn();
+    elements.title.textContent = 'Finish signing in in the new tab';
+    elements.detail.textContent = 'Complete sign-in there. FocusLock will bring you back when your account connects.';
+  } catch (error) {
+    clearInterval(authTimer);
+    authDeadline = 0;
+    sessionStorage.removeItem('focuslock.browserAuthPending');
+    elements.error.textContent = `Could not open browser sign-in: ${error?.message || error}. Please try again.`;
+    elements.error.hidden = false;
+  } finally {
+    openingBrowser = false;
+    elements.signIn.disabled = Boolean(authDeadline);
+  }
 }
 
 function render() {
   const signedIn = Boolean(clerk.user && clerk.session);
   elements.signIn.hidden = signedIn;
+  elements.signIn.disabled = openingBrowser || Boolean(authDeadline);
+  if (elements.emailSignIn) elements.emailSignIn.hidden = true;
   elements.sync.hidden = !signedIn;
   elements.signOut.hidden = !signedIn;
   elements.sync.disabled = syncing;
@@ -131,17 +162,14 @@ function render() {
   if (!signedIn) {
     if (elements.badge) { elements.badge.textContent = 'Not connected'; elements.badge.classList.remove('prio'); }
     if (elements.cloud) elements.cloud.textContent = '';
-    if (elements.pitch) elements.pitch.hidden = false;
+    if (elements.pitch) elements.pitch.hidden = true;
     if (elements.devicesCard) elements.devicesCard.hidden = true;
     elements.title.textContent = 'Connect your FocusLock account';
-    elements.detail.textContent = authMounted
-      ? 'Use the same account email. Clerk will send a verification code; Google OAuth cannot return directly to a Chrome extension.'
-      : 'Sign in here to sync Chrome website time with Android and Windows.';
+    elements.detail.textContent = 'Sign in securely in your browser to sync Chrome, Android, and Windows.';
     elements.state.innerHTML = '<span class="badge">Chrome local only</span><span class="badge">Cloud sync off</span>';
     return;
   }
 
-  unmountAuth();
   const email = clerk.user.primaryEmailAddress?.emailAddress || clerk.user.fullName || 'FocusLock account';
   const devices = Array.isArray(cloud?.devices) ? cloud.devices : [];
   const browser = devices.find((device) => device.platform === 'browser');
@@ -182,8 +210,9 @@ async function refreshCloud(forceSync = false) {
   }
 }
 
-elements.signIn.addEventListener('click', showAuth);
-if (elements.signInPitch) elements.signInPitch.addEventListener('click', showAuth);
+elements.signIn.addEventListener('click', openBrowserSignIn);
+if (elements.emailSignIn) elements.emailSignIn.addEventListener('click', openBrowserSignIn);
+if (elements.signInPitch) elements.signInPitch.addEventListener('click', openBrowserSignIn);
 elements.sync.addEventListener('click', () => refreshCloud(true));
 elements.signOut.addEventListener('click', async () => {
   await clerk.signOut();
@@ -193,21 +222,22 @@ elements.signOut.addEventListener('click', async () => {
 });
 
 async function init() {
-  await clerk.load({
-    afterSignOutUrl: optionsUrl,
-    signInForceRedirectUrl: optionsUrl,
-    signUpForceRedirectUrl: optionsUrl,
-    allowedRedirectOrigins: [extensionRoot],
-    allowedRedirectProtocols: ['chrome-extension:'],
-  });
+  clerk = await createClerkClient({ publishableKey, syncHost, background: true });
   clerk.addListener(() => {
     render();
     if (clerk.session && !cloud && !syncing) void refreshCloud(true);
   });
   render();
-  if (clerk.session) await refreshCloud(true);
-  else if (new URLSearchParams(location.search).get('account') === 'signin') showAuth();
+  if (clerk.session) {
+    await chrome.runtime.sendMessage({ type: 'cloudAuthRefresh' });
+    await refreshCloud(true);
+  }
 }
+
+window.addEventListener('focus', () => {
+  if (!sessionStorage.getItem('focuslock.browserAuthPending')) return;
+  void checkBrowserSignIn();
+});
 
 init().catch((error) => {
   elements.error.textContent = `Account connection could not start: ${error?.message || error}`;

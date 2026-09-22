@@ -1,12 +1,13 @@
 import { createClerkClient } from '@clerk/chrome-extension/client';
 
 const publishableKey = process.env.CLERK_PUBLISHABLE_KEY;
+const syncHost = process.env.CLERK_SYNC_HOST;
 const M = self.FocusLockMatcher;
 const S = self.FocusLockStore;
 const app = document.getElementById('app');
 const extensionRoot = chrome.runtime.getURL('.');
 const popupUrl = chrome.runtime.getURL('popup/popup.html');
-const clerk = createClerkClient({ publishableKey });
+let clerk = null;
 
 let activeTab = null;
 let activeUrl = '';
@@ -63,7 +64,7 @@ function icon(name) {
 }
 
 function render() {
-  if (!clerk.loaded) return;
+  if (!clerk?.loaded) return;
   const signedIn = Boolean(clerk.user && clerk.session);
   const localSeconds = localState?.stats?.[S.todayKey()]?.[domain] || 0;
   const localTotal = Object.values(localState?.stats?.[S.todayKey()] || {}).reduce((sum, value) => sum + Number(value || 0), 0);
@@ -165,7 +166,7 @@ function openAccountPage(view) {
 }
 
 async function refreshCloud(forceSync) {
-  if (!clerk.session) return;
+  if (!clerk?.session) return;
   busy = true;
   render();
   try {
@@ -179,25 +180,22 @@ async function refreshCloud(forceSync) {
 }
 
 async function init() {
+  clerk = await createClerkClient({ publishableKey, syncHost, background: true });
   [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   activeUrl = activeTab?.url || '';
   // Internal browser/extension pages are not blockable websites. Keep the
   // popup useful without exposing the extension id as a fake domain.
   domain = /^https?:\/\//i.test(activeUrl) ? M.domainOf(activeUrl) : '';
   localState = await S.load();
-  await clerk.load({
-    afterSignOutUrl: popupUrl,
-    signInForceRedirectUrl: popupUrl,
-    signUpForceRedirectUrl: popupUrl,
-    allowedRedirectOrigins: [extensionRoot],
-    allowedRedirectProtocols: ['chrome-extension:'],
-  });
   clerk.addListener(() => {
     render();
     if (clerk.session && !cloud && !busy) void refreshCloud(true);
   });
   render();
-  if (clerk.session) await refreshCloud(true);
+  if (clerk.session) {
+    await chrome.runtime.sendMessage({ type: 'cloudAuthRefresh' });
+    await refreshCloud(true);
+  }
 }
 
 init().catch((error) => {

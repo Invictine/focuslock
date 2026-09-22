@@ -16,6 +16,8 @@ import android.widget.Toast
 import androidx.core.content.ContextCompat
 import com.focuslock.app.FocusLockApplication
 import com.focuslock.app.data.repository.FrogRepository
+import com.focuslock.app.data.repository.PermanentBlocksRepository
+import com.focuslock.app.data.repository.PermanentBlockPolicy
 import com.focuslock.app.data.repository.SettingsRepository
 import com.focuslock.app.data.repository.frogCycleDate
 import com.focuslock.app.ui.blocker.BlockerActivity
@@ -113,6 +115,10 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     // TargetGroupsRepository's in-memory index warm, so the per-package group-limit
     // check reads memory only (never DataStore) while an app is opening.
     private var targetGroupsJob: Job? = null
+    private var permanentBlocksJob: Job? = null
+
+    @Volatile
+    private var permanentPackages: Set<String> = emptySet()
 
     // Default launcher / IME packages for the frog gate's brick mitigation (F7):
     // resolved lazily and cached; null = not resolved (yet).
@@ -168,6 +174,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         }
 
         private const val SCHEDULE_REFRESH_INTERVAL_MS = 30_000L
+        private const val STRICT_NUKE_ATTEMPTS = 5
         private const val ADMIN_STATE_TTL_MS = 60_000L
 
         /** TickTick foreground is where the frog gets done — never frog-blocked. */
@@ -330,9 +337,48 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 Log.w(TAG, "target-groups collector failed", e)
             }
         }
+        permanentBlocksJob?.cancel()
+        permanentBlocksJob = serviceScope.launch {
+            try {
+                FocusLockApplication.instance.permanentBlocksRepository.packagesFlow.collect {
+                    val previous = permanentPackages
+                    permanentPackages = it
+                    val foreground = currentForegroundPackage
+                    if (foreground != null && foreground in (it - previous) &&
+                        !PermanentBlocksRepository.isProtectedPackage(this@AppMonitorAccessibilityService, foreground)) {
+                        // A block can be added while the target is already foreground;
+                        // no window-state event is guaranteed, so enforce immediately.
+                        recordBlock(foreground, "permanent")
+                        triggerBlocker(foreground, website = null, reason = "permanent")
+                    }
+                }
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                Log.w(TAG, "permanent-block collector failed", e)
+            }
+        }
         // Runtime wake/unlock delivery: the manifest receiver covers boot/package
         // replace only (USER_PRESENT/SCREEN_ON are not reliably manifest-delivered).
         registerFrogWakeReceiver()
+        // Rebinding after an update/process restart may happen after the target's
+        // window event. Inspect the existing window so a motionless foreground app
+        // cannot escape enforcement until the next app switch.
+        serviceScope.launch(Dispatchers.Main) {
+            repeat(5) {
+                if (currentForegroundPackage != null) return@launch
+                val root = rootInActiveWindow
+                val foreground = try { root?.packageName?.toString() }
+                finally { @Suppress("DEPRECATION") root?.recycle() }
+                if (foreground != null) {
+                    currentForegroundPackage = foreground
+                    if (foreground != applicationContext.packageName) {
+                        handleForegroundPackageChanged(foreground, null)
+                    }
+                    return@launch
+                }
+                delay(250)
+            }
+        }
     }
 
     /**
@@ -506,7 +552,25 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 }
             } catch (_: Exception) { }
 
-            // 1. TickTick active time tracking
+            // Permanent blocks are the strongest app boundary: no credits, grace,
+            // emergency pass, schedule, or Strict Mode state can bypass them.
+            // Await the one-time DataStore warm-up so the first foreground event after
+            // service startup cannot slip through before the collector emits.
+            try { app.permanentBlocksRepository.warm() } catch (_: Exception) { }
+            val legacyPermanent = try { settings.isAppPermanent(packageName) } catch (_: Exception) { false }
+            val dedicatedPermanent = app.permanentBlocksRepository.isPermanentlyBlocked(packageName)
+            val protected = try {
+                PermanentBlocksRepository.isProtectedPackage(this@AppMonitorAccessibilityService, packageName)
+            } catch (_: Exception) { true }
+            if (PermanentBlockPolicy.shouldEnforce(dedicatedPermanent || legacyPermanent, protected)) {
+                Log.w(TAG, "Permanently blocked app launched: $packageName")
+                recordBlock(packageName, "permanent")
+                triggerBlocker(packageName, website = null, reason = "permanent")
+                return@launch
+            }
+
+            // 1. TickTick active time tracking. It remains exempt only when it has
+            // not itself been deliberately placed in the permanent store.
             if (packageName == TICKTICK_PACKAGE) {
                 startTickTickActiveTracking()
                 return@launch
@@ -544,7 +608,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             // member (app + website) counts against one cap. Applies to any group
             // member, whether or not the app itself has its own limit or is blocked.
             val groupLimitExceeded = try {
-                isGroupLimitExceeded(app, packageName)
+                isGroupLimitExceeded(app, "app", packageName)
             } catch (_: Exception) {
                 false
             }
@@ -552,14 +616,6 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 Log.w(TAG, "Group daily limit reached for $packageName — blocking")
                 recordBlock(packageName, "limit")
                 triggerBlocker(packageName, website = null, reason = "limit")
-                return@launch
-            }
-
-            // 2a. Permanent block: cannot be bypassed by balance, schedule, or strict mode.
-            if (settings.isAppPermanent(packageName)) {
-                Log.w(TAG, "Permanently blocked app launched: $packageName")
-                recordBlock(packageName, "permanent")
-                triggerBlocker(packageName, website = null, reason = "permanent")
                 return@launch
             }
 
@@ -585,10 +641,26 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             // NOTE: TickTickNotificationListener has no bypass — it only banks credits
             // and broadcasts ACTION_CREDIT_UPDATED, which BlockerActivity consumes
             // WITHOUT finish() while strict is on.
-            val strict = try { settings.isLockdownModeEnabled() } catch (_: Exception) { false }
+            // Strict Mode can be activated by a persisted place/window rule as well as
+            // the manual commitment.  The automation read is deliberately off the hot
+            // DataStore path and fails open if location permission/provider state is
+            // unavailable.
+            val strict = try {
+                settings.isLockdownModeEnabled() ||
+                    app.strictModeAutomationRepository.isActivationActiveNow()
+            } catch (_: Exception) { false }
             if (strict) {
                 recordBlock(packageName, "manual")
-                triggerBlocker(packageName, website = null, reason = "manual")
+                val attempt = try { settings.recordStrictBlockedAttempt(packageName) } catch (_: Exception) { 0 }
+                val nukeAfterFive = try { settings.lockdownNukeAfterFiveFlow.first() } catch (_: Exception) { false }
+                if (nukeAfterFive && attempt == STRICT_NUKE_ATTEMPTS) {
+                    try { settings.setNukeActive(true) } catch (e: Exception) {
+                        Log.w(TAG, "Failed to arm Nuke after strict attempts", e)
+                    }
+                    triggerNuke()
+                } else {
+                    triggerBlocker(packageName, website = null, reason = "strict")
+                }
             } else if (balanceSec <= 0L) {
                 recordBlock(packageName, "manual")
                 triggerBlocker(packageName, website = null, reason = "manual")
@@ -599,10 +671,10 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Merged-group daily-limit enforcement for [packageName].
+     * Merged-group daily-limit enforcement for an app package or website host.
      *
      * A target may belong to at most one group (server rule, mirrored by the
-     * repository). For every group the foreground app is a member of whose limit is
+     * repository). For every matching group whose limit is
      * enabled, the combined total is
      *
      *     combinedSeconds = max(localSecondsToday, serverSecondsToday)
@@ -614,12 +686,20 @@ class AppMonitorAccessibilityService : AccessibilityService() {
      *   `usage:getUsageSummary` pull (FocusSyncManager, refreshed once per ~30s sync
      *   cycle). It can lag one cycle and may not include another device's newest upload.
      *
-     * max() therefore never under-blocks: enforcement still works fully offline from
-     * local data, and cross-device time is picked up the moment the next pull lands.
-     * All reads are from memory/cheap caches; any failure degrades to "no group limit".
+     * max() avoids counting the phone's own uploaded app usage twice. Android browser
+     * time is not measured per-domain locally, so website-only time needs a synced
+     * usage total. Cross-device time is picked up when the next pull lands.
      */
-    private suspend fun isGroupLimitExceeded(app: FocusLockApplication, packageName: String): Boolean {
-        val groups = app.targetGroupsRepository.groupsForTarget("app", packageName)
+    private suspend fun isGroupLimitExceeded(
+        app: FocusLockApplication,
+        targetKind: String,
+        targetKey: String,
+    ): Boolean {
+        val groups = if (targetKind == "website") {
+            app.targetGroupsRepository.groupsForWebsiteHost(targetKey)
+        } else {
+            app.targetGroupsRepository.groupsForTarget(targetKind, targetKey)
+        }
         if (groups.isEmpty()) return false
         val serverUsage = app.syncManager.groupUsageTodaySeconds.value
         for (group in groups) {
@@ -1063,8 +1143,27 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         }
 
         serviceScope.launch {
-            val settings = FocusLockApplication.instance.settingsRepository
-            val bank = FocusLockApplication.instance.creditBankRepository
+            val app = FocusLockApplication.instance
+            val settings = app.settingsRepository
+            val bank = app.creditBankRepository
+
+            // A merged limit applies to every member, including a website that is
+            // otherwise allowed. Recheck on each URL event so an open tab is blocked
+            // as soon as its combined limit is reached.
+            val groupLimitExceeded = try {
+                isGroupLimitExceeded(app, "website", cleanDomain)
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                false
+            }
+            if (groupLimitExceeded) {
+                currentActiveWebsite = cleanDomain
+                countdownJob?.cancel()
+                countdownJob = null
+                recordBlock(browserPackage, "limit")
+                triggerBlocker(browserPackage, website = cleanDomain, reason = "limit")
+                return@launch
+            }
 
             val isBlocked = settings.isWebsiteBlocked(cleanDomain)
             if (!isBlocked) {
@@ -1077,7 +1176,10 @@ class AppMonitorAccessibilityService : AccessibilityService() {
 
             // User-granted temporary pass ("Continue to Chrome"): skip blocking
             // and event recording until the suppression window expires.
-            if (isDomainSuppressed(cleanDomain)) return@launch
+            val strictNow = try {
+                settings.isLockdownModeEnabled() || app.strictModeAutomationRepository.isActivationActiveNow()
+            } catch (_: Exception) { false }
+            if (!strictNow && isDomainSuppressed(cleanDomain)) return@launch
 
             if (currentActiveWebsite != cleanDomain) {
                 currentActiveWebsite = cleanDomain
@@ -1096,10 +1198,9 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 // STRICT MODE: block immediately even with a positive balance — skip
                 // the 2s doomscroll grace countdown entirely (see note above re:
                 // TickTickNotificationListener having no bypass).
-                val strict = try { settings.isLockdownModeEnabled() } catch (_: Exception) { false }
-                if (strict) {
+                if (strictNow) {
                     recordBlock(browserPackage, "manual")
-                    triggerBlocker(browserPackage, website = cleanDomain, reason = "manual")
+                    triggerBlocker(browserPackage, website = cleanDomain, reason = "strict")
                 } else if (balanceSec <= 0L) {
                     recordBlock(browserPackage, "manual")
                     triggerBlocker(browserPackage, website = cleanDomain, reason = "manual")
@@ -1232,6 +1333,8 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         frogLockJob = null
         targetGroupsJob?.cancel()
         targetGroupsJob = null
+        permanentBlocksJob?.cancel()
+        permanentBlocksJob = null
         unregisterFrogWakeReceiver()
         countdownJob?.cancel()
         tickTickSessionJob?.cancel()

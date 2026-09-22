@@ -455,7 +455,7 @@ private fun GroupedTargetRow(
             if (onAddToBucket != null) {
                 IconButton(
                     onClick = onAddToBucket,
-                    modifier = Modifier.size(28.dp),
+                    modifier = Modifier.size(48.dp),
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.Add,

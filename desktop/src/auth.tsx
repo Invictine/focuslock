@@ -4,13 +4,14 @@ import { listen } from "@tauri-apps/api/event";
 import type { ConvexReactClient } from "convex/react";
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
 
-export type FocusUser = { name: string; email: string; imageUrl?: string };
+export type FocusUser = { id: string; name: string; email: string; imageUrl?: string };
 type FocusAuthValue = {
   user: FocusUser | null;
   loading: boolean;
   error: string | null;
   signInInBrowser: () => Promise<void>;
   signOut: () => Promise<void>;
+  getSyncToken: () => Promise<string | null>;
 };
 
 const FocusAuthContext = createContext<FocusAuthValue>({
@@ -19,6 +20,7 @@ const FocusAuthContext = createContext<FocusAuthValue>({
   error: null,
   signInInBrowser: async () => undefined,
   signOut: async () => undefined,
+  getSyncToken: async () => null,
 });
 
 export function useFocusAuth() { return useContext(FocusAuthContext); }
@@ -30,7 +32,7 @@ export function DesktopBrowserAuthProvider({ client, children }: { client: Conve
 
   const refresh = useCallback(async () => {
     try {
-      const state = await invoke<{ signedIn: boolean; profile?: { name: string; email: string; imageUrl?: string } }>("get_browser_auth_state");
+      const state = await invoke<{ signedIn: boolean; profile?: FocusUser }>("get_browser_auth_state");
       if (state.signedIn && state.profile) {
         setUser(state.profile);
         client.setAuth(() => invoke<string | null>("get_browser_auth_token"));
@@ -59,6 +61,7 @@ export function DesktopBrowserAuthProvider({ client, children }: { client: Conve
     user,
     loading,
     error,
+    getSyncToken: () => invoke<string | null>("get_browser_auth_token"),
     signInInBrowser: async () => {
       setError(null);
       await invoke("start_browser_sign_in");
@@ -78,12 +81,14 @@ export function ClerkWebAuthProvider({ children }: { children: React.ReactNode }
   const clerk = useClerk();
   const value = useMemo<FocusAuthValue>(() => ({
     user: user ? {
+      id: user.id,
       name: user.fullName || user.firstName || "FocusLock user",
       email: user.primaryEmailAddress?.emailAddress || "",
       imageUrl: user.imageUrl,
     } : null,
     loading: !isLoaded,
     error: null,
+    getSyncToken: async () => (await clerk.session?.getToken({ template: "convex" })) ?? null,
     signInInBrowser: async () => undefined,
     signOut: async () => { await clerk.signOut(); },
   }), [clerk, isLoaded, user]);

@@ -27,12 +27,13 @@ export const activate = mutation({
   handler: async (ctx) => {
     const userId = await requireUserId(ctx);
     const now = Date.now();
-    const existing = await ctx.db
-      .query("nukeState")
-      .withIndex("by_user", (q) => q.eq("userId", userId))
-      .first();
-    if (existing) {
-      await ctx.db.patch(existing._id, {
+      const existing = await ctx.db
+        .query("nukeState")
+        .withIndex("by_user", (q) => q.eq("userId", userId))
+        .first();
+      if (existing) {
+        if (existing.isActive) return existing._id;
+        await ctx.db.patch(existing._id, {
         isActive: true,
         startedAt: now,
         meditationCompletedAt: undefined,

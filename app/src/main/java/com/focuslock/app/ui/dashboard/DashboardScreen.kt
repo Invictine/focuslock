@@ -43,6 +43,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.clerk.api.Clerk
 import com.focuslock.app.BuildConfig
 import com.focuslock.app.FocusLockApplication
+import com.focuslock.app.ui.components.UiTokens
 import com.focuslock.app.auth.AuthViewModel
 import com.focuslock.app.data.model.TickTickWorkRecord
 import com.focuslock.app.data.model.WorkRecordSource
@@ -243,7 +244,14 @@ fun DashboardScreen(
     val hasAllPermissions = permissionsChecked &&
         isAccessibilityOn == true && isUsageAccessOn == true && isNotificationOn == true
 
-    // Step-through onboarding: auto-show once per session on foreground while anything is missing.
+    // Respect an explicit skip across launches. The compact setup card remains available.
+    val onboardingPrefs = remember(context) {
+        context.getSharedPreferences("focuslock_onboarding", android.content.Context.MODE_PRIVATE)
+    }
+    var onboardingSkipped by rememberSaveable {
+        mutableStateOf(onboardingPrefs.getBoolean("permissions_skipped", false))
+    }
+    // Step-through onboarding: auto-show only until the user explicitly skips it.
     // Derived from the same single off-main permission pass above — zero extra binder sweeps.
     val missing: List<PermissionKind> = permSnapshot?.missing ?: emptyList()
     // Seeded from the process latch so a dismissal survives tab switches (which tear
@@ -257,10 +265,10 @@ fun DashboardScreen(
     // Keep the original steps for this onboarding run. The live `missing` list shrinks
     // after each grant; using it as the dialog's sequence resets the counter to 1/N.
     var onboardingSteps by remember { mutableStateOf<List<PermissionKind>>(emptyList()) }
-    LaunchedEffect(missing) {
+    LaunchedEffect(missing, onboardingSkipped) {
         if (missing.isEmpty()) {
             showOnboarding = false
-        } else if (!shownThisSession && !permissionOnboardingDismissedForProcess) {
+        } else if (!onboardingSkipped && !shownThisSession && !permissionOnboardingDismissedForProcess) {
             if (onboardingSteps.isEmpty()) {
                 onboardingSteps = missing
                 dialogIndex = 0
@@ -492,7 +500,12 @@ fun DashboardScreen(
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize(),
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 24.dp),
+            contentPadding = PaddingValues(
+                start = UiTokens.ScreenPadding,
+                end = UiTokens.ScreenPadding,
+                top = 4.dp,
+                bottom = 24.dp
+            ),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             FocusHome(
@@ -710,12 +723,16 @@ fun DashboardScreen(
                     showOnboarding = false
                     shownThisSession = true
                     permissionOnboardingDismissedForProcess = true
+                    onboardingSkipped = true
+                    onboardingPrefs.edit().putBoolean("permissions_skipped", true).apply()
                 }
             },
             onSkipAll = {
                 showOnboarding = false
                 shownThisSession = true
                 permissionOnboardingDismissedForProcess = true
+                onboardingSkipped = true
+                onboardingPrefs.edit().putBoolean("permissions_skipped", true).apply()
             }
         )
     }

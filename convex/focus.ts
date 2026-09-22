@@ -9,6 +9,12 @@ async function requireUserId(ctx: any): Promise<string> {
 
 type SyncCollection = "blockedApps" | "blockedWebsites" | "appLimits" | "blockSchedules";
 
+/** The verified account key, shared by OAuth and Clerk SDK clients. */
+export const getAccount = query({
+  args: {},
+  handler: async (ctx) => ({ userId: await requireUserId(ctx) }),
+});
+
 async function getCollectionVersion(
   ctx: any,
   userId: string,
@@ -126,6 +132,15 @@ export const saveBlockedApps = mutation({
       .query("blockedApps")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .collect();
+    const storedVersion = Math.max(version?.updatedAt ?? 0, ...existing.map((row) => row.updatedAt));
+    if (args.updatedAt < storedVersion) return { applied: false, updatedAt: storedVersion };
+    const prefs = await ctx.db.query("userPrefs")
+      .withIndex("by_user", (q) => q.eq("userId", userId)).first();
+    if (prefs?.strictMode && (prefs.strictEndsAt ?? 0) > Date.now() &&
+        existing.some((app) => app.isBlocked &&
+          !args.apps.some((incoming) => incoming.packageName === app.packageName && incoming.isBlocked))) {
+      throw new Error("Blocked apps cannot be removed during Strict Mode");
+    }
     for (const doc of existing) await ctx.db.delete(doc._id);
     for (const app of args.apps) {
       await ctx.db.insert("blockedApps", { ...app, userId, updatedAt: args.updatedAt });
@@ -157,6 +172,15 @@ export const saveBlockedWebsites = mutation({
       .query("blockedWebsites")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .collect();
+    const storedVersion = Math.max(version?.updatedAt ?? 0, ...existing.map((row) => row.updatedAt));
+    if (args.updatedAt < storedVersion) return { applied: false, updatedAt: storedVersion };
+    const prefs = await ctx.db.query("userPrefs")
+      .withIndex("by_user", (q) => q.eq("userId", userId)).first();
+    if (prefs?.strictMode && (prefs.strictEndsAt ?? 0) > Date.now() &&
+        existing.some((site) => site.isBlocked &&
+          !args.sites.some((incoming) => incoming.domain === site.domain && incoming.isBlocked))) {
+      throw new Error("Blocked websites cannot be removed during Strict Mode");
+    }
     for (const doc of existing) await ctx.db.delete(doc._id);
     for (const site of args.sites) {
       await ctx.db.insert("blockedWebsites", { ...site, userId, updatedAt: args.updatedAt });
@@ -185,6 +209,16 @@ export const setBlockedWebsite = mutation({
       .query("blockedWebsites")
       .withIndex("by_user_domain", (q) => q.eq("userId", userId).eq("domain", domain))
       .first();
+    if (existing && args.updatedAt < existing.updatedAt) {
+      return { applied: false, updatedAt: existing.updatedAt };
+    }
+    if (existing?.isBlocked && !args.isBlocked) {
+      const prefs = await ctx.db.query("userPrefs")
+        .withIndex("by_user", (q) => q.eq("userId", userId)).first();
+      if (prefs?.strictMode && (prefs.strictEndsAt ?? 0) > Date.now()) {
+        throw new Error("Blocked websites cannot be removed during Strict Mode");
+      }
+    }
     const site = {
       domain,
       displayName: args.displayName.trim() || domain,
@@ -223,6 +257,47 @@ export const addWorkRecord = mutation({
 });
 
 /** StayFree-parity full dashboard snapshot (old getSnapshot kept for Android compat). */
+/** Log desktop work and bank its credit in one retry-safe transaction. */
+export const recordWork = mutation({
+  args: {
+    recordId: v.string(), title: v.string(), durationMinutes: v.number(),
+    timestamp: v.number(), source: v.string(), earnedMinutesCredited: v.number(),
+    date: v.string(), tasksCompleted: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    if (![args.durationMinutes, args.earnedMinutesCredited, args.tasksCompleted, args.timestamp].every(Number.isFinite) ||
+        args.durationMinutes < 0 || args.earnedMinutesCredited < 0 || args.tasksCompleted < 0 ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(args.date)) throw new Error("Invalid work record");
+    const existing = await ctx.db.query("workRecords").withIndex("by_user_record", (q) =>
+      q.eq("userId", userId).eq("recordId", args.recordId)).first();
+    if (existing) return { applied: true, duplicate: true };
+    const { date, tasksCompleted, ...record } = args;
+    await ctx.db.insert("workRecords", { ...record, userId });
+    const { recordId, ...session } = record;
+    const existingSession = await ctx.db.query("focusSessions").withIndex("by_user_session", (q) =>
+      q.eq("userId", userId).eq("sessionId", recordId)).first();
+    if (!existingSession) await ctx.db.insert("focusSessions", { ...session, sessionId: recordId, userId });
+    const state = await ctx.db.query("focusState").withIndex("by_user", (q) => q.eq("userId", userId)).first();
+    const sameDay = state?.lastResetDate === date;
+    const olderDay = !!state && state.lastResetDate > date;
+    const next = {
+      userId,
+      creditBalanceSeconds: (state?.creditBalanceSeconds ?? 0) + args.earnedMinutesCredited * 60,
+      totalWorkSecondsToday: olderDay ? state.totalWorkSecondsToday :
+        (sameDay ? state.totalWorkSecondsToday : 0) + args.durationMinutes * 60,
+      totalScrollSecondsToday: sameDay || olderDay ? state!.totalScrollSecondsToday : 0,
+      tasksCompletedToday: olderDay ? state.tasksCompletedToday :
+        (sameDay ? state.tasksCompletedToday : 0) + tasksCompleted,
+      lastResetDate: olderDay ? state.lastResetDate : date,
+      updatedAt: Math.max(Date.now(), (state?.updatedAt ?? 0) + 1),
+    };
+    if (state) await ctx.db.patch(state._id, next);
+    else await ctx.db.insert("focusState", next);
+    return { applied: true, duplicate: false };
+  },
+});
+
 export const getDashboard = query({
   args: {
     fromDate: v.optional(v.string()),
@@ -286,7 +361,18 @@ export const getDashboard = query({
       .query("devices")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .collect();
-    return { state, apps, sites, records, limits, schedules, sessions, usage, prefs, devices };
+    const versions = await Promise.all(
+      (["blockedApps", "blockedWebsites", "appLimits", "blockSchedules"] as const)
+        .map((collection) => getCollectionVersion(ctx, userId, collection)),
+    );
+    return {
+      state, apps, sites, records, limits, schedules, sessions, usage, prefs, devices,
+      stateUpdatedAt: state?.updatedAt ?? 0,
+      appsUpdatedAt: versions[0]?.updatedAt ?? Math.max(0, ...apps.map((row) => row.updatedAt)),
+      sitesUpdatedAt: versions[1]?.updatedAt ?? Math.max(0, ...sites.map((row) => row.updatedAt)),
+      limitsUpdatedAt: versions[2]?.updatedAt ?? Math.max(0, ...limits.map((row) => row.updatedAt)),
+      schedulesUpdatedAt: versions[3]?.updatedAt ?? Math.max(0, ...schedules.map((row) => row.updatedAt)),
+    };
   },
 });
 
@@ -313,6 +399,8 @@ export const saveAppLimits = mutation({
       .query("appLimits")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .collect();
+    const storedVersion = Math.max(version?.updatedAt ?? 0, ...existing.map((row) => row.updatedAt));
+    if (args.updatedAt < storedVersion) return { applied: false, updatedAt: storedVersion };
     for (const doc of existing) await ctx.db.delete(doc._id);
     for (const l of args.limits) {
       await ctx.db.insert("appLimits", { ...l, userId, updatedAt: args.updatedAt });
@@ -347,6 +435,8 @@ export const saveSchedules = mutation({
       .query("blockSchedules")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .collect();
+    const storedVersion = Math.max(version?.updatedAt ?? 0, ...existing.map((row) => row.updatedAt));
+    if (args.updatedAt < storedVersion) return { applied: false, updatedAt: storedVersion };
     for (const doc of existing) await ctx.db.delete(doc._id);
     for (const s of args.schedules) {
       await ctx.db.insert("blockSchedules", { ...s, userId, updatedAt: args.updatedAt });
@@ -408,6 +498,9 @@ export const saveDailyUsage = mutation({
 export const savePrefs = mutation({
   args: {
     strictMode: v.optional(v.boolean()),
+    strictEndsAt: v.optional(v.number()),
+    strictNukeAfterFive: v.optional(v.boolean()),
+    strictPreset: v.optional(v.string()),
     weeklyReport: v.optional(v.boolean()),
     dailyReminderMinutes: v.optional(v.number()),
     globalDailyCapMinutes: v.optional(v.number()),
@@ -423,8 +516,11 @@ export const savePrefs = mutation({
       .query("userPrefs")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .first();
-    const patch: Record<string, unknown> = { updatedAt: args.updatedAt };
+    const patch: Record<string, unknown> = { updatedAt: Math.max(args.updatedAt, existing?.updatedAt ?? 0) };
     if (args.strictMode !== undefined) patch.strictMode = args.strictMode;
+    if (args.strictEndsAt !== undefined) patch.strictEndsAt = Math.max(0, args.strictEndsAt);
+    if (args.strictNukeAfterFive !== undefined) patch.strictNukeAfterFive = args.strictNukeAfterFive;
+    if (args.strictPreset !== undefined) patch.strictPreset = args.strictPreset.slice(0, 40);
     if (args.weeklyReport !== undefined) patch.weeklyReport = args.weeklyReport;
     if (args.dailyReminderMinutes !== undefined) patch.dailyReminderMinutes = args.dailyReminderMinutes;
     if (args.globalDailyCapMinutes !== undefined) patch.globalDailyCapMinutes = args.globalDailyCapMinutes;
@@ -432,11 +528,59 @@ export const savePrefs = mutation({
     if (args.workRatioUpdatedAt !== undefined) patch.workRatioUpdatedAt = args.workRatioUpdatedAt;
     if (args.taskBonusMinutes !== undefined) patch.taskBonusMinutes = args.taskBonusMinutes;
     if (args.taskBonusMinutesUpdatedAt !== undefined) patch.taskBonusMinutesUpdatedAt = args.taskBonusMinutesUpdatedAt;
+    // Approval markers are server-owned. An offline device must not resurrect
+    // the exact commitment that a guardian already approved.
+    if (args.strictMode === true && existing?.strictApprovedEndsAt &&
+        args.strictEndsAt === existing.strictApprovedEndsAt && !existing.strictMode) {
+      throw new Error("This commitment was approved for release. Sync before starting another commitment.");
+    }
+    if ((args.strictMode === true || (existing?.strictMode && args.strictEndsAt !== undefined)) &&
+        args.updatedAt >= (existing?.updatedAt ?? 0)) {
+      const end = args.strictEndsAt ?? existing?.strictEndsAt;
+      const now = Date.now();
+      // Existing commitments may be re-synced after their end time; clients
+      // already treat these as expired. New commitments require a future end.
+      const unchanged = existing?.strictMode && end === existing.strictEndsAt;
+      if (!unchanged && (end === undefined || !Number.isFinite(end) || end <= now || end > now + 30 * 86_400_000)) {
+        throw new Error("Choose a Strict Mode duration between now and 30 days.");
+      }
+      if (!unchanged) {
+        patch.strictSessionId = `${now}:${end}:${args.updatedAt}`;
+        patch.strictApprovedEndsAt = undefined;
+        patch.strictApprovedAt = undefined;
+        patch.strictApprovedSessionId = undefined;
+      } else if (!existing?.strictSessionId) {
+        patch.strictSessionId = `${now}:${end}:${args.updatedAt}`;
+      }
+    }
     if (existing) {
-      if (args.updatedAt < existing.updatedAt) return existing._id;
+      // Ratio and bonus edits have independent clocks. A later Strict Mode
+      // update must not silently discard an offline edit to either setting.
+      if (args.updatedAt < existing.updatedAt) {
+        for (const field of ["strictMode", "strictEndsAt", "strictNukeAfterFive", "strictPreset",
+          "weeklyReport", "dailyReminderMinutes", "globalDailyCapMinutes"]) delete patch[field];
+      }
+      for (const field of ["workRatio", "taskBonusMinutes"] as const) {
+        const clock = `${field}UpdatedAt` as const;
+        if (args[field] === undefined || (args[clock] ?? args.updatedAt) < (existing[clock] ?? 0)) {
+          delete patch[field];
+          delete patch[clock];
+        } else {
+          patch[clock] = args[clock] ?? args.updatedAt;
+        }
+      }
+      // A commitment can be extended, but another client cannot end or shorten it.
+      if (existing.strictMode && (existing.strictEndsAt ?? 0) > Date.now()) {
+        if (patch.strictMode === false ||
+            (typeof patch.strictEndsAt === "number" && patch.strictEndsAt < existing.strictEndsAt!)) {
+          throw new Error("Strict Mode is committed until its end time");
+        }
+      }
       await ctx.db.patch(existing._id, patch as never);
       return existing._id;
     }
+    if (args.workRatio !== undefined) patch.workRatioUpdatedAt = args.workRatioUpdatedAt ?? args.updatedAt;
+    if (args.taskBonusMinutes !== undefined) patch.taskBonusMinutesUpdatedAt = args.taskBonusMinutesUpdatedAt ?? args.updatedAt;
     return await ctx.db.insert("userPrefs", {
       userId,
       strictMode: args.strictMode ?? false,

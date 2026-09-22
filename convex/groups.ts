@@ -219,6 +219,8 @@ export const saveGroups = mutation({
       .query("targetGroups")
       .withIndex("by_user", (q: any) => q.eq("userId", userId))
       .collect();
+    const storedVersion = Math.max(version?.updatedAt ?? 0, ...existing.map((row) => row.updatedAt));
+    if (args.updatedAt < storedVersion) return { applied: false, updatedAt: storedVersion };
     for (const row of existing) await ctx.db.delete(row._id);
 
     for (const group of canonical) {

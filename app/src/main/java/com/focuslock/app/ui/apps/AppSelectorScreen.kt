@@ -34,6 +34,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -49,6 +50,7 @@ import com.focuslock.app.data.model.BlockedApp
 import com.focuslock.app.data.model.BlockedWebsite
 import com.focuslock.app.data.repository.AppLimit
 import com.focuslock.app.data.repository.SettingsRepository
+import com.focuslock.app.data.repository.PermanentBlocksRepository
 import com.focuslock.app.data.repository.TargetGroup
 import com.focuslock.app.data.repository.TargetGroupMember
 import com.focuslock.app.data.repository.UpsertResult
@@ -124,7 +126,7 @@ private fun categoryIcon(category: String): ImageVector = when (category.trim().
     else -> Icons.Rounded.Apps
 }
 
-/** Load lifecycle for the PackageManager query â€” distinct from "loaded but empty". */
+/** Load lifecycle for the PackageManager query — distinct from "loaded but empty". */
 private sealed interface AppsLoadState {
     data object Loading : AppsLoadState
     data object Ready : AppsLoadState
@@ -300,6 +302,7 @@ internal fun AppPickerScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val settings = FocusLockApplication.instance.settingsRepository
+    val permanentBlocks = FocusLockApplication.instance.permanentBlocksRepository
     val appLimits = (context.applicationContext as FocusLockApplication).appLimitsRepository
 
     // null initial = DataStore has not emitted yet: never flash DEFAULT_DOOMSCROLL_APPS
@@ -310,6 +313,7 @@ internal fun AppPickerScreen(
     val boundariesFrozen by settings.boundariesFrozenFlow.collectAsStateWithLifecycle(initialValue = false)
     val lockdownMode by settings.lockdownModeFlow.collectAsStateWithLifecycle(initialValue = false)
     val limits by appLimits.limitsFlow.collectAsStateWithLifecycle(initialValue = emptyMap())
+    val permanentPackages by permanentBlocks.packagesFlow.collectAsStateWithLifecycle(initialValue = emptySet())
 
     // Live Strict Mode cooldown for accurate refusal copy; polls only while it is active.
     var lockdownRemainingMs by remember { mutableStateOf(0L) }
@@ -355,12 +359,15 @@ internal fun AppPickerScreen(
     var debouncedQuery by remember { mutableStateOf("") }
     var searchActive by rememberSaveable { mutableStateOf(false) }
     var showSystemApps by rememberSaveable { mutableStateOf(false) }
+    var showAppOptions by rememberSaveable { mutableStateOf(false) }
     var showAddWebsiteDialog by remember { mutableStateOf(false) }
     var newWebsiteInput by remember { mutableStateOf("") }
     var websiteInputError by remember { mutableStateOf<String?>(null) }
+    var addingWebsites by remember { mutableStateOf(false) }
     var pendingDeleteSite by remember { mutableStateOf<BlockedWebsite?>(null) }
     var pendingBulk by remember { mutableStateOf<BulkAction?>(null) }
     var limitTarget by remember { mutableStateOf<AppRowItem?>(null) }
+    var pendingPermanentApp by remember { mutableStateOf<AppRowItem?>(null) }
 
     // ---- Merged groups (apps + websites into one bucket with one combined limit) ----
     val targetGroupsRepository = FocusLockApplication.instance.targetGroupsRepository
@@ -414,7 +421,7 @@ internal fun AppPickerScreen(
         mutableStateOf<Map<String, Boolean>>(emptyMap())
     }
 
-    // Hoisted list states â€” never recreated, so toggles preserve scroll position.
+    // Hoisted list states — never recreated, so toggles preserve scroll position.
     val appsListState = rememberLazyListState()
     val websitesListState = rememberLazyListState()
 
@@ -484,7 +491,7 @@ internal fun AppPickerScreen(
         }
     }
 
-    // Hoisted stable toggle lambdas â€” same instance for every row, keeps rows skippable.
+    // Hoisted stable toggle lambdas — same instance for every row, keeps rows skippable.
     // Optimistic: the row state flips immediately; on persistence failure the override is
     // dropped (revert) and a snackbar explains why.
     val onAppToggle: (AppRowItem, Boolean) -> Unit = remember(settings, scope, snackbarHostState) {
@@ -521,21 +528,15 @@ internal fun AppPickerScreen(
             }
         }
     }
-    // Optimistic permanent-block toggles â€” mirror the block overrides above.
-    val onAppPermanentToggle: (AppRowItem, Boolean) -> Unit = remember(settings, scope, snackbarHostState) {
+    // Optimistic permanent-block toggles — mirror the block overrides above.
+    val onAppPermanentToggle: (AppRowItem, Boolean) -> Unit = remember(settings, permanentBlocks, scope, snackbarHostState) {
         { app, permanent ->
-            appPermanentOverrides.value = appPermanentOverrides.value + (app.packageName to permanent)
-            scope.launch {
-                val ok = try {
-                    settings.setAppPermanent(app.packageName, permanent)
-                    true
-                } catch (_: Exception) {
-                    false
-                }
-                appPermanentOverrides.value = appPermanentOverrides.value - app.packageName
-                if (!ok) {
-                    snackbarHostState.showSnackbar("Couldn't update ${app.appName}. Change reverted.")
-                }
+            if (!permanent) {
+                scope.launch { snackbarHostState.showSnackbar("Permanent blocks cannot be removed in FocusLock.") }
+            } else if (PermanentBlocksRepository.isProtectedPackage(context, app.packageName)) {
+                scope.launch { snackbarHostState.showSnackbar("That app is protected so you can always recover your phone.") }
+            } else {
+                pendingPermanentApp = app
             }
         }
     }
@@ -601,7 +602,7 @@ internal fun AppPickerScreen(
     // Optimistic overrides are deliberately NOT merged here: toggling one switch must not
     // rebuild all 300+ rows. They are applied per item in the LazyColumn lambda below instead.
     val mergedAppRows: List<AppRowItem> = remember(
-        blockedApps, installedApps, usageMinutes, appsStorageLoaded, appsLoadState
+        blockedApps, installedApps, usageMinutes, appsStorageLoaded, appsLoadState, permanentPackages
     ) {
         val blockedByPkg = blockedApps.associateBy { it.packageName }
         val installedByPkg = installedApps.associateBy { it.packageName }
@@ -621,7 +622,7 @@ internal fun AppPickerScreen(
                         ?: (if (appsStorageLoaded) defaultBlocked else false),
                     isInstalled = true,
                     todayMinutes = usageMinutes[inst.packageName] ?: 0L,
-                    isPermanent = stored?.isPermanent ?: false
+                    isPermanent = inst.packageName.lowercase() in permanentPackages || stored?.isPermanent == true
                 )
             )
         }
@@ -639,7 +640,7 @@ internal fun AppPickerScreen(
                             isBlocked = stored?.isBlocked ?: def.isBlocked,
                             isInstalled = false,
                             todayMinutes = 0L,
-                            isPermanent = stored?.isPermanent ?: def.isPermanent
+                            isPermanent = def.packageName.lowercase() in permanentPackages || stored?.isPermanent == true
                         )
                     )
                 }
@@ -654,7 +655,7 @@ internal fun AppPickerScreen(
     }
 
     // Stale blocked entries (uninstalled, not in defaults) are hidden from the main
-    // list â€” surfaced only as a count note so they never show as installed.
+    // list — surfaced only as a count note so they never show as installed.
     val staleUninstalledBlockedCount = remember(blockedApps, installedApps, appsLoadState, appsStorageLoaded) {
         if (!appsStorageLoaded || appsLoadState !is AppsLoadState.Ready) 0 else {
             val installedSet = installedApps.map { it.packageName }.toSet()
@@ -663,7 +664,7 @@ internal fun AppPickerScreen(
         }
     }
 
-    // Installed/system sets derived once per load â€” reused by filters and rows.
+    // Installed/system sets derived once per load — reused by filters and rows.
     val systemSet = remember(installedApps) {
         installedApps.filter { it.isSystem }.map { it.packageName }.toSet()
     }
@@ -734,7 +735,7 @@ internal fun AppPickerScreen(
     }
 
     // "Recommended": top installed apps by today's usage minutes (limit 5), from the
-    // same merged rows and system-app filter as the category list â€” no new plumbing.
+    // same merged rows and system-app filter as the category list — no new plumbing.
     // Rendered only when idle (never while searching) and hidden entirely when there
     // is no usage data (permission missing or every row at 0m): no placeholders.
     val recommendedApps: List<AppRowItem> = remember(mergedAppRows, showSystemApps, systemSet) {
@@ -1113,7 +1114,7 @@ internal fun AppPickerScreen(
                         )
                     }
                     Text(
-                        text = if (selectedTab == PickerTab.APPLICATIONS) "Applications" else "Websites",
+                        text = "Manage blocks",
                         style = MaterialTheme.typography.titleLarge,
                         color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
@@ -1121,7 +1122,7 @@ internal fun AppPickerScreen(
                     )
                     if (!selectionMode) {
                         TextButton(onClick = { selectionMode = true }) {
-                            Text("Select")
+                            Text("Merge")
                         }
                     }
                     IconButton(
@@ -1145,9 +1146,9 @@ internal fun AppPickerScreen(
                     query = searchQuery,
                     onQueryChange = { searchQuery.value = it },
                     placeholder = if (selectedTab == PickerTab.APPLICATIONS) {
-                        "Search installed appsâ€¦"
+                        "Search installed apps…"
                     } else {
-                        "Search websitesâ€¦"
+                        "Search websites…"
                     },
                     focusRequester = searchFocusRequester
                 )
@@ -1179,6 +1180,7 @@ internal fun AppPickerScreen(
                     MergedGroupsSection(
                         groups = targetGroups,
                         usageByGroup = groupUsageToday,
+                        localAppMinutes = usageMinutes,
                         onNew = openNewGroup,
                         onEdit = openEditGroup,
                         onDelete = requestDeleteGroup,
@@ -1202,7 +1204,12 @@ internal fun AppPickerScreen(
                     Tab(
                         selected = selectedTab == PickerTab.WEBSITES,
                         onClick = { onTabChange(PickerTab.WEBSITES) },
-                        text = { Text("Websites") }
+                        text = {
+                            Text(
+                                if (websitesStorageLoaded) "Websites (${visibleWebsites.count { it.isBlocked }})"
+                                else "Websites"
+                            )
+                        }
                     )
                 }
             }
@@ -1215,13 +1222,11 @@ internal fun AppPickerScreen(
                     // one Column. The chips strip stays pinned above the list with an
                     // opaque background.
                     Column(modifier = Modifier.fillMaxSize()) {
-                    Spacer(Modifier.height(12.dp))
-
-                    // Quick presets in a horizontally scrollable row (filled tonal, no borders).
+                    // Keep bulk operations behind Options so the app list starts in view.
                     // The parent owns the 16dp start alignment; the end padding lets the last
                     // chip scroll fully into view instead of vanishing under the parent edge.
                     // Opaque background so scrolling content never shows through the strip.
-                    LazyRow(
+                    if (showAppOptions) LazyRow(
                         modifier = Modifier.fillMaxWidth()
                             .background(MaterialTheme.colorScheme.background),
                         contentPadding = PaddingValues(end = 16.dp),
@@ -1261,7 +1266,7 @@ internal fun AppPickerScreen(
                         }
                     }
 
-                    Spacer(Modifier.height(12.dp))
+                    if (showAppOptions) Spacer(Modifier.height(8.dp))
 
                     val loadState = appsLoadState
                     Row(
@@ -1273,14 +1278,14 @@ internal fun AppPickerScreen(
                     ) {
                         Text(
                             text = when {
-                                loadState is AppsLoadState.Loading -> "Loading installed appsâ€¦"
+                                loadState is AppsLoadState.Loading -> "Loading installed apps…"
                                 loadState is AppsLoadState.Error -> "Couldn't load installed apps"
                                 appsStorageLoaded -> if (rankedApps.size == mergedAppRows.size) {
                                     "Showing ${mergedAppRows.size} apps"
                                 } else {
                                     "Showing ${rankedApps.size} of ${mergedAppRows.size} apps"
                                 }
-                                else -> "Loading boundariesâ€¦"
+                                else -> "Loading boundaries…"
                             },
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1288,12 +1293,19 @@ internal fun AppPickerScreen(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f)
                         )
-                        Text(
-                            "System",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(Modifier.width(4.dp))
+                        TextButton(onClick = { showAppOptions = !showAppOptions }) {
+                            Text(if (showAppOptions) "Hide options" else "Options")
+                            Icon(Icons.Rounded.ExpandMore, contentDescription = null)
+                        }
+                    }
+
+                    if (showAppOptions) Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("Show system apps", style = MaterialTheme.typography.bodyMedium)
+                        Spacer(Modifier.width(8.dp))
                         Switch(
                             checked = showSystemApps,
                             onCheckedChange = { showSystemApps = it },
@@ -1301,7 +1313,18 @@ internal fun AppPickerScreen(
                         )
                     }
 
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(4.dp))
+
+                    if (websitesStorageLoaded && visibleWebsites.any { it.isBlocked }) {
+                        TextButton(
+                            onClick = { onTabChange(PickerTab.WEBSITES) },
+                            contentPadding = PaddingValues(horizontal = 4.dp),
+                        ) {
+                            Icon(Icons.Rounded.Language, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("${visibleWebsites.count { it.isBlocked }} blocked websites · View and edit")
+                        }
+                    }
 
                     // Weighted box owns the remaining space: loading/error/empty states and
                     // the list all fill exactly this region, never the chips strip above.
@@ -1312,7 +1335,7 @@ internal fun AppPickerScreen(
                     ) {
                     when {
                         loadState is AppsLoadState.Loading -> {
-                            LoadingState("Loading installed appsâ€¦")
+                            LoadingState("Loading installed apps…")
                         }
                         loadState is AppsLoadState.Error -> {
                             AppsErrorState(message = loadState.message, onRetry = { loadAttempt++ })
@@ -1326,14 +1349,6 @@ internal fun AppPickerScreen(
                         }
                         else -> {
                             Column(modifier = Modifier.fillMaxSize()) {
-                            if (staleUninstalledBlockedCount > 0) {
-                                Text(
-                                    text = "$staleUninstalledBlockedCount blocked app(s) not currently installed â€” hidden from this list.",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(bottom = 4.dp)
-                                )
-                            }
                             if (rankedApps.isEmpty()) {
                                 ListStateMessage(
                                     message = "No apps match. Try a different search.",
@@ -1390,7 +1405,7 @@ internal fun AppPickerScreen(
                                         // expanded when the category holds a blocked app.
                                         val expanded = isSearching || selectionMode ||
                                             (categoryExpansion.value[group.category]
-                                                ?: (group.blockedCount > 0))
+                                                ?: (group.blockedCount > 0 || group.apps.any { it.isPermanent }))
                                         item(
                                             key = "category-${group.category}",
                                             contentType = "categoryHeader"
@@ -1462,7 +1477,7 @@ internal fun AppPickerScreen(
                                     "Showing ${filteredWebsites.size} of ${visibleWebsites.size} sites"
                                 }
                             } else {
-                                "Loading website boundariesâ€¦"
+                                "Loading website boundaries…"
                             },
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -1536,7 +1551,7 @@ internal fun AppPickerScreen(
                             .fillMaxWidth()
                     ) {
                     when {
-                        !websitesStorageLoaded -> LoadingState("Loading website boundariesâ€¦")
+                        !websitesStorageLoaded -> LoadingState("Loading website boundaries…")
                         visibleWebsites.isEmpty() -> ListStateMessage(
                             message = "No websites yet. Add a domain or use a preset above.",
                             actionLabel = "Add Website",
@@ -1589,7 +1604,36 @@ internal fun AppPickerScreen(
         )
     }
 
-    // Dialog: Add Custom Website
+    pendingPermanentApp?.let { app ->
+        AlertDialog(
+            onDismissRequest = { pendingPermanentApp = null },
+            title = { Text("Permanently block ${app.appName}") },
+            text = {
+                Text("This app will stay blocked indefinitely. FocusLock will not offer credits, emergency passes, grace time, or an in-app removal control for it.")
+            },
+            confirmButton = {
+                Button(onClick = {
+                    pendingPermanentApp = null
+                    appPermanentOverrides.value = appPermanentOverrides.value + (app.packageName to true)
+                    scope.launch {
+                        // The dedicated write is the durable operation. Legacy Settings
+                        // metadata is only a display mirror; its failure must not claim
+                        // that a permanent block failed after it was already persisted.
+                        val ok = try { permanentBlocks.add(app.packageName) } catch (_: Exception) { false }
+                        if (ok) {
+                            try { settings.setAppPermanent(app.packageName, true) } catch (_: Exception) { }
+                        }
+                        appPermanentOverrides.value = appPermanentOverrides.value - app.packageName
+                        if (!ok) snackbarHostState.showSnackbar("Couldn't permanently block ${app.appName}.")
+                    }
+                }) { Text("Block permanently") }
+            },
+            dismissButton = { TextButton(onClick = { pendingPermanentApp = null }) { Text("Cancel") } }
+        )
+    }
+
+    // Dialog: Add one or several custom websites. Keep invalid entries in the field
+    // after a partial save so the user can correct them without retyping.
     if (showAddWebsiteDialog) {
         AlertDialog(
             onDismissRequest = {
@@ -1598,14 +1642,14 @@ internal fun AppPickerScreen(
             },
             title = {
                 Text(
-                    "Block Website",
+                    "Add websites",
                     style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
                 )
             },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        "Enter the domain or URL you want to block in Chrome, Brave, Samsung Internet, and other browsers:",
+                        "Paste websites separated by a new line, comma, or space. They will be blocked in your browsers.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1615,8 +1659,9 @@ internal fun AppPickerScreen(
                             newWebsiteInput = it
                             websiteInputError = null
                         },
-                        placeholder = { Text("e.g. news.ycombinator.com") },
-                        singleLine = true,
+                        placeholder = { Text("youtube.com\nreddit.com\nexample.org") },
+                        minLines = 3,
+                        maxLines = 6,
                         isError = websiteInputError != null,
                         supportingText = {
                             websiteInputError?.let {
@@ -1627,7 +1672,7 @@ internal fun AppPickerScreen(
                         modifier = Modifier.fillMaxWidth()
                     )
                     Text(
-                        "Only the hostname is saved â€” schemes, paths, and ports are trimmed.",
+                        "URLs are reduced to domains. Duplicates already in your list are skipped.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1636,31 +1681,45 @@ internal fun AppPickerScreen(
             confirmButton = {
                 Button(
                     onClick = {
-                        val cleaned = normalizeDomainInput(newWebsiteInput)
+                        val entries = newWebsiteInput.split(Regex("[,;\\s]+"))
+                            .map(String::trim).filter(String::isNotEmpty)
+                        val invalid = entries.filter { normalizeDomainInput(it) == null }
+                        val existing = blockedWebsites.map { it.domain.lowercase() }.toSet()
+                        val toAdd = entries.mapNotNull(::normalizeDomainInput)
+                            .distinct().filterNot { it in existing }
                         when {
-                            cleaned == null -> websiteInputError = "Enter a valid domain, like example.com"
-                            blockedWebsites.any { it.domain.equals(cleaned, ignoreCase = true) } ->
-                                websiteInputError = "$cleaned is already in your list"
+                            entries.isEmpty() -> websiteInputError = "Enter at least one website"
+                            toAdd.isEmpty() && invalid.isNotEmpty() ->
+                                websiteInputError = "Check these websites: ${invalid.take(3).joinToString(", ")}"
+                            toAdd.isEmpty() -> websiteInputError = "These websites are already in your list"
                             else -> scope.launch {
-                                val ok = try {
-                                    settings.addCustomWebsite(cleaned)
-                                } catch (_: Exception) {
-                                    false
+                                addingWebsites = true
+                                val failed = mutableListOf<String>()
+                                var added = 0
+                                for (domain in toAdd) {
+                                    val ok = try { settings.addCustomWebsite(domain) } catch (_: Exception) { false }
+                                    if (ok) added++ else failed += domain
                                 }
-                                if (ok) {
+                                addingWebsites = false
+                                val remaining = invalid + failed
+                                if (remaining.isEmpty()) {
                                     newWebsiteInput = ""
                                     websiteInputError = null
                                     showAddWebsiteDialog = false
-                                    snackbarHostState.showSnackbar("Added $cleaned to blocked websites")
                                 } else {
-                                    websiteInputError = "Couldn't add that domain â€” try another"
+                                    newWebsiteInput = remaining.joinToString("\n")
+                                    websiteInputError = "Check the remaining websites and try again"
                                 }
+                                if (added > 0) snackbarHostState.showSnackbar(
+                                    "Added $added ${if (added == 1) "website" else "websites"} to your blocks"
+                                )
                             }
                         }
                     },
+                    enabled = !addingWebsites,
                     shape = MaterialTheme.shapes.medium
                 ) {
-                    Text("Add")
+                    Text(if (addingWebsites) "Adding…" else "Add websites")
                 }
             },
             dismissButton = {
@@ -1869,20 +1928,20 @@ internal fun AppPickerScreen(
                         !result.saved -> {
                             // Keep the editor open so the input is not lost; nothing was
                             // written and the sync clock was not stamped.
-                            snackbarHostState.showSnackbar("Couldn't save â€” try again")
+                            snackbarHostState.showSnackbar("Couldn't save — try again")
                         }
                         result.groupDiscarded -> {
                             groupEditor = null
                             exitSelection()
                             snackbarHostState.showSnackbar(
-                                "A group needs at least 2 members â€” \"$name\" wasn't created."
+                                "A group needs at least 2 members — \"$name\" wasn't created."
                             )
                         }
                         result.droppedMemberLabels.isNotEmpty() -> {
                             groupEditor = null
                             exitSelection()
                             snackbarHostState.showSnackbar(
-                                "Saved \"$name\" â€” already merged elsewhere: " +
+                                "Saved \"$name\" — already merged elsewhere: " +
                                     result.droppedMemberLabels.joinToString(", ") + "."
                             )
                         }
@@ -1900,7 +1959,7 @@ internal fun AppPickerScreen(
 
 /**
  * Search input extracted from [AppPickerScreen]. [query] is passed as a state object
- * rather than a String so the value read happens here â€” only this field recomposes per
+ * rather than a String so the value read happens here — only this field recomposes per
  * keystroke, not the screen root or the filtered app list. Filled container, no outline.
  */
 @Composable
@@ -2227,7 +2286,7 @@ private fun AppRowWithOverrides(
 }
 
 /**
- * Website row: same treatment as app rows â€” toggleable tonal card, [IconBadge] squircle
+ * Website row: same treatment as app rows — toggleable tonal card, [IconBadge] squircle
  * for the domain glyph, single-line ellipsized metadata, a quiet middle cluster (delete
  * for customs, permanent lock) and one strong trailing control (the Switch). A long-press
  * enters merge selection mode; in selection mode taps toggle the checkbox and the other
@@ -2251,6 +2310,8 @@ private fun WebsiteRow(
     onLongPress: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
+    val configuration = LocalConfiguration.current
+    val compactActions = configuration.screenWidthDp < 400 || configuration.fontScale >= 1.2f
     val switchEnabled = !(boundariesFrozen && site.isBlocked)
     val rowEnabled = true
     val interactionSource = remember { MutableInteractionSource() }
@@ -2280,6 +2341,7 @@ private fun WebsiteRow(
                 }
             )
     ) {
+        Column {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -2309,24 +2371,24 @@ private fun WebsiteRow(
                     text = site.displayName,
                     style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium),
                     color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
+                    maxLines = if (compactActions) 2 else 1,
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
-                    text = buildString {
-                        if (site.isPermanent) append("Always blocked Â· ")
+                    text = if (compactActions) site.domain else buildString {
+                        if (site.isPermanent) append("Always blocked · ")
                         append(site.domain)
-                        append(" Â· ")
+                        append(" · ")
                         append(if (site.isBlocked) "Blocked" else "Allowed")
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
+                    maxLines = if (compactActions) 2 else 1,
                     overflow = TextOverflow.Ellipsis
                 )
             }
 
-            if (site.isCustom && !selectionMode) {
+            if (site.isCustom && !selectionMode && !compactActions) {
                 IconButton(onClick = { onDeleteRequest(site) }) {
                     Icon(
                         Icons.Rounded.Delete,
@@ -2339,7 +2401,7 @@ private fun WebsiteRow(
                 }
             }
 
-            if (!selectionMode) {
+            if (!selectionMode && !compactActions) {
                 PermanentLockButton(
                     isPermanent = site.isPermanent,
                     label = site.displayName,
@@ -2397,6 +2459,30 @@ private fun WebsiteRow(
                 }
             }
         }
+        if (compactActions && !selectionMode) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(start = 66.dp, end = 10.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.End
+            ) {
+                Text(
+                    text = if (site.isBlocked) "Blocked" else "Allowed",
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (site.isCustom) IconButton(onClick = { onDeleteRequest(site) }) {
+                    Icon(Icons.Rounded.Delete, contentDescription = "Remove ${site.domain}")
+                }
+                PermanentLockButton(
+                    isPermanent = site.isPermanent,
+                    label = site.displayName,
+                    onClick = onPermanentToggle,
+                    enabled = !boundariesFrozen
+                )
+            }
+        }
+        }
     }
 }
 
@@ -2411,7 +2497,8 @@ private fun PermanentLockButton(
     isPermanent: Boolean,
     label: String,
     onClick: () -> Unit,
-    enabled: Boolean
+    enabled: Boolean,
+    supportsRemoval: Boolean = true
 ) {
     val contentColor = when {
         !enabled -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
@@ -2424,8 +2511,10 @@ private fun PermanentLockButton(
         modifier = Modifier
             .size(48.dp)
             .semantics {
-                contentDescription = if (isPermanent) {
+                contentDescription = if (isPermanent && supportsRemoval) {
                     "Stop always blocking $label"
+                } else if (isPermanent) {
+                    "Always blocked: $label"
                 } else {
                     "Always block $label"
                 }
@@ -2469,6 +2558,8 @@ private fun InstalledAppRow(
     onLongPress: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
+    val configuration = LocalConfiguration.current
+    val compactActions = configuration.screenWidthDp < 400 || configuration.fontScale >= 1.2f
     val switchEnabled = !(boundariesFrozen && app.isBlocked)
     val rowEnabled = true
     val interactionSource = remember { MutableInteractionSource() }
@@ -2498,6 +2589,7 @@ private fun InstalledAppRow(
                 }
             )
     ) {
+        Column {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -2527,10 +2619,10 @@ private fun InstalledAppRow(
                     text = if (!app.isInstalled) {
                         "Not installed"
                     } else buildString {
-                        if (app.isPermanent) append("Always blocked Â· ")
+                        if (app.isPermanent) append("Always blocked · ")
                         append(app.category)
-                        if (app.todayMinutes > 0) append(" Â· ${app.todayMinutes}m today")
-                        if (limitMinutes != null) append(" Â· ${limitMinutes}m limit")
+                        if (app.todayMinutes > 0) append(" · ${app.todayMinutes}m today")
+                        if (limitMinutes != null) append(" · ${limitMinutes}m limit")
                     },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -2539,7 +2631,7 @@ private fun InstalledAppRow(
                 )
             }
 
-            if (!selectionMode) {
+            if (!selectionMode && !compactActions) {
                 LimitTextButton(
                     appName = app.appName,
                     limitMinutes = limitMinutes,
@@ -2551,7 +2643,8 @@ private fun InstalledAppRow(
                     isPermanent = app.isPermanent,
                     label = app.appName,
                     onClick = onPermanentToggle,
-                    enabled = !boundariesFrozen
+                    enabled = !boundariesFrozen,
+                    supportsRemoval = false
                 )
             }
 
@@ -2607,6 +2700,28 @@ private fun InstalledAppRow(
                     )
                 }
             }
+        }
+        if (!selectionMode && compactActions) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(start = 58.dp, end = 10.dp),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                LimitTextButton(
+                    appName = app.appName,
+                    limitMinutes = limitMinutes,
+                    usedMinutes = app.todayMinutes,
+                    onClick = { onLimitClick(app) }
+                )
+                PermanentLockButton(
+                    isPermanent = app.isPermanent,
+                    label = app.appName,
+                    onClick = onPermanentToggle,
+                    enabled = !boundariesFrozen,
+                    supportsRemoval = false
+                )
+            }
+        }
         }
     }
 }
@@ -2740,7 +2855,7 @@ private fun AppLimitDialog(
         onDismissRequest = onDismiss,
         title = {
             Text(
-                "Daily limit â€” ${app.appName}",
+                "Daily limit — ${app.appName}",
                 style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
             )
         },
@@ -2752,7 +2867,7 @@ private fun AppLimitDialog(
                             if (app.isInstalled) {
                                 "FocusLock blocks ${app.appName} after this much use each day."
                             } else {
-                                "${app.appName} isn't installed right now â€” the limit applies when you reinstall it."
+                                "${app.appName} isn't installed right now — the limit applies when you reinstall it."
                             }
                         )
                         append(" Used today: ${app.todayMinutes}m.")
@@ -2872,11 +2987,13 @@ private fun SelectionActionBar(
 private fun MergedGroupsSection(
     groups: List<TargetGroup>,
     usageByGroup: Map<String, Long>,
+    localAppMinutes: Map<String, Long>,
     onNew: () -> Unit,
     onEdit: (TargetGroup) -> Unit,
     onDelete: (TargetGroup) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var expanded by rememberSaveable { mutableStateOf(true) }
     Column(modifier.fillMaxWidth()) {
         Row(
             modifier = Modifier
@@ -2891,7 +3008,7 @@ private fun MergedGroupsSection(
             )
             Spacer(Modifier.width(8.dp))
             Text(
-                text = "Merged groups",
+                text = "Merged limits",
                 style = MaterialTheme.typography.titleSmall.copy(
                     fontWeight = FontWeight.SemiBold,
                     letterSpacing = 0.1.sp,
@@ -2900,15 +3017,11 @@ private fun MergedGroupsSection(
                 maxLines = 1,
                 modifier = Modifier.weight(1f),
             )
-            if (groups.isNotEmpty()) {
-                Text(
-                    text = "${groups.size}",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                )
-                Spacer(Modifier.width(4.dp))
-            }
+            if (groups.isNotEmpty()) TextButton(
+                onClick = { expanded = !expanded },
+                modifier = Modifier.heightIn(min = 48.dp),
+            ) { Text(if (expanded) "Hide ${groups.size}" else "Show ${groups.size}") }
+            Spacer(Modifier.width(8.dp))
             TextButton(
                 onClick = onNew,
                 contentPadding = PaddingValues(horizontal = 10.dp),
@@ -2920,17 +3033,18 @@ private fun MergedGroupsSection(
                     modifier = Modifier.size(16.dp),
                 )
                 Spacer(Modifier.width(4.dp))
-                Text("New", style = MaterialTheme.typography.labelLarge)
+                Text("Create", style = MaterialTheme.typography.labelLarge)
             }
         }
         if (groups.isEmpty()) {
             Text(
-                text = "Merge an app and a website (e.g. the YouTube app + youtube.com) into one bucket with a shared daily limit.",
+                text = "Combine apps and websites under one daily limit.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(start = 4.dp, end = 4.dp, bottom = 4.dp),
+                modifier = Modifier.padding(start = 40.dp, bottom = 4.dp),
             )
-        } else {
+        }
+        if (expanded && groups.isNotEmpty()) {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2939,9 +3053,19 @@ private fun MergedGroupsSection(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 groups.forEach { group ->
+                    // Synced totals can be absent while offline. Use the local UsageStats
+                    // total as a floor; summing both would count this device twice.
+                    val localSeconds = group.members
+                        .filter { it.targetKind == "app" }
+                        .sumOf { member ->
+                            (localAppMinutes[member.targetKey]
+                                ?: localAppMinutes.entries.firstOrNull {
+                                    it.key.equals(member.targetKey, ignoreCase = true)
+                                }?.value ?: 0L) * 60L
+                        }
                     MergedGroupRow(
                         group = group,
-                        usageSeconds = usageByGroup[group.groupId] ?: 0L,
+                        usageSeconds = maxOf(usageByGroup[group.groupId] ?: 0L, localSeconds),
                         onEdit = { onEdit(group) },
                         onDelete = { onDelete(group) },
                     )
@@ -3005,7 +3129,7 @@ private fun MergedGroupRow(
                 }
                 Column(horizontalAlignment = Alignment.End) {
                     Text(
-                        text = if (usageSeconds > 0L) formatUsageSeconds(usageSeconds) else "â€”",
+                        text = if (usageSeconds > 0L) formatUsageSeconds(usageSeconds) else "—",
                         style = MaterialTheme.typography.titleSmall.copy(
                             fontWeight = FontWeight.SemiBold,
                             fontFeatureSettings = "tnum",
@@ -3199,7 +3323,7 @@ private fun GroupEditorDialog(
 
     val parsedLimit = limitInput.trim().toIntOrNull()?.takeIf { it in 1..1440 }
     val limitTextInvalid = limitInput.isNotBlank() && parsedLimit == null
-    val canSave = name.isNotBlank() && selected.value.size >= 2 && (!limitEnabled || !limitTextInvalid)
+    val canSave = name.isNotBlank() && selected.value.size >= 2 && (!limitEnabled || parsedLimit != null)
 
     val trimmedQuery = memberQuery.trim()
     val filteredApps = remember(appChoices, trimmedQuery) {
@@ -3254,7 +3378,7 @@ private fun GroupEditorDialog(
                 )
 
                 Text(
-                    text = "Combined daily limit",
+                    text = "Combined daily limit · Off tracks usage without blocking",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -3476,7 +3600,14 @@ private fun GroupEditorDialog(
                 }
                 if (selected.value.size < 2) {
                     Text(
-                        text = "Pick at least 2 members to merge â€” you can mix apps and websites.",
+                        text = "Pick at least 2 members to merge — you can mix apps and websites.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                if (limitEnabled && parsedLimit == null && !limitTextInvalid) {
+                    Text(
+                        text = "Choose a daily limit or turn it off.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.error,
                     )

@@ -11,9 +11,16 @@ let mem = {
   lastEnforced: new Map(), // tabId -> last URL a verdict was delivered for
   lastFlushedDay: null,    // JSON of today's stats map at the last persist
 };
+let syncInFlight = null;
+let lastCloudRefreshAttemptAt = 0;
+const CLOUD_VERDICT_MAX_AGE_MS = 15 * 1000;
 
 // ---------- helpers ----------
 function nowMs() { return Date.now(); }
+
+function strictIsActive(state, t) {
+  return Boolean(state.strictMode) && (!state.strictEndsAt || state.strictEndsAt > (t || nowMs()));
+}
 
 function hhmmToMin(s) {
   const [h, m] = String(s || '0:0').split(':').map(Number);
@@ -71,7 +78,7 @@ function verdictFor(urlStr, state, t) {
   // Windows. Keep local extension lists as additional browser-only rules.
   const sharedSite = (state.cloudSites || []).find((site) =>
     site.isBlocked && self.FocusLockMatcher.matchesAny(urlStr, [site.domain]));
-  if (sharedSite && !domainAllowedBySnooze(state, shortDomain, t)) {
+  if (sharedSite && (strictIsActive(state, t) || !domainAllowedBySnooze(state, shortDomain, t))) {
     return { blocked: true, mode: 'blacklist', listId: '__shared', listName: 'Shared boundaries', reason: 'account' };
   }
 
@@ -82,7 +89,7 @@ function verdictFor(urlStr, state, t) {
   // Nuclear: block everything except allow-list
   if (state.nuclear.active && state.nuclear.until > t) {
     if (M.matchesAny(urlStr, state.nuclear.allow || [])) return { blocked: false };
-    if (domainAllowedBySnooze(state, shortDomain, t)) return { blocked: false };
+    if (!strictIsActive(state, t) && domainAllowedBySnooze(state, shortDomain, t)) return { blocked: false };
     return { blocked: true, mode: 'nuclear', listId: '__nuclear', listName: 'Nuclear Block', reason: 'nuclear' };
   }
 
@@ -92,7 +99,7 @@ function verdictFor(urlStr, state, t) {
     if (state.cloudSitesLoaded && (list.id === 'list_social' || list.id === 'list_video')) continue;
     const st = listIsActive(list, state, t);
     if (!st.active) continue;
-    if (domainAllowedBySnooze(state, shortDomain, t)) continue;
+    if (!strictIsActive(state, t) && domainAllowedBySnooze(state, shortDomain, t)) continue;
 
     if (list.mode === 'whitelist') {
       // allow-only: block unless URL is in the allowed sites
@@ -180,14 +187,40 @@ async function flushActiveSlice(t) {
 }
 
 async function syncCloud(reason) {
+  if (syncInFlight) return syncInFlight;
+  syncInFlight = (async () => {
   try {
     const state = await ensureState();
     const result = await self.FocusLockCloud.syncUsage(state, reason || 'background');
     if (result.ok && Array.isArray(result.sites)) {
+      const previousSites = JSON.stringify(state.cloudSites || []);
       state.cloudSites = result.sites.map((site) => ({ domain: site.domain, isBlocked: Boolean(site.isBlocked) }));
       state.cloudSitesLoaded = true;
+      state.cloudSitesSyncedAt = nowMs();
+      if (result.prefs) {
+        const p = result.prefs;
+        const wasStrictActive = strictIsActive(state);
+        state.strictMode = Boolean(p.strictMode);
+        state.strictEndsAt = Number(p.strictEndsAt) || 0;
+        state.strictPreset = p.strictPreset || 'custom';
+        state.strictNukeAfterFive = Boolean(p.strictNukeAfterFive);
+        const key = `${state.strictMode ? 1 : 0}:${state.strictEndsAt}`;
+        if (!wasStrictActive && strictIsActive(state)) {
+          state.strictSessionKey = key;
+          state.strictAttempts = 0;
+        }
+      }
       await Store.save(state);
       mem.state = state;
+      // A boundary can be added from Android or Windows while the matching
+      // page is already open. Re-check visible tabs as soon as that account
+      // state arrives instead of waiting for the user to navigate again.
+      if (previousSites !== JSON.stringify(state.cloudSites)) {
+        const tabs = await chrome.tabs.query({});
+        await Promise.allSettled(tabs
+          .filter((tab) => tab.id >= 0 && tab.url && !M.isInternalUrl(tab.url))
+          .map((tab) => enforceTab(tab.id, tab.url)));
+      }
     } else if (!result.signedIn && state.cloudSitesLoaded) {
       state.cloudSites = [];
       state.cloudSitesLoaded = false;
@@ -198,7 +231,24 @@ async function syncCloud(reason) {
   } catch (error) {
     console.warn('[focuslock] cloud sync failed', error);
     return { signedIn: false, ok: false, error: error && error.message ? error.message : 'Sync failed' };
+  } finally {
+    syncInFlight = null;
   }
+  })();
+  return syncInFlight;
+}
+
+async function refreshCloudBeforeVerdict() {
+  const state = await ensureState();
+  const now = nowMs();
+  const lastSuccess = Number(state.cloudSitesSyncedAt) || 0;
+  // Navigation is the moment stale boundaries are most harmful. Keep the
+  // minute alarm as the baseline, but allow one lightweight refresh every
+  // fifteen seconds before deciding whether a page is allowed.
+  if (now - Math.max(lastSuccess, lastCloudRefreshAttemptAt) < CLOUD_VERDICT_MAX_AGE_MS) return state;
+  lastCloudRefreshAttemptAt = now;
+  await syncCloud('navigation');
+  return ensureState();
 }
 
 async function setActive(url, tabId) {
@@ -209,7 +259,7 @@ async function setActive(url, tabId) {
 
 async function enforceTab(tabId, url) {
   if (!url) return;
-  const state = await ensureState();
+  const state = await refreshCloudBeforeVerdict();
   const v = verdictFor(url, state, nowMs());
   // Record that a verdict was delivered for this tab+URL so secondary
   // enforcement points (tabs.onUpdated) can skip duplicate work.
@@ -220,6 +270,14 @@ async function enforceTab(tabId, url) {
   state.blockedLog.unshift({ ts: nowMs(), url: url.slice(0, 500), domain, listId: v.listId, listName: v.listName });
   state.blockedLog = state.blockedLog.slice(0, 500);
   state.blockedTotal = (state.blockedTotal || 0) + 1;
+  if (strictIsActive(state)) {
+    state.strictAttempts = (state.strictAttempts || 0) + 1;
+    if (state.strictNukeAfterFive && state.strictAttempts === 5) {
+      state.nuclear = { ...(state.nuclear || {}), active: true, until: nowMs() + 10 * 60 * 1000 };
+      self.FocusLockCloud.activateNuke().catch((error) =>
+        console.warn('[focuslock] shared nuke activation failed', error));
+    }
+  }
   await Store.save(state);
   mem.state = state;
   const dest = chrome.runtime.getURL('blocked/blocked.html')
@@ -347,11 +405,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     const state = await ensureState();
     if (msg.type === 'verdict') {
-      sendResponse(verdictFor(msg.url, state, nowMs()));
+      const freshState = await refreshCloudBeforeVerdict();
+      sendResponse(verdictFor(msg.url, freshState, nowMs()));
     } else if (msg.type === 'todayStats') {
       await flushActiveSlice(nowMs());
       const key = Store.todayKey();
       sendResponse({ day: state.stats[key] || {}, blockedTotal: state.blockedTotal || 0, log: state.blockedLog.slice(0, 50) });
+    } else if (msg.type === 'cloudAuthRefresh') {
+      sendResponse(await self.FocusLockCloud.refreshAuth());
     } else if (msg.type === 'cloudSnapshot') {
       await flushActiveSlice(nowMs());
       if (msg.sync) await syncCloud('manual');

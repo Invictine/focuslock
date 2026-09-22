@@ -4,6 +4,7 @@ import { ClerkProvider, useAuth } from "@clerk/clerk-react";
 import { ConvexProviderWithClerk } from "convex/react-clerk";
 import { ConvexProvider, ConvexReactClient } from "convex/react";
 import App from "./App";
+import BlockerPage from "./BlockerPage";
 import { ClerkWebAuthProvider, DesktopBrowserAuthProvider } from "./auth";
 import { ErrorBoundary } from "./ErrorBoundary";
 import "./bootstrap.css";
@@ -41,7 +42,17 @@ if (!clerkKey || !/^pk_(test|live)_/.test(clerkKey)) missing.push("VITE_CLERK_PU
 if (!isValidConvexUrl(convexUrl)) missing.push("VITE_CONVEX_URL");
 const root = ReactDOM.createRoot(document.getElementById("root")!);
 
-if (missing.length > 0 || !clerkKey || !isValidConvexUrl(convexUrl)) {
+// The Rust side opens the blocker webview at `index.html#/blocked`. That screen
+// is fully native/local, so it renders before (and without) Clerk/Convex setup.
+if (window.location.hash.startsWith("#/blocked")) {
+  root.render(
+    <React.StrictMode>
+      <ErrorBoundary>
+        <BlockerPage />
+      </ErrorBoundary>
+    </React.StrictMode>,
+  );
+} else if (missing.length > 0 || !clerkKey || !isValidConvexUrl(convexUrl)) {
   root.render(<ConfigurationError missing={missing} />);
 } else {
   const convex = new ConvexReactClient(convexUrl);

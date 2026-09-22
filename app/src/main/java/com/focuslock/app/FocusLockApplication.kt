@@ -10,7 +10,9 @@ import com.focuslock.app.data.repository.BlockLogRepository
 import com.focuslock.app.data.repository.BlockSchedulesRepository
 import com.focuslock.app.data.repository.CreditBankRepository
 import com.focuslock.app.data.repository.FrogRepository
+import com.focuslock.app.data.repository.PermanentBlocksRepository
 import com.focuslock.app.data.repository.SettingsRepository
+import com.focuslock.app.data.repository.StrictModeAutomationRepository
 import com.focuslock.app.data.repository.TargetGroupsRepository
 import com.focuslock.app.sync.FocusSyncManager
 import com.focuslock.app.work.DailyReminderScheduler
@@ -43,6 +45,12 @@ class FocusLockApplication : Application() {
     lateinit var targetGroupsRepository: TargetGroupsRepository
         private set
 
+    lateinit var strictModeAutomationRepository: StrictModeAutomationRepository
+        private set
+
+    lateinit var permanentBlocksRepository: PermanentBlocksRepository
+        private set
+
     lateinit var syncManager: FocusSyncManager
         private set
 
@@ -59,6 +67,8 @@ class FocusLockApplication : Application() {
         blockLogRepository = BlockLogRepository(applicationContext)
         frogRepository = FrogRepository(applicationContext)
         targetGroupsRepository = TargetGroupsRepository(applicationContext)
+        strictModeAutomationRepository = StrictModeAutomationRepository(applicationContext)
+        permanentBlocksRepository = PermanentBlocksRepository(applicationContext)
         syncManager = FocusSyncManager(
             applicationContext,
             creditBankRepository,
@@ -81,6 +91,7 @@ class FocusLockApplication : Application() {
         // reminder's scheduled worker with the persisted preference at process start.
         appScope.launch {
             try {
+                permanentBlocksRepository.warm()
                 if (settingsRepository.dailyReminderEnabledFlow.first()) {
                     DailyReminderScheduler.schedule(
                         this@FocusLockApplication,

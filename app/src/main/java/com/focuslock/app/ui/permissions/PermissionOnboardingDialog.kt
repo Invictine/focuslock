@@ -230,35 +230,36 @@ fun PermissionOnboardingDialog(
                     ) {
                     // ---- Centered header: icon badge, title, progress, status pill ----
 
-                    IconBadge(
-                        icon = copy.icon,
-                        size = 48.dp,
-                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    Text(
-                        text = "Step ${safeIndex + 1} of ${missing.size}: ${copy.title}",
-                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold),
-                        textAlign = TextAlign.Center,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-                    LinearProgressIndicator(
-                        progress = { (safeIndex + 1) / missing.size.toFloat() },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(50))
-                            .height(6.dp)
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        IconBadge(
+                            icon = copy.icon,
+                            size = 40.dp,
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = copy.title,
+                                style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold),
+                                maxLines = 2,
+                            )
+                            Text(
+                                text = "Step ${safeIndex + 1} of ${missing.size}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(12.dp))
                     StatusPill(granted = granted)
 
                     // ---- Left-aligned body: explanation, numbered steps, fine print ----
 
-                    Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(12.dp))
                     Text(
                         text = copy.why,
                         style = MaterialTheme.typography.bodyMedium,
@@ -266,10 +267,10 @@ fun PermissionOnboardingDialog(
                         textAlign = TextAlign.Start,
                         modifier = Modifier.fillMaxWidth()
                     )
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
                     Column(
                         modifier = Modifier.fillMaxWidth(),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
                         copy.steps.forEachIndexed { index, step ->
                             StepRow(
@@ -278,26 +279,17 @@ fun PermissionOnboardingDialog(
                             )
                         }
                     }
-                    Spacer(modifier = Modifier.height(12.dp))
-                    Text(
-                        text = "FocusLock comes back here automatically once it's granted.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Start,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
                     // ---- Actions ----
 
-                    Spacer(modifier = Modifier.height(24.dp))
+                    Spacer(modifier = Modifier.height(16.dp))
                     Button(
                         onClick = { if (granted) onDismiss() else onGrant(kind) },
                         shape = RoundedCornerShape(16.dp),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(50.dp)
+                            .heightIn(min = 56.dp)
                     ) {
-                        Text(if (granted) { if (isLast) "Done" else "Next" } else "Open settings")
+                        Text(if (granted) { if (isLast) "Done" else "Next step" } else "Open Settings")
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(
@@ -306,12 +298,12 @@ fun PermissionOnboardingDialog(
                     ) {
                         TextButton(
                             onClick = onDismiss,
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Skip this step") }
+                            modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                        ) { Text("Skip step") }
                         TextButton(
                             onClick = onSkipAll,
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Skip all") }
+                            modifier = Modifier.weight(1f).heightIn(min = 48.dp)
+                        ) { Text("Skip setup") }
                     }
                     }
                 }

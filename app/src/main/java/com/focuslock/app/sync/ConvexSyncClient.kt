@@ -212,6 +212,19 @@ class ConvexSyncClient(
         return try { parseSnapshot(raw) } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; null }
     }
 
+    suspend fun getStrictGuardian(): JSONObject? =
+        post("/api/query", "strictApproval:getGuardian", JSONObject())
+
+    suspend fun configureStrictGuardian(email: String): Boolean =
+        post("/api/mutation", "strictApproval:configureGuardian", JSONObject().put("email", email)) != null
+
+    suspend fun getStrictApprovalState(): JSONObject? =
+        post("/api/query", "strictApproval:getApprovalState", JSONObject())
+
+    suspend fun requestStrictApproval(sessionId: String, endsAt: Long): JSONObject? =
+        post("/api/action", "strictApproval:requestApprovalEmail", JSONObject()
+            .put("strictSessionId", sessionId).put("strictEndsAt", endsAt))
+
     suspend fun saveState(balanceSec: Long, workSec: Long, scrollSec: Long, tasks: Int, date: String, updatedAt: Long): Boolean {
         val args = JSONObject()
             .put("creditBalanceSeconds", balanceSec)
@@ -507,6 +520,9 @@ class ConvexSyncClient(
         taskBonusMinutes: Int? = null,
         updatedAt: Long,
         strictMode: Boolean? = null,
+        strictEndsAt: Long? = null,
+        strictNukeAfterFive: Boolean? = null,
+        strictPreset: String? = null,
         weeklyReport: Boolean? = null,
         dailyReminderMinutes: Int? = null,
         globalDailyCapMinutes: Int? = null,
@@ -521,6 +537,9 @@ class ConvexSyncClient(
             args.put("taskBonusMinutesUpdatedAt", updatedAt)
         }
         if (strictMode != null) args.put("strictMode", strictMode)
+        if (strictEndsAt != null) args.put("strictEndsAt", strictEndsAt)
+        if (strictNukeAfterFive != null) args.put("strictNukeAfterFive", strictNukeAfterFive)
+        if (strictPreset != null) args.put("strictPreset", strictPreset)
         if (weeklyReport != null) args.put("weeklyReport", weeklyReport)
         if (dailyReminderMinutes != null) args.put("dailyReminderMinutes", dailyReminderMinutes)
         if (globalDailyCapMinutes != null) args.put("globalDailyCapMinutes", globalDailyCapMinutes)
@@ -534,6 +553,11 @@ class ConvexSyncClient(
         val taskBonusMinutes: Int?,
         val taskBonusMinutesUpdatedAt: Long,
         val strictMode: Boolean? = null,
+        val strictEndsAt: Long? = null,
+        val strictApprovedEndsAt: Long? = null,
+        val strictApprovedAt: Long? = null,
+        val strictNukeAfterFive: Boolean? = null,
+        val strictPreset: String? = null,
         val weeklyReport: Boolean? = null,
         val dailyReminderMinutes: Int? = null,
         val globalDailyCapMinutes: Int? = null,
@@ -769,6 +793,11 @@ class ConvexSyncClient(
         taskBonusMinutes = if (p.has("taskBonusMinutes") && !p.isNull("taskBonusMinutes")) p.optInt("taskBonusMinutes") else null,
         taskBonusMinutesUpdatedAt = p.optLong("taskBonusMinutesUpdatedAt", 0L),
         strictMode = if (p.has("strictMode") && !p.isNull("strictMode")) p.optBoolean("strictMode") else null,
+        strictEndsAt = if (p.has("strictEndsAt") && !p.isNull("strictEndsAt")) p.optLong("strictEndsAt") else null,
+        strictApprovedEndsAt = p.optLong("strictApprovedEndsAt", 0L),
+        strictApprovedAt = p.optLong("strictApprovedAt", 0L),
+        strictNukeAfterFive = if (p.has("strictNukeAfterFive") && !p.isNull("strictNukeAfterFive")) p.optBoolean("strictNukeAfterFive") else null,
+        strictPreset = if (p.has("strictPreset") && !p.isNull("strictPreset")) p.optString("strictPreset") else null,
         weeklyReport = if (p.has("weeklyReport") && !p.isNull("weeklyReport")) p.optBoolean("weeklyReport") else null,
         dailyReminderMinutes = if (p.has("dailyReminderMinutes") && !p.isNull("dailyReminderMinutes")) p.optInt("dailyReminderMinutes") else null,
         globalDailyCapMinutes = if (p.has("globalDailyCapMinutes") && !p.isNull("globalDailyCapMinutes")) p.optInt("globalDailyCapMinutes") else null,

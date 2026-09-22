@@ -145,6 +145,9 @@ export type UserPrefs = {
   _creationTime?: number;
   userId?: string;
   strictMode?: boolean;
+  strictEndsAt?: number;
+  strictPreset?: string;
+  strictNukeAfterFive?: boolean;
   weeklyReport?: boolean;
   dailyReminderMinutes?: number;
   globalDailyCapMinutes?: number;

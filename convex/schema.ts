@@ -189,6 +189,17 @@ export default defineSchema({
   userPrefs: defineTable({
     userId: v.string(),
     strictMode: v.boolean(),
+    strictEndsAt: v.optional(v.number()),
+    // Opaque client-generated commitment identity. Approval requests are
+    // bound to this value so an old email cannot unlock a later commitment.
+    strictSessionId: v.optional(v.string()),
+    // Server-only approval marker. The client may apply it only when both
+    // values match the currently active commitment.
+    strictApprovedEndsAt: v.optional(v.number()),
+    strictApprovedAt: v.optional(v.number()),
+    strictApprovedSessionId: v.optional(v.string()),
+    strictNukeAfterFive: v.optional(v.boolean()),
+    strictPreset: v.optional(v.string()),
     weeklyReport: v.boolean(),
     dailyReminderMinutes: v.optional(v.number()),
     globalDailyCapMinutes: v.optional(v.number()),
@@ -209,4 +220,32 @@ export default defineSchema({
     unlockedAt: v.optional(v.number()),
     updatedAt: v.number(),
   }).index("by_user", ["userId"]),
+
+  // Guardian configuration is frozen for the lifetime of an active strict
+  // commitment. There is at most one row per account.
+  strictGuardians: defineTable({
+    userId: v.string(),
+    email: v.string(),
+    configuredAt: v.number(),
+    updatedAt: v.number(),
+  }).index("by_user", ["userId"]),
+
+  // The raw approval token is never stored. A request is single-use and is
+  // consumed transactionally by the internal HTTP approval handler.
+  strictApprovalRequests: defineTable({
+    userId: v.string(),
+    strictSessionId: v.string(),
+    strictEndsAt: v.number(),
+    tokenHash: v.string(),
+    expiresAt: v.number(),
+    createdAt: v.number(),
+    status: v.union(v.literal("pending"), v.literal("sent"), v.literal("failed"), v.literal("approved"), v.literal("expired")),
+    consumedAt: v.optional(v.number()),
+    sentAt: v.optional(v.number()),
+    failedAt: v.optional(v.number()),
+    failureReason: v.optional(v.string()),
+  })
+    .index("by_token_hash", ["tokenHash"])
+    .index("by_user_created", ["userId", "createdAt"])
+    .index("by_user_session", ["userId", "strictSessionId"]),
 });

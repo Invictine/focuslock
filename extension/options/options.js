@@ -76,14 +76,16 @@
       const div = document.createElement('div');
       div.className = 'card';
       div.innerHTML = `
-        <div class="listhead">
+        <details class="list-editor">
+        <summary class="listhead">
           <input data-f="name" value="${esc(l.name)}" style="font-weight:700;max-width:220px" ${locked ? 'disabled' : ''} />
           <span class="badge ${l.enabled ? 'on' : ''}">${l.enabled ? '● active' : '○ off'}</span>
           <span class="badge">${esc(l.mode)}</span>${lockInfo(l)}
           <span style="flex:1"></span>
           <button data-a="toggle">${l.enabled ? 'Disable' : 'Enable'}</button>
           <button data-a="del" class="red" ${locked ? 'disabled' : ''}>Delete</button>
-        </div>
+        </summary>
+        <div class="list-editor-body">
         <div class="grid2">
           <div><label>Sites / patterns (one per line)</label><textarea data-f="sites" ${locked ? 'disabled' : ''}>${esc(l.sites.join('\n'))}</textarea></div>
           <div><label>Exceptions — never block (one per line)</label><textarea data-f="exceptions" ${locked ? 'disabled' : ''}>${esc((l.exceptions || []).join('\n'))}</textarea></div>
@@ -96,7 +98,8 @@
           <div><label>Daily limit (minutes on these sites, 0 = off)</label><input data-f="dailyLimitMin" type="number" min="0" max="1440" value="${l.dailyLimitMin || 0}" ${locked ? 'disabled' : ''} /></div>
         </div>
         <label style="margin-top:10px"><input data-f="alwaysOn" type="checkbox" style="width:auto" ${l.alwaysOn ? 'checked' : ''} ${locked ? 'disabled' : ''} /> Always on when no schedule matches</label>
-        <div class="btnrow"><button data-a="save" class="go" ${locked ? 'disabled' : ''}>Save list</button></div>`;
+        <div class="btnrow"><button data-a="save" class="go" ${locked ? 'disabled' : ''}>Save list</button></div>
+        </div></details>`;
       div.querySelector('[data-a="toggle"]').onclick = async () => {
         if (locked) return toast('Frozen — cannot disable until timer ends.');
         if (l.enabled && state.security.hash) {
@@ -440,7 +443,18 @@
     renderSyncStatus();
   }
 
-  setInterval(renderLockdown, 1000);
+  // Only tick the visible countdown. Rebuilding badges every second while the
+  // dashboard is idle or hidden causes avoidable DOM work.
+  let wasCountdownActive = false;
+  setInterval(() => {
+    if (document.hidden || !state) return;
+    const now = Date.now();
+    const activeNuclear = state.nuclear?.active && state.nuclear.until > now;
+    const frozenList = state.lists.some(list => list.lockedUntil > now);
+    const countdownActive = Boolean(activeNuclear || frozenList);
+    if (countdownActive || wasCountdownActive) renderLockdown();
+    wasCountdownActive = countdownActive;
+  }, 1000);
   setInterval(() => { if (!document.hidden) void refreshProtection(); }, 30000);
 
   // ---- Focus overview: cloud dashboard, rings, graph, work log, timer ----

@@ -153,7 +153,7 @@ class BlockerActivity : ComponentActivity() {
                         "Eat the frog to unlock.",
                         Toast.LENGTH_SHORT
                     ).show()
-                } else if (lockdownModeCached) {
+                } else if (lockdownModeCached || blockReason == "strict") {
                     Toast.makeText(
                         this@BlockerActivity,
                         "Lockdown mode: unlocking disabled.",
@@ -194,6 +194,7 @@ class BlockerActivity : ComponentActivity() {
         // FROG HARD LOCK: skipped entirely — credits never lift the frog lock.
         if (!isPermanentBlock() && !isFrogBlocked()) {
             lifecycleScope.launch {
+                if (isPermanentBlockNow()) return@launch
                 val bank = FocusLockApplication.instance.creditBankRepository
                 val balanceNow = try { bank.getBalanceSeconds() } catch (_: Exception) { 0L }
                 val prefs = blockSessionPrefs()
@@ -204,7 +205,7 @@ class BlockerActivity : ComponentActivity() {
                     .putLong(KEY_BLOCK_STARTED_AT, System.currentTimeMillis())
                     .apply()
                 if (balanceAtPreviousBlock != Long.MIN_VALUE && balanceNow > balanceAtPreviousBlock) {
-                    val lockdown = FocusLockApplication.instance.settingsRepository.lockdownModeFlow.first()
+                    val lockdown = isStrictActive()
                     if (!lockdown) {
                         val earnedMinutes = ((balanceNow - balanceAtPreviousBlock) + 59) / 60
                         Toast.makeText(
@@ -237,17 +238,18 @@ class BlockerActivity : ComponentActivity() {
                     ).show()
                     return
                 }
-                // Permanent block: credits are banked but never dismiss this screen.
-                if (isPermanentBlock()) {
-                    Toast.makeText(
-                        this@BlockerActivity,
-                        "Permanently blocked: credits saved, this app stays locked.",
-                        Toast.LENGTH_LONG
-                    ).show()
-                    return
-                }
                 lifecycleScope.launch {
-                    val lockdown = FocusLockApplication.instance.settingsRepository.lockdownModeFlow.first()
+                    // Re-read the dedicated store here: the activity may have been
+                    // created before the DataStore collector warmed its mirror.
+                    if (isPermanentBlockNow()) {
+                        Toast.makeText(
+                            this@BlockerActivity,
+                            "Permanently blocked: credits saved, this app stays locked.",
+                            Toast.LENGTH_LONG
+                        ).show()
+                        return@launch
+                    }
+                    val lockdown = isStrictActive()
                     if (lockdown) {
                         Toast.makeText(
                             this@BlockerActivity,
@@ -351,10 +353,25 @@ class BlockerActivity : ComponentActivity() {
         blockedWebsite = intent.getStringExtra(EXTRA_BLOCKED_WEBSITE)
         blockedPackage = intent.getStringExtra(EXTRA_BLOCKED_PACKAGE) ?: "Blocked App"
         blockReason = intent.getStringExtra(EXTRA_BLOCK_REASON)
+        // Older callers may omit the reason. Recover the permanent presentation from
+        // the dedicated local store so such a launch cannot expose unlock controls.
+        if (blockReason != "permanent" && blockedWebsite == null &&
+            FocusLockApplication.instance.permanentBlocksRepository.isPermanentlyBlocked(blockedPackage)) {
+            blockReason = "permanent"
+        }
     }
 
     /** True when the current block reason is the permanent (always-block) reason. */
     private fun isPermanentBlock(): Boolean = blockReason == "permanent"
+
+    /** Re-check the dedicated local store before every unlock-capable action. */
+    private suspend fun isPermanentBlockNow(): Boolean {
+        val repository = FocusLockApplication.instance.permanentBlocksRepository
+        return isPermanentBlock() || run {
+            try { repository.warm() } catch (_: Exception) { }
+            repository.isPermanentlyBlocked(blockedPackage)
+        }
+    }
 
     /**
      * Synchronous, binder-free name for first render: the process-wide cached label
@@ -402,10 +419,14 @@ class BlockerActivity : ComponentActivity() {
         // offer it either — this is belt-and-braces).
         if (isFrogBlocked()) return
         lifecycleScope.launch {
+            if (isPermanentBlockNow()) {
+                Toast.makeText(this@BlockerActivity, "Permanently blocked: verification cannot unlock this app.", Toast.LENGTH_LONG).show()
+                return@launch
+            }
             val settings = FocusLockApplication.instance.settingsRepository
             // LOCKDOWN MODE gate: work-verify must NOT finish() the blocker. Earned
             // credits stay banked for after Lockdown Mode is turned off.
-            if (settings.lockdownModeFlow.first()) {
+            if (isStrictActive()) {
                 Toast.makeText(
                     this@BlockerActivity,
                     "Lockdown mode: unlocking disabled. Credits saved for later.",
@@ -466,7 +487,7 @@ class BlockerActivity : ComponentActivity() {
      */
     private fun continueToChrome(domain: String?) {
         // FROG HARD LOCK: no website escape while the frog is unfinished.
-        if (isFrogBlocked()) return
+        if (isFrogBlocked() || blockReason == "strict" || lockdownModeCached) return
         if (!domain.isNullOrBlank()) {
             AppMonitorAccessibilityService.suppressDomain(domain, 90_000L)
         }
@@ -475,6 +496,10 @@ class BlockerActivity : ComponentActivity() {
 
     /** True when the current block reason is the eat-the-frog hard lock. */
     private fun isFrogBlocked(): Boolean = blockReason == FrogCoordinator.REASON_FROG
+
+    private suspend fun isStrictActive(): Boolean = blockReason == "strict" ||
+        FocusLockApplication.instance.settingsRepository.isLockdownModeEnabled() ||
+        FocusLockApplication.instance.strictModeAutomationRepository.isActivationActiveNow()
 
     /**
      * Starts the blocker-side frog focus session. Open-ended stopwatch bounded by the
@@ -594,7 +619,11 @@ class BlockerActivity : ComponentActivity() {
         // FROG HARD LOCK: no emergency pass is available (or rendered) for this reason.
         if (isFrogBlocked()) return
         lifecycleScope.launch {
-            val lockdown = FocusLockApplication.instance.settingsRepository.lockdownModeFlow.first()
+            if (isPermanentBlockNow()) {
+                Toast.makeText(this@BlockerActivity, "Permanently blocked: emergency unlock is unavailable.", Toast.LENGTH_LONG).show()
+                return@launch
+            }
+            val lockdown = isStrictActive()
             if (lockdown) {
                 Toast.makeText(this@BlockerActivity, "Lockdown mode: unlocking disabled.", Toast.LENGTH_LONG).show()
                 return@launch
@@ -673,6 +702,7 @@ fun PixelBlockerScreen(
     }
     val settings = FocusLockApplication.instance.settingsRepository
     val lockdownMode by settings.lockdownModeFlow.collectAsStateWithLifecycle(initialValue = false)
+    val strictActive = lockdownMode || blockReason == "strict"
 
     // Lifecycle-safe attempt counter: block events for this app since local midnight.
     // Nullable while DataStore loads so the stat line can stay hidden.
@@ -694,10 +724,10 @@ fun PixelBlockerScreen(
         }
     }
 
-    val hardState = isPermanentBlock || lockdownMode
+    val hardState = isPermanentBlock || strictActive
     val stateLabel = when {
         isPermanentBlock -> "Permanently blocked"
-        lockdownMode -> "Lockdown active"
+        strictActive -> "Strict Mode active"
         else -> "Locked"
     }
     val pillContainerColor = if (hardState) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceContainerHighest
@@ -790,10 +820,10 @@ fun PixelBlockerScreen(
                 }
 
                 // Lockdown banner: compact single line (unlocks already gated in the actions).
-                if (lockdownMode) {
+                if (strictActive) {
                     Spacer(modifier = Modifier.height(10.dp))
                     Text(
-                        text = "Unlocks, verification and emergency passes are disabled in Lockdown mode.",
+                        text = "Lockdown is on. Unlocks and emergency passes are unavailable.",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.error,
                         textAlign = TextAlign.Center,
@@ -805,7 +835,7 @@ fun PixelBlockerScreen(
                 if (isPermanentBlock && !isWebsite) {
                     Spacer(modifier = Modifier.height(10.dp))
                     Text(
-                        text = "Always blocked: no emergency pass or work unlock. Turn it off in FocusLock to restore.",
+                        text = "Permanently blocked on this device. This block has no expiry or in-app unlock.",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.outline,
                         textAlign = TextAlign.Center,
@@ -817,7 +847,7 @@ fun PixelBlockerScreen(
 
                 if (isWebsite) {
                     // Website: continue to the browser for 90s unless the site is permanent.
-                    if (!isPermanentBlock) {
+                    if (!isPermanentBlock && !strictActive) {
                         Button(
                             onClick = onContinueToChrome,
                             colors = ButtonDefaults.buttonColors(
@@ -940,21 +970,21 @@ fun PixelBlockerScreen(
                     // Verify stays disabled for permanent blocks (existing gating semantics).
                     TextButton(
                         onClick = onVerifySync,
-                        enabled = !lockdownMode && !isPermanentBlock
+                        enabled = !strictActive && !isPermanentBlock
                     ) {
                         Icon(
-                            if (lockdownMode || isPermanentBlock) Icons.Default.Lock else Icons.Default.Refresh,
+                            if (strictActive || isPermanentBlock) Icons.Default.Lock else Icons.Default.Refresh,
                             contentDescription = null,
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Sync & Verify Work", style = MaterialTheme.typography.labelLarge)
+                        Text("Verify completed work", style = MaterialTheme.typography.labelLarge)
                     }
                 }
 
                 // Emergency pass: compact text button. Apps only — website blocks already
                 // have the explicit "Continue to Chrome" escape, no need for two exits.
-                if (!isPermanentBlock && !lockdownMode && !isWebsite) {
+                if (!isPermanentBlock && !strictActive && !isWebsite) {
                     EmergencyUnlockButton(
                         cooldownDeadlineMillis = emergencyCooldownDeadline,
                         onEmergencyUnlock = onEmergencyUnlock

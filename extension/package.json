@@ -6,7 +6,8 @@
   "scripts": {
     "prebuild": "node ../scripts/generate-theme.mjs --check",
     "build": "node build.mjs",
-    "check": "node --check background/service-worker.js && node --check popup/popup.js && node --check options/options-auth.js && node --check src/cloud-sync.js"
+    "check": "node --check background/service-worker.js && node --check popup/popup.js && node --check options/options-auth.js && node --check src/cloud-sync.js",
+    "test": "node tests/cloud-sync.test.mjs && node tests/auth-ui.test.mjs && node --test tests/auth-behavior.test.mjs"
   },
   "dependencies": {
     "@clerk/chrome-extension": "^3.1.81"

@@ -1,0 +1,6 @@
+{
+  "name": "convex",
+  "claims": { "aud": "convex" },
+  "lifetime": 60,
+  "allowed_clock_skew": 5
+}

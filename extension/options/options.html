@@ -58,19 +58,23 @@
   .range-head output { font-weight: 700; font-variant-numeric: tabular-nums; color: var(--fl-on-surface,#eee9e7); }
   section.tab { display: none; } section.tab.on { display: block; }
   code { background: var(--fl-surface-container-lowest,#09090b); padding: 2px 6px; border-radius: var(--fl-radius-small,8px); border: 1px solid var(--fl-outline-variant,#353235); font-size: 12px; }
-  .account-card { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 18px; align-items: center; background: var(--fl-surface-container-low,#141416); border-color: var(--fl-outline-variant,#353235); }
+  .account-card { display: grid; grid-template-columns: minmax(0, 1fr) minmax(190px, 240px); gap: 22px; align-items: center; width: min(100%, 860px); margin-inline: auto; background: var(--fl-surface-container-low,#141416); border-color: var(--fl-outline-variant,#353235); }
   .account-copy { display: flex; gap: 14px; align-items: center; min-width: 0; }
   .account-icon { width: 46px; height: 46px; display: grid; place-items: center; flex: none; border-radius: var(--fl-radius-medium,12px); background: var(--fl-primary-container,#40302d); color: var(--fl-primary,#dfbdb6); font-size: 15px; font-weight: 800; }
   .account-icon svg { width: 20px; height: 20px; }
   .account-card h2 { font-size: 18px; }
   .account-card .d { margin-top: 5px; }
-  .account-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+  .account-actions { display: flex; align-items: stretch; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+  .account-actions button { width: 100%; }
+  .account-actions .account-secondary { background: transparent; border-color: transparent; color: var(--fl-on-surface-variant,#bbb4b1); font-size: 12px; min-height: 32px; }
+  .account-actions .account-secondary:hover { color: var(--fl-on-surface,#eee9e7); background: var(--fl-surface-container-high,#252528); border-color: var(--fl-outline-variant,#353235); }
   .account-primary { background: var(--fl-primary,#dfbdb6); border-color: var(--fl-primary,#dfbdb6); color: var(--fl-on-primary,#30201d); }
   .account-primary:hover { background: var(--fl-on-primary-container,#f4dcd6); }
   .account-state { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 9px; }
   .account-state .badge { background: var(--fl-surface-container-lowest,#09090b); }
   .account-state .badge.good { color: var(--fl-success,#b7cbbb); border-color: var(--fl-success,#b7cbbb); }
-  .account-auth { grid-column: 1 / -1; background: var(--fl-surface-container-lowest,#09090b); color: var(--fl-on-surface,#eee9e7); border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-medium,12px); padding: 20px; min-height: 300px; }
+  .account-auth { grid-column: 1 / -1; width: min(100%, 480px); justify-self: center; background: var(--fl-surface-container-lowest,#09090b); color: var(--fl-on-surface,#eee9e7); border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-medium,12px); padding: 14px; min-height: 0; }
+  .account-auth > * { width: 100%; max-width: 420px; margin-inline: auto; }
   .account-auth[hidden] { display: none; }
   .account-error { grid-column: 1 / -1; color: var(--fl-error,#f2b2ad); margin: 0; font-size: 13px; }
   .listhead { flex-wrap: wrap; } .account-copy > div:last-child { min-width: 0; } .account-card h2, .account-card .d { overflow-wrap: anywhere; }
@@ -90,7 +94,51 @@
   .check-dot.off { background: var(--fl-surface-container-highest,#2d2d31); }
   .check-row .check-state { font-size: 11px; color: var(--fl-on-surface-variant,#bbb4b1); white-space: nowrap; }
   .account-hero { align-items: flex-start; }
+  /* Kept as a compatibility hook for options-auth.js; the account card owns the signed-out CTA. */
   .account-pitch[hidden], #accountDevicesCard[hidden] { display: none; }
+  .list-editor { border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-large,20px); background: var(--fl-surface-container,#1b1b1e); margin-bottom: 16px; padding: 0 20px; }
+  .list-editor > summary { list-style: none; cursor: pointer; min-height: 72px; display: flex; align-items: center; gap: 8px; }
+  .list-editor > summary::-webkit-details-marker { display: none; }
+  .list-editor > summary::before { content: '›'; color: var(--fl-on-surface-variant,#bbb4b1); font-size: 22px; width: 18px; transition: transform .15s ease; }
+  .list-editor[open] > summary::before { transform: rotate(90deg); }
+  .list-editor-body { padding: 0 0 20px; border-top: 1px solid var(--fl-outline-variant,#353235); }
+  .list-editor-body .grid2:first-child { padding-top: 8px; }
+
+  /* Apple design pass: breathable layout, predictable hierarchy, and resilient narrow windows. */
+  :where(button, input, select, textarea) { min-height: 42px; }
+  :where(button, input, select, textarea):focus-visible { outline: 3px solid color-mix(in srgb, var(--fl-primary,#dfbdb6) 72%, transparent); outline-offset: 3px; }
+  main { padding-top: 52px; }
+  .page-intro { max-width: 760px; margin-bottom: 34px; }
+  .page-intro p { max-width: 62ch; line-height: 1.55; }
+  .card { padding: 24px; margin-bottom: 20px; }
+  .card h2 { font-size: 18px; letter-spacing: -.02em; }
+  .card p.d { line-height: 1.55; max-width: 68ch; margin-bottom: 18px; }
+  .grid2 { gap: 20px; }
+  nav { gap: 8px; }
+  nav button { min-height: 44px; padding: 11px 14px; }
+  .btnrow { gap: 10px; margin-top: 16px; }
+  .mut { line-height: 1.45; }
+  .site-row, .app-row { padding: 14px 16px; margin-bottom: 10px; min-height: 64px; }
+  .site-row strong, .app-row strong { font-size: 14px; }
+  table { line-height: 1.45; }
+  th, td { padding: 12px 10px; }
+  @media (max-width: 720px) {
+    .app-shell { display: block; }
+    header { position: static; width: 100%; height: auto; border-right: 0; border-bottom: 1px solid var(--fl-outline-variant,#353235); }
+    .hwrap { height: auto; padding: 18px 16px 14px; gap: 16px; }
+    nav { display: flex; overflow-x: auto; padding-bottom: 2px; scrollbar-width: none; }
+    nav button { width: auto; flex: 0 0 auto; white-space: nowrap; }
+    .nav-label { display: none; }
+    main { padding: 28px 16px 48px; }
+    .account-card { grid-template-columns: 1fr; }
+    .account-actions { justify-content: flex-start; }
+  }
+  @media (max-width: 460px) {
+    .card { padding: 20px; border-radius: var(--fl-radius-medium,12px); }
+    .page-intro h1 { font-size: 28px; }
+    .site-row { grid-template-columns: minmax(0,1fr) auto; }
+    .site-row .btnrow { grid-column: 1 / -1; }
+  }
 
   /* Boundaries: segmented surfaces, search, chips, rows, modal */
   .segmented { display: inline-flex; gap: 4px; padding: 4px; margin-bottom: 16px; border-radius: var(--fl-radius-medium,12px); background: var(--fl-surface-container-low,#141416); border: 1px solid var(--fl-outline-variant,#353235); }
@@ -148,7 +196,7 @@
     nav button.on { background: transparent; border-color: transparent; color: var(--fl-primary,#dfbdb6); }
     .nav-label { display: none; }
     main { padding: 26px 16px 96px; }
-    .account-card { grid-template-columns: 1fr; }
+    .account-card { grid-template-columns: 1fr; width: 100%; }
     .account-actions { justify-content: flex-start; }
   }
   @media (prefers-reduced-motion: reduce) { *,*::before,*::after { transition:none !important; animation:none !important; } }
@@ -182,18 +230,19 @@
         <p class="mut" id="accountCloud" aria-live="polite"></p>
       </div>
     </div>
-    <div class="account-actions">
-      <button class="account-primary" id="accountSignIn">Sign in</button>
+    <div class="account-actions" aria-label="Account sign-in options">
+      <button class="account-primary" id="accountSignIn">Continue with Google or email</button>
+      <button class="account-secondary" id="accountEmailSignIn" type="button" hidden>Use email instead</button>
       <button class="ghost" id="accountSync" hidden>Sync now</button>
       <button class="ghost" id="accountSignOut" hidden>Sign out</button>
     </div>
     <p class="account-error" id="accountError" role="alert" hidden></p>
     <div class="account-auth" id="accountAuth" aria-label="FocusLock sign in" hidden></div>
   </section>
-  <section class="card account-pitch" id="accountPitch">
+  <section class="card account-pitch" id="accountPitch" hidden aria-hidden="true">
     <h2>Your focus, on every screen</h2>
     <p class="d">Sign in to combine Chrome website time with Android and Windows, keep boundaries in one place, and carry your leisure balance across devices.</p>
-    <div class="btnrow"><button class="account-primary" id="accountSignInPitch">Sign in to sync</button></div>
+    <div class="btnrow"><button class="account-primary" id="accountSignInPitch" type="button">Sign in to sync</button></div>
   </section>
   <section class="card" id="accountDevicesCard" hidden>
     <h2>Connected devices</h2>
@@ -303,6 +352,26 @@
 
   <section class="tab" id="tab-stats">
     <div class="grid2">
+      <div class="card">
+        <h2>Log work</h2>
+        <p class="d">Credit earned = minutes ÷ ratio + task bonus, saved to your FocusLock account.</p>
+        <label>What did you work on?</label>
+        <input id="workTitle" placeholder="e.g. Ship the Focus page" autocomplete="off" />
+        <label>Minutes (1–480)</label>
+        <input id="workMinutes" type="number" min="1" max="480" value="25" />
+        <div class="btnrow"><button id="workLog" class="go">Log work</button><span class="mut" id="workPreview"></span></div>
+      </div>
+      <div class="card">
+        <h2>Focus timer</h2>
+        <p class="d">15 / 25 / 50 minute sessions. Finishing early still earns credit after 5 minutes.</p>
+        <div class="days" id="timerPresets" role="group" aria-label="Focus duration">
+          <button type="button" data-min="15">15</button><button type="button" data-min="25" class="on">25</button><button type="button" data-min="50">50</button>
+        </div>
+        <div class="timer-face"><strong id="timerClock">25:00</strong><span class="mut" id="timerState">Ready</span></div>
+        <div class="btnrow"><button id="timerStart" class="go">Start</button><button id="timerFinish" class="ghost" disabled>Finish early</button></div>
+      </div>
+    </div>
+    <div class="grid2">
       <div class="card focus-balance">
         <div class="listhead"><h2>Leisure balance</h2><span class="badge" id="focusRatioBadge">Work : scroll 1:4</span></div>
         <p class="d" id="balanceCaption">Sign in to sync your Focus balance.</p>
@@ -338,27 +407,6 @@
       <h2>Scroll bank</h2>
       <p class="d" id="scrollBankCaption">Sign in to see your scroll bank.</p>
       <div class="bar bank"><i id="scrollBankBar" style="width:0%"></i></div>
-    </div>
-
-    <div class="grid2">
-      <div class="card">
-        <h2>Log work</h2>
-        <p class="d">Credit earned = minutes ÷ ratio + task bonus, saved to your FocusLock account.</p>
-        <label>What did you work on?</label>
-        <input id="workTitle" placeholder="e.g. Ship the Focus page" autocomplete="off" />
-        <label>Minutes (1–480)</label>
-        <input id="workMinutes" type="number" min="1" max="480" value="25" />
-        <div class="btnrow"><button id="workLog" class="go">Log work</button><span class="mut" id="workPreview"></span></div>
-      </div>
-      <div class="card">
-        <h2>Focus timer</h2>
-        <p class="d">15 / 25 / 50 minute sessions. Finishing early still earns credit after 5 minutes.</p>
-        <div class="days" id="timerPresets" role="group" aria-label="Focus duration">
-          <button type="button" data-min="15">15</button><button type="button" data-min="25" class="on">25</button><button type="button" data-min="50">50</button>
-        </div>
-        <div class="timer-face"><strong id="timerClock">25:00</strong><span class="mut" id="timerState">Ready</span></div>
-        <div class="btnrow"><button id="timerStart" class="go">Start</button><button id="timerFinish" class="ghost" disabled>Finish early</button></div>
-      </div>
     </div>
 
     <div class="card">

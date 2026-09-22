@@ -61,6 +61,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.focuslock.app.FocusLockApplication
 import com.focuslock.app.data.model.BlockedApp
+import com.focuslock.app.data.model.BlockedWebsite
 import com.focuslock.app.service.InstalledAppsRepository
 import com.focuslock.app.ui.components.AppIconTileForPackage
 import com.focuslock.app.ui.components.IconBadge
@@ -187,6 +188,7 @@ fun BoundariesScreen(
     // the row leaves the list immediately, then the override is dropped once the
     // repository write settles (the settings flow then carries the persisted state).
     val appOverrides = remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
+    val websiteOverrides = remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
     val storedAppsList = storedApps.orEmpty()
     val appOverrideMap = appOverrides.value
     val blockedApps: List<BlockedApp> = remember(storedAppsList, appOverrideMap) {
@@ -199,7 +201,10 @@ fun BoundariesScreen(
     // Subtitle count matches the "Blocked apps" list exactly: every blocked entry,
     // installed or not, so the Applications row and the list below never disagree.
     val blockedAppCount = blockedApps.size
-    val blockedWebsiteCount = storedWebsites?.count { it.isBlocked } ?: 0
+    val blockedWebsites = storedWebsites.orEmpty().filter {
+        websiteOverrides.value[it.domain] ?: it.isBlocked
+    }.sortedBy { it.displayName.lowercase() }
+    val blockedWebsiteCount = blockedWebsites.size
     val activeLimitCount = limits.count { it.value.enabled && it.value.dailyMinutes > 0 }
 
     // Rows for the overview list: installed metadata wins (it can't be stale); stored
@@ -248,6 +253,21 @@ fun BoundariesScreen(
             }
         }
     }
+    val onBlockedWebsiteToggle: (BlockedWebsite, Boolean) -> Unit = remember(settings, scope, context) {
+        { website, checked ->
+            websiteOverrides.value = websiteOverrides.value + (website.domain to checked)
+            scope.launch {
+                val ok = try {
+                    settings.setWebsiteBlocked(website.domain, checked)
+                    true
+                } catch (_: Exception) {
+                    false
+                }
+                websiteOverrides.value = websiteOverrides.value - website.domain
+                if (!ok) Toast.makeText(context, "Couldn't update ${website.displayName}.", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
     when (val tab = pickerTab) {
         null -> BoundariesOverview(
@@ -260,7 +280,9 @@ fun BoundariesScreen(
             lockdownMode = lockdownMode,
             lockdownRemainingMs = lockdownRemainingMs,
             blockedApps = blockedAppRows,
+            blockedWebsites = blockedWebsites,
             onBlockedAppToggle = onBlockedAppToggle,
+            onBlockedWebsiteToggle = onBlockedWebsiteToggle,
             onOpenApplications = { pickerTab = PickerTab.APPLICATIONS },
             onOpenWebsites = { pickerTab = PickerTab.WEBSITES }
         )
@@ -286,7 +308,9 @@ private fun BoundariesOverview(
     lockdownMode: Boolean,
     lockdownRemainingMs: Long,
     blockedApps: List<BlockedAppItem>,
+    blockedWebsites: List<BlockedWebsite>,
     onBlockedAppToggle: (BlockedAppItem, Boolean) -> Unit,
+    onBlockedWebsiteToggle: (BlockedWebsite, Boolean) -> Unit,
     onOpenApplications: () -> Unit,
     onOpenWebsites: () -> Unit
 ) {
@@ -321,31 +345,32 @@ private fun BoundariesOverview(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Row(
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
-                    verticalAlignment = Alignment.Top,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    modifier = Modifier.padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.Lock,
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                        modifier = Modifier
-                            .padding(top = 2.dp)
-                            .size(18.dp)
+                        modifier = Modifier.size(20.dp)
                     )
-                    Text(
-                        text = when {
-                            !lockdownMode -> "Boundaries Lock is ON — blocked apps can't be removed"
-                            lockdownRemainingMs > 0L ->
-                                "Strict Mode locks boundaries — blocked apps and websites can't be " +
-                                    "removed for ${formatLockdownRemaining(lockdownRemainingMs)}"
-                            else ->
-                                "Strict Mode locks boundaries — blocked apps and websites can't be " +
-                                    "removed while it's on"
-                        },
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer
-                    )
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            text = if (lockdownMode) "Strict Mode is active" else "Boundaries Lock is on",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                        Text(
+                            text = when {
+                                !lockdownMode -> "Turn it off in Settings to remove blocks."
+                                lockdownRemainingMs > 0L -> "Edits locked for ${formatLockdownRemaining(lockdownRemainingMs)}."
+                                else -> "Edits stay locked until it's off."
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                    }
                 }
                 }
             }
@@ -405,21 +430,52 @@ private fun BoundariesOverview(
                 SectionHeader("Blocked apps")
             }
             Spacer(Modifier.height(8.dp))
-            Column(
-                modifier = Modifier.animateContentSize(animationSpec = MotionTokens.SpatialIntSize),
-                verticalArrangement = Arrangement.spacedBy(UiTokens.ItemGap)
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                modifier = Modifier.fillMaxWidth()
             ) {
-                blockedApps.forEachIndexed { rowIndex, blockedApp ->
-                    StaggeredFadeSlide(
-                        visible = entered,
-                        index = 4 + minOf(rowIndex, 4),
-                        screenKey = "boundaries_overview"
-                    ) {
-                        BlockedAppToggleRow(
-                            app = blockedApp,
+                Column(modifier = Modifier.animateContentSize(animationSpec = MotionTokens.SpatialIntSize)) {
+                    blockedApps.forEachIndexed { rowIndex, blockedApp ->
+                        StaggeredFadeSlide(
+                            visible = entered,
+                            index = 4 + minOf(rowIndex, 4),
+                            screenKey = "boundaries_overview"
+                        ) {
+                            BlockedAppToggleRow(
+                                app = blockedApp,
+                                frozen = boundariesFrozen,
+                                lockedMessage = lockedMessage,
+                                onToggle = onBlockedAppToggle,
+                                showDivider = rowIndex < blockedApps.lastIndex
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (blockedWebsites.isNotEmpty()) {
+            StaggeredFadeSlide(visible = entered, index = 4, screenKey = "boundaries_overview") {
+                SectionHeader("Blocked websites")
+            }
+            Spacer(Modifier.height(8.dp))
+            Surface(
+                shape = RoundedCornerShape(20.dp),
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column {
+                    blockedWebsites.forEachIndexed { index, website ->
+                        BlockedWebsiteToggleRow(
+                            website = website,
                             frozen = boundariesFrozen,
                             lockedMessage = lockedMessage,
-                            onToggle = onBlockedAppToggle
+                            onToggle = onBlockedWebsiteToggle
+                        )
+                        if (index < blockedWebsites.lastIndex) HorizontalDivider(
+                            modifier = Modifier.padding(start = 68.dp),
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
                         )
                     }
                 }
@@ -534,16 +590,12 @@ private fun BlockedAppToggleRow(
     app: BlockedAppItem,
     frozen: Boolean,
     lockedMessage: String,
-    onToggle: (BlockedAppItem, Boolean) -> Unit
+    onToggle: (BlockedAppItem, Boolean) -> Unit,
+    showDivider: Boolean = false
 ) {
     val context = LocalContext.current
     val rowEnabled = !frozen
-    Card(
-        colors = CardDefaults.cardColors(
-            // Rows here are always blocked, so they match the picker's blocked container.
-            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest
-        ),
-        shape = RoundedCornerShape(16.dp),
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .toggleable(
@@ -556,8 +608,8 @@ private fun BlockedAppToggleRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .heightIn(min = 64.dp)
-                .padding(horizontal = 14.dp, vertical = 10.dp),
+                .heightIn(min = 56.dp)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             AppIconTileForPackage(
@@ -625,5 +677,61 @@ private fun BlockedAppToggleRow(
                 )
             }
         }
+        if (showDivider) {
+            HorizontalDivider(
+                modifier = Modifier.padding(start = 68.dp),
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
+            )
+        }
+    }
+}
+
+@Composable
+private fun BlockedWebsiteToggleRow(
+    website: BlockedWebsite,
+    frozen: Boolean,
+    lockedMessage: String,
+    onToggle: (BlockedWebsite, Boolean) -> Unit
+) {
+    val context = LocalContext.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable {
+                if (frozen) Toast.makeText(context, lockedMessage, Toast.LENGTH_SHORT).show()
+                else onToggle(website, false)
+            }
+            .heightIn(min = 64.dp)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        IconBadge(
+            icon = Icons.Rounded.Language,
+            size = UiTokens.IconTileSize,
+            containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+            contentColor = MaterialTheme.colorScheme.onTertiaryContainer
+        )
+        Column(Modifier.weight(1f)) {
+            Text(
+                text = website.displayName,
+                style = MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.Medium),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                text = website.domain,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        Switch(
+            checked = true,
+            onCheckedChange = if (frozen) null else { checked -> onToggle(website, checked) },
+            enabled = !frozen,
+            modifier = Modifier.semantics { contentDescription = "${website.displayName} website block toggle" }
+        )
     }
 }

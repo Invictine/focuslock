@@ -7,6 +7,7 @@ import {
 } from "convex/react";
 import { SignIn } from "@clerk/clerk-react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api as convexApi } from "../../convex/_generated/api";
 import {
@@ -21,7 +22,19 @@ import {
   type UsageSummary,
   type UserPrefs,
 } from "./sync";
+import { accountUsage, acknowledgeSync, enqueueSync, peekSync } from "./offlineQueue";
+import { accountClient, flushMutations, useDurableMutation, useMutationReplay } from "./durableSync";
 import { useFocusAuth } from "./auth";
+import FrogCard from "./FrogCard";
+import ApprovalUnlockPanel from "./ApprovalUnlockPanel";
+import { useStrictActive } from "./useStrictActive";
+import { MAX_STRICT_HOURS, STRICT_HOUR_OPTIONS, strictDurationLabel, strictEndError } from "./strictTiming";
+import {
+  FROG_UI_MAX_REQUIRED_MINUTES,
+  FROG_UI_MIN_REQUIRED_MINUTES,
+  addTrackedSeconds,
+  useFrogState,
+} from "./frog";
 import NukeOverlay, { NukeButton } from "./NukeOverlay";
 import "./styles.css";
 import "./loading.css";
@@ -288,7 +301,11 @@ function clampPref(n: unknown, fallback: number, min: number, max: number) {
   return Math.min(max, Math.max(min, Math.round(num)));
 }
 
-function readLocalPrefs(): SyncedPrefs {
+function accountStorageKey(accountKey: string | null | undefined) {
+  return accountKey ? `${PREFS_CACHE_KEY}:${encodeURIComponent(accountKey)}` : `${PREFS_CACHE_KEY}:offline`;
+}
+
+function readLocalPrefs(accountKey?: string | null): SyncedPrefs {
   const base: SyncedPrefs = {
     workRatio: DEFAULT_WORK_RATIO,
     workRatioUpdatedAt: 0,
@@ -296,7 +313,8 @@ function readLocalPrefs(): SyncedPrefs {
     taskBonusMinutesUpdatedAt: 0,
   };
   try {
-    const raw = window.localStorage.getItem(PREFS_CACHE_KEY);
+    const scopedKey = accountStorageKey(accountKey);
+    const raw = window.localStorage.getItem(scopedKey) || (accountKey ? null : window.localStorage.getItem(PREFS_CACHE_KEY));
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<SyncedPrefs>;
       return {
@@ -344,9 +362,9 @@ function readLocalPrefs(): SyncedPrefs {
   return base;
 }
 
-function writeLocalPrefs(prefs: SyncedPrefs) {
+function writeLocalPrefs(prefs: SyncedPrefs, accountKey?: string | null) {
   try {
-    window.localStorage.setItem(PREFS_CACHE_KEY, JSON.stringify(prefs));
+    window.localStorage.setItem(accountStorageKey(accountKey), JSON.stringify(prefs));
   } catch {
     /* private mode: keep in memory */
   }
@@ -431,9 +449,9 @@ function useLocalFlag(key: string, initial = false): [boolean, (value: boolean) 
   return [value, update];
 }
 
-function useSyncedPrefs(dashboard: any) {
-  const savePrefs = useMutation(syncApi.savePrefs);
-  const [prefs, setPrefs] = useState<SyncedPrefs>(() => readLocalPrefs());
+function useSyncedPrefs(dashboard: any, accountKey?: string | null) {
+  const savePrefs = useDurableMutation(syncApi.savePrefs);
+  const [prefs, setPrefs] = useState<SyncedPrefs>(() => readLocalPrefs(accountKey));
   const prefsRef = useRef(prefs);
   prefsRef.current = prefs;
   const remoteUpdatedAtRef = useRef(0);
@@ -508,11 +526,18 @@ function useSyncedPrefs(dashboard: any) {
     if (!samePrefs(merged, local)) {
       prefsRef.current = merged;
       setPrefs(merged);
-      writeLocalPrefs(merged);
+      writeLocalPrefs(merged, accountKey);
     }
     if (pushRatio || pushBonus)
       schedulePush({ ratio: pushRatio, bonus: pushBonus });
-  }, [dashboard?.prefs, schedulePush]);
+  }, [accountKey, dashboard?.prefs, schedulePush]);
+
+  useEffect(() => {
+    const next = readLocalPrefs(accountKey);
+    prefsRef.current = next;
+    setPrefs(next);
+    pendingRef.current = { ratio: false, bonus: false };
+  }, [accountKey]);
 
   // Best-effort flush if the app closes mid-debounce.
   useEffect(
@@ -537,10 +562,10 @@ function useSyncedPrefs(dashboard: any) {
       };
       prefsRef.current = updated;
       setPrefs(updated);
-      writeLocalPrefs(updated);
+      writeLocalPrefs(updated, accountKey);
       schedulePush({ ratio: true, bonus: false });
     },
-    [schedulePush],
+    [accountKey, schedulePush],
   );
 
   const setTaskBonus = useCallback(
@@ -558,10 +583,10 @@ function useSyncedPrefs(dashboard: any) {
       };
       prefsRef.current = updated;
       setPrefs(updated);
-      writeLocalPrefs(updated);
+      writeLocalPrefs(updated, accountKey);
       schedulePush({ ratio: false, bonus: true });
     },
-    [schedulePush],
+    [accountKey, schedulePush],
   );
 
   return {
@@ -693,17 +718,95 @@ function canonicalBlockedTargets(targets: {
 
 // Exported so pure-function tests can pin the union + key-normalization rules;
 // the component itself consumes it only through the enforcement effect.
+//
+// `frog` is optional so the union can also be evaluated without the lock (older
+// call sites / future tests). When the frog lock is active the union additionally
+// blocks every app and website in the Boundaries catalog except the frog
+// allowlist, and the allowlist overrides base blocks and daily limits.
+export type FrogLockContext = {
+  locked: boolean;
+  neededAppIds: string[];
+  neededDomains: string[];
+} | null | undefined;
+
+// The frog lock never injects shell-critical executables, because the Windows
+// shell (and FocusLock itself, which owns the recovery paths) must survive a
+// hard lock even when it shows up in the observed/running-app list. Desktop's
+// Boundaries page models "system" as a per-row boolean (observed-only apps with
+// no tracked time today), not a category string, so the frog catalog mirrors
+// that rule separately (see `systemKeys` in evaluateBlockedTargets).
+export const FROG_NEVER_BLOCK_APP_IDS: ReadonlySet<string> = new Set([
+  "explorer.exe",
+  "dwm.exe",
+  "winlogon.exe",
+  "csrss.exe",
+  "smss.exe",
+  "wininit.exe",
+  "services.exe",
+  "lsass.exe",
+  "taskhostw.exe",
+  "sihost.exe",
+  "ctfmon.exe",
+  "startmenuexperiencehost.exe",
+  "searchhost.exe",
+  "shellexperiencehost.exe",
+  // OS/UWP hosts: blocking one of these takes whole classes of windows with
+  // it and cannot be undone from the app allowlist (its key is the host exe).
+  "applicationframehost.exe",
+  "runtimebroker.exe",
+  "textinputhost.exe",
+  "lockapp.exe",
+  "logonui.exe",
+  "shellhost.exe",
+  "searchapp.exe",
+]);
+
+// Browsers the Windows tracker recognizes (`windows_capture::is_supported_browser`),
+// mirrored here. While the frog lock needs websites the final union must not
+// contain a browser .exe: Rust matches the app target before the captured
+// domain, so an app-level frog block would make `neededDomains` unreachable.
+export const FROG_BROWSER_APP_IDS: ReadonlySet<string> = new Set([
+  "chrome.exe",
+  "msedge.exe",
+  "brave.exe",
+  "firefox.exe",
+  "vivaldi.exe",
+  "opera.exe",
+  "opera_gx.exe",
+  "arc.exe",
+]);
+
+function isFrogBlockableApp(rawKey: string, category?: string): boolean {
+  const key = targetKeyFor("app", rawKey);
+  if (!key) return false;
+  if (FROG_NEVER_BLOCK_APP_IDS.has(key)) return false;
+  if (key.includes("focuslock")) return false;
+  return String(category || "").trim().toLowerCase() !== "system";
+}
+
+/** True when `domain` equals `parent` or is a subdomain of it — the same
+ * parent-label walk Rust's `match_domain`/`domain_reason` apply. */
+function domainBelongsTo(domain: string, parent: string): boolean {
+  return domain === parent || domain.endsWith(`.${parent}`);
+}
+
 export function evaluateBlockedTargets({
   dashboard,
   groups,
   summary,
   usage,
+  frog,
 }: {
   dashboard: any;
   groups: TargetGroup[] | undefined;
   summary: UsageSummary | undefined;
   usage: NativeUsage[];
-}): { targets: { appIds: string[]; domains: string[] }; exceeded: string[] } {
+  frog?: FrogLockContext;
+}): {
+  targets: { appIds: string[]; domains: string[] };
+  reasons: Record<string, string>;
+  exceeded: string[];
+} {
   // Base set: exactly what the previous dashboard-driven effect sent.
   const appIds = new Set<string>(
     (dashboard?.apps || [])
@@ -722,6 +825,9 @@ export function evaluateBlockedTargets({
   const localSecondsFor = (kind: string, rawKey: string) =>
     localSeconds.get(`${kind}:${targetKeyFor(kind, rawKey)}`) || 0;
   const exceeded: string[] = [];
+  // Targets injected because a limit is exhausted; also the reasons-map source.
+  const limitApps = new Set<string>();
+  const limitDomains = new Set<string>();
 
   // 1. Groups: one shared cap over every member, summed across devices today.
   const groupSource: any[] = summary?.groups?.length
@@ -740,8 +846,13 @@ export function evaluateBlockedTargets({
     if (Math.max(local, server) < limitMinutes * 60) continue;
     for (const member of members) {
       const key = targetKeyFor(member.targetKind, member.targetKey);
-      if (member.targetKind === "app") appIds.add(key);
-      else if (member.targetKind === "website") domains.add(key);
+      if (member.targetKind === "app") {
+        appIds.add(key);
+        limitApps.add(key);
+      } else if (member.targetKind === "website") {
+        domains.add(key);
+        limitDomains.add(key);
+      }
     }
     exceeded.push(String(group?.name || group?.groupId || "group"));
   }
@@ -767,12 +878,142 @@ export function evaluateBlockedTargets({
       serverTargetSeconds.get(`${kind}:${key}`) || 0,
     );
     if (combined < limitMinutes * 60) continue;
-    if (kind === "app") appIds.add(key);
-    else domains.add(key);
+    if (kind === "app") {
+      appIds.add(key);
+      limitApps.add(key);
+    } else {
+      domains.add(key);
+      limitDomains.add(key);
+    }
     exceeded.push(String(row?.label || key));
   }
 
-  return { targets: { appIds: [...appIds], domains: [...domains] }, exceeded };
+  // 3. Frog hard lock: block the whole Boundaries catalog (synced apps/sites,
+  //    group members and observed/running apps) except the frog allowlist. Skip
+  //    shell-critical/system entries, and let the allowlist win over base blocks
+  //    and exhausted limits so the frog can actually be worked on.
+  const frogApps = new Set<string>();
+  const frogDomains = new Set<string>();
+  if (frog?.locked) {
+    const allowApps = new Set(
+      (frog.neededAppIds || []).map((key) => targetKeyFor("app", key)).filter(Boolean),
+    );
+    const allowDomains = new Set(
+      (frog.neededDomains || []).map((key) => targetKeyFor("website", key)).filter(Boolean),
+    );
+
+    const catalogApps = new Map<string, string>();
+    // Keys that must never be frog-injected: the category:"System" rows (Android
+    // sync) plus the same `system` signal the Boundaries page derives for
+    // Windows (observed-only app with no tracked time today, App.tsx ~3100).
+    // Tracked as a set so a later catalog/group merge can't overwrite it.
+    const systemKeys = new Set<string>();
+    const syncedAppKeys = new Set<string>();
+    (dashboard?.apps || []).forEach((item: AppItem) => {
+      const key = targetKeyFor("app", item.packageName);
+      if (!key) return;
+      syncedAppKeys.add(key);
+      if (String(item.category || "").trim().toLowerCase() === "system") {
+        systemKeys.add(key);
+        return;
+      }
+      // First writer wins: never let a later merge downgrade a category.
+      if (!catalogApps.has(key)) catalogApps.set(key, String(item.category || ""));
+    });
+    // Explicit group members are user-authored targets, so the observed-only
+    // "system noise" rule must not reclassify them.
+    const groupAppKeys = new Set<string>();
+    for (const group of groupSource) {
+      for (const member of (group?.members || []) as TargetGroupMember[]) {
+        if (member.targetKind !== "app") continue;
+        const key = targetKeyFor("app", member.targetKey);
+        if (key) groupAppKeys.add(key);
+      }
+    }
+    for (const entry of usage) {
+      if (entry.browserDomain) continue;
+      const key = targetKeyFor("app", entry.appId);
+      if (!key) continue;
+      if (
+        !syncedAppKeys.has(key) &&
+        !groupAppKeys.has(key) &&
+        Math.round(localSecondsFor("app", key) / 60) === 0
+      ) {
+        systemKeys.add(key);
+      }
+      if (!catalogApps.has(key)) catalogApps.set(key, "Windows");
+    }
+    for (const key of groupAppKeys) {
+      if (!catalogApps.has(key)) catalogApps.set(key, "");
+    }
+    for (const [key, category] of catalogApps) {
+      if (systemKeys.has(key)) continue;
+      if (!isFrogBlockableApp(key, category)) continue;
+      if (allowApps.has(key)) continue;
+      appIds.add(key);
+      frogApps.add(key);
+    }
+
+    const catalogDomains = new Set<string>();
+    (dashboard?.sites || []).forEach((site: SiteItem) => {
+      const key = targetKeyFor("website", site.domain);
+      if (key) catalogDomains.add(key);
+    });
+    for (const group of groupSource) {
+      for (const member of (group?.members || []) as TargetGroupMember[]) {
+        if (member.targetKind !== "website") continue;
+        const key = targetKeyFor("website", member.targetKey);
+        if (key) catalogDomains.add(key);
+      }
+    }
+    for (const key of catalogDomains) {
+      if (allowDomains.has(key)) continue;
+      domains.add(key);
+      frogDomains.add(key);
+    }
+
+    for (const value of [...appIds]) {
+      if (allowApps.has(targetKeyFor("app", value))) appIds.delete(value);
+    }
+    // Suffix-aware removal: Rust matches `m.youtube.com` against a blocked
+    // `youtube.com`, so an allowlisted parent domain must also release its
+    // catalogued subdomains (exact-only removal left that deadlocked).
+    for (const value of [...domains]) {
+      const key = targetKeyFor("website", value);
+      for (const allow of allowDomains) {
+        if (domainBelongsTo(key, allow)) {
+          domains.delete(value);
+          break;
+        }
+      }
+    }
+
+    // Browsers must stay reachable whenever the frog needs websites: Rust
+    // matches the app target before the captured domain, so an app-level frog
+    // block on chrome.exe/msedge.exe would keep `neededDomains` unreachable.
+    // Domain rules (base blocks, limits and the allowlist removals above) still
+    // govern browsing.
+    if ((frog.neededDomains || []).length > 0) {
+      for (const value of [...appIds]) {
+        if (FROG_BROWSER_APP_IDS.has(targetKeyFor("app", value))) {
+          appIds.delete(value);
+          frogApps.delete(value);
+        }
+      }
+    }
+  }
+
+  // Reasons for the final union: "frog" for lock-injected targets, "limit" for
+  // exhausted daily limits, "blocked" otherwise. Keys mirror the target arrays.
+  const reasons: Record<string, string> = {};
+  for (const key of appIds) {
+    reasons[key] = frogApps.has(key) ? "frog" : limitApps.has(key) ? "limit" : "blocked";
+  }
+  for (const key of domains) {
+    reasons[key] = frogDomains.has(key) ? "frog" : limitDomains.has(key) ? "limit" : "blocked";
+  }
+
+  return { targets: { appIds: [...appIds], domains: [...domains] }, reasons, exceeded };
 }
 
 // Polling: the tracker samples every second, but the UI only needs to replace
@@ -866,7 +1107,7 @@ export default function App() {
         <SignInPage />
       </Unauthenticated>
       <Authenticated>
-        <DesktopApp />
+        <AccountApp />
       </Authenticated>
     </>
   );
@@ -875,7 +1116,12 @@ export default function App() {
 function NativeApp() {
   const auth = useFocusAuth();
   if (auth.loading) return <AppLoading />;
-  return auth.user ? <DesktopApp /> : <SignInPage />;
+  return auth.user ? <AccountApp /> : <SignInPage />;
+}
+
+function AccountApp() {
+  const auth = useFocusAuth();
+  return <DesktopApp key={auth.user?.id || "signed-out"} />;
 }
 
 function AppLoading() {
@@ -976,9 +1222,39 @@ function SignInPage() {
 
 function DesktopApp() {
   const auth = useFocusAuth();
+  useMutationReplay();
   const [tab, setTab] = useState<Tab>("focus");
   const { snapshot, status, error: trackerError, refresh } = useNativeTracking();
   const dashboard: any = useQuery(syncApi.getDashboard, {});
+  const activateNuke = useMutation(api.nuke.activate);
+  const strictEndsAt = Number(dashboard?.prefs?.strictEndsAt || 0);
+  const strictActive = Boolean(dashboard?.prefs?.strictMode) &&
+    (!strictEndsAt || strictEndsAt > Date.now());
+  const strictNukeAfterFive = Boolean(dashboard?.prefs?.strictNukeAfterFive);
+  useEffect(() => {
+    if (!tauriAvailable() || !strictActive) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    listen<{ blocked?: boolean; appId?: string; browserDomain?: string }>(
+      "focuslock://activity-changed", (event) => {
+        if (!event.payload?.blocked) return;
+        const target = event.payload.browserDomain || event.payload.appId || "unknown";
+        const now = Date.now();
+        const key = "focuslock-strict-attempts";
+        let previous: { count: number; expiresAt: number; lastTarget: string; lastAt: number; nukeTriggered?: boolean } | null = null;
+        try { previous = JSON.parse(localStorage.getItem(key) || "null"); } catch { /* reset invalid cache */ }
+        const sameSession = previous && previous.expiresAt > now;
+        const count = sameSession ? previous!.count : 0;
+        if (sameSession && previous!.lastTarget === target && now - previous!.lastAt < 2_000) return;
+        const next = count + 1;
+        const triggerNuke = strictNukeAfterFive && next >= 5 && !(sameSession && previous!.nukeTriggered);
+        localStorage.setItem(key, JSON.stringify({ count: next, expiresAt: strictEndsAt || now + 24 * 60 * 60 * 1000,
+          lastTarget: target, lastAt: now, nukeTriggered: triggerNuke || (sameSession && previous!.nukeTriggered) }));
+        if (triggerNuke) void activateNuke({}).catch((error) => console.warn("[focuslock] nuke activation failed", error));
+      },
+    ).then((stop) => { if (disposed) stop(); else unlisten = stop; }).catch(() => undefined);
+    return () => { disposed = true; unlisten?.(); };
+  }, [strictActive, strictEndsAt, strictNukeAfterFive, activateNuke]);
   // Focus-page range selector. Lives here (above useQuery) so the query args can
   // depend on it; memoized so a re-render never resubscribes the query.
   const [usageRange, setUsageRange] = useState<UsageRange>("today");
@@ -1030,8 +1306,21 @@ function DesktopApp() {
   const devices: any[] | undefined = useQuery(syncApi.listDevices, {});
   const heartbeat = useMutation(syncApi.heartbeat);
   const recordUsage = useMutation(syncApi.recordUsageBatch);
+  const accountKey = auth.user?.id || null;
   const { workRatio, taskBonus, setWorkRatio, setTaskBonus } =
-    useSyncedPrefs(dashboard);
+    useSyncedPrefs(dashboard, accountKey);
+  // "Eat the frog" is device-local (localStorage, like Android's DataStore).
+  // This instance drives the hard-lock union and Settings; FrogCard owns its own
+  // instance, so both re-read through the store's notifications.
+  const frog = useFrogState();
+  const frogLock = useMemo(
+    () => ({
+      locked: frog.state.locked,
+      neededAppIds: frog.state.frog?.neededAppIds || [],
+      neededDomains: frog.state.frog?.neededDomains || [],
+    }),
+    [frog.state.locked, frog.state.frog],
+  );
   const deviceId = snapshot?.device.id || getStoredDeviceId();
   const lastUploadRef = useRef(0);
   const usageJsonRef = useRef<string | null>(null);
@@ -1043,6 +1332,8 @@ function DesktopApp() {
   const trackerErrorRef = useRef<string | null>(trackerError);
   trackerErrorRef.current = trackerError;
   const [lastSyncAt, setLastSyncAt] = useState(0);
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const pushRef = useRef<(() => Promise<void>) | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [boundariesLock, setBoundariesLock] = useLocalFlag(
     "focuslock.boundariesLock",
@@ -1054,14 +1345,11 @@ function DesktopApp() {
     members: TargetGroupMember[];
     sourceLabel: string;
   } | null>(null);
-  // Skip uploads until a real device id exists; failures are logged and the bucket
-  // is dropped (no offline queue yet — same gap as Android). Heartbeats keep
-  // their ~25s cadence via the interval (so a paused tracker still shows the
-  // device online); usage buckets are only rebuilt and uploaded when the usage
-  // data itself changed — the snapshot only re-fires this effect when its
-  // serialized payload changed.
+  // Queue each account/device payload before uploading. Convex usage writes are
+  // absolute counters, so retries are idempotent; the queue survives app and
+  // machine restarts and is acknowledged only after both requests succeed.
   useEffect(() => {
-    if (!tauriAvailable() || !deviceId) return;
+    if (!tauriAvailable() || !deviceId || !accountKey) return;
     let cancelled = false;
     const push = async () => {
       const snap = snapshotRef.current;
@@ -1069,7 +1357,7 @@ function DesktopApp() {
       const usageJson = JSON.stringify(snap.usage);
       const usageChanged = usageJson !== usageJsonRef.current;
       if (!usageChanged && Date.now() - lastUploadRef.current < 25000) return;
-      const buckets: UsageBucket[] = usageChanged
+      const currentBuckets: UsageBucket[] = usageChanged
         ? snap.usage.map((u) => {
             // Shared with limit enforcement (usageTargetFor) so local keys can
             // never drift from the keys Convex stores — both lowercased there.
@@ -1085,9 +1373,9 @@ function DesktopApp() {
             };
           })
         : [];
-      uploadInFlightRef.current = true;
+      let pending;
       try {
-        await heartbeat({
+        enqueueSync(accountKey, deviceId, {
         deviceId,
         name: snap.device.name,
         platform: "windows",
@@ -1095,34 +1383,54 @@ function DesktopApp() {
         trackingStatus: snap.running ? "active" : "paused",
         statusDetail: trackerErrorRef.current || undefined,
         lastSeen: Date.now(),
-        });
-        if (buckets.length) await recordUsage({ deviceId, buckets });
+        }, accountUsage(accountKey, deviceId, currentBuckets));
+        pending = peekSync(accountKey, deviceId);
+      } catch (error) {
+        if (!cancelled) setSyncError(`Could not save the local sync queue: ${String(error)}`);
+        return;
+      }
+      if (!pending.heartbeat) return;
+      uploadInFlightRef.current = true;
+      try {
+        const token = await auth.getSyncToken();
+        if (!token) throw new Error("Sign in again to sync");
+        const pinnedClient = accountClient(accountKey, token);
+        await pinnedClient.mutation(syncApi.heartbeat, pending.heartbeat);
+        for (let offset = 0; offset < pending.usage.length; offset += 500) {
+          await pinnedClient.mutation(syncApi.recordUsageBatch, { deviceId, buckets: pending.usage.slice(offset, offset + 500) });
+        }
+        acknowledgeSync(accountKey, deviceId, pending);
         // Advance both clocks only after Convex accepts the upload. A failed
         // request must be retried with the same cumulative usage snapshot.
         usageJsonRef.current = usageJson;
         lastUploadRef.current = Date.now();
-        if (!cancelled) setLastSyncAt(Date.now());
+        if (!cancelled) { setLastSyncAt(Date.now()); setSyncError(null); }
       } catch (err) {
+        if (!cancelled) setSyncError(`Upload pending: ${String(err)}`);
         console.warn("[focuslock] heartbeat/usage upload failed; retrying", err);
       } finally {
         uploadInFlightRef.current = false;
       }
     };
-    push();
+    pushRef.current = push;
+    void push();
     // Fallback tick so heartbeats continue while the tracker is paused and
     // snapshots stop changing.
     const id = window.setInterval(push, 25000);
     return () => {
       cancelled = true;
+      if (pushRef.current === push) pushRef.current = null;
       window.clearInterval(id);
     };
-  }, [snapshot, deviceId, heartbeat, recordUsage]);
-  // Blocked-targets payload: union of dashboard blocks + exhausted daily limits.
-  // Recomputed on dashboard/summary/snapshot changes, but invoked only when the
-  // union actually changed and at most once per debounce window (no invoke spam).
-  const blockedTargetsRef = useRef<{ appIds: string[]; domains: string[] } | null>(
-    null,
-  );
+  }, [accountKey, deviceId, heartbeat, recordUsage, auth.getSyncToken]);
+  // Blocked-targets payload: union of dashboard blocks + exhausted daily limits
+  // + (while the frog lock is on) the whole Boundaries catalog minus the frog
+  // allowlist. Recomputed on dashboard/summary/snapshot/frog changes, but invoked
+  // only when the union actually changed and at most once per debounce window.
+  const blockedTargetsRef = useRef<{
+    targets: { appIds: string[]; domains: string[] };
+    reasons: Record<string, string>;
+  } | null>(null);
   const blockedInvokedJsonRef = useRef("");
   const blockedTimerRef = useRef<number | null>(null);
   const flushBlockedTargets = useCallback(() => {
@@ -1136,33 +1444,41 @@ function DesktopApp() {
     const rustTargets = snapshotRef.current?.blockedTargets;
     const json = JSON.stringify(payload);
     if (rustTargets) {
-      if (canonicalBlockedTargets(payload) === canonicalBlockedTargets(rustTargets)) {
-        blockedInvokedJsonRef.current = json;
+      // Targets already match Rust; only re-send when the reasons map changed
+      // (e.g. a target switched from "blocked" to "frog") since the last send.
+      if (
+        canonicalBlockedTargets(payload.targets) === canonicalBlockedTargets(rustTargets) &&
+        json === blockedInvokedJsonRef.current
+      ) {
         return;
       }
     } else if (json === blockedInvokedJsonRef.current) {
       return;
     }
     blockedInvokedJsonRef.current = json;
-    invoke("set_blocked_targets", { targets: payload }).catch(() => undefined);
+    invoke("set_blocked_targets", {
+      targets: payload.targets,
+      reasons: payload.reasons,
+    }).catch(() => undefined);
   }, []);
   useEffect(() => {
     if (!tauriAvailable() || !dashboard) return;
-    const { targets, exceeded } = evaluateBlockedTargets({
+    const { targets, reasons, exceeded } = evaluateBlockedTargets({
       dashboard,
       groups,
       summary: todayUsage,
       usage: snapshotRef.current?.usage || EMPTY_USAGE,
+      frog: frogLock,
     });
     if (exceeded.length) {
       console.info("[focuslock] daily limit reached; blocking", exceeded);
     }
-    blockedTargetsRef.current = targets;
+    blockedTargetsRef.current = { targets, reasons };
     if (blockedTimerRef.current !== null)
       window.clearTimeout(blockedTimerRef.current);
     blockedTimerRef.current = window.setTimeout(flushBlockedTargets, 350);
     // Latest-wins: a re-run replaces the pending timer instead of cleaning up.
-  }, [dashboard, groups, todayUsage, snapshot, flushBlockedTargets]);
+  }, [dashboard, groups, todayUsage, snapshot, frogLock, flushBlockedTargets]);
   useEffect(
     () => () => {
       if (blockedTimerRef.current !== null) {
@@ -1172,8 +1488,27 @@ function DesktopApp() {
     },
     [],
   );
-  // Manual "Sync Now": clear the throttle and refresh so the upload effect runs,
-  // then re-read devices/usage. Real upload happens in the heartbeat effect.
+  // Main-window navigation from Rust: `focuslock://navigate` { view: "home" }
+  // switches back to the Focus (Home) tab — used by the blocker's "Eat the frog
+  // now" action.
+  useEffect(() => {
+    if (!tauriAvailable()) return;
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen<{ view?: string }>("focuslock://navigate", (event) => {
+      if (event.payload?.view === "home") setTab("focus");
+    })
+      .then((stop) => {
+        if (cancelled) stop();
+        else unlisten = stop;
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+  // Keep the progress state until the real requests finish.
   const syncNow = useCallback(async () => {
     setSyncing(true);
     lastUploadRef.current = 0;
@@ -1181,10 +1516,18 @@ function DesktopApp() {
       // Force mode: even if the snapshot payload is unchanged, re-apply it so
       // the upload effect re-runs with the cleared throttle.
       await refresh(true);
+      if (!accountKey) throw new Error("Account identity is unavailable; sign in again.");
+      const token = await auth.getSyncToken();
+      if (!token) throw new Error("Sign in again to sync.");
+      await flushMutations(accountKey, token);
+      await accountClient(accountKey, token).query(api.focus.getAccount, {});
+      await pushRef.current?.();
+    } catch (error) {
+      setSyncError(String(error));
     } finally {
-      window.setTimeout(() => setSyncing(false), 600);
+      setSyncing(false);
     }
-  }, [refresh]);
+  }, [refresh, accountKey, auth.getSyncToken]);
   // Stable (setters only) so the memoized FocusPage keeps skipping re-renders
   // on unrelated state updates.
   const handleMergeTarget = useCallback(
@@ -1259,6 +1602,7 @@ function DesktopApp() {
             trackerError={trackerError}
             workRatio={workRatio}
             taskBonus={taskBonus}
+            knownTargets={knownTargets}
             usageRange={usageRange}
             onUsageRangeChange={setUsageRange}
             onMerge={handleMergeTarget}
@@ -1271,6 +1615,7 @@ function DesktopApp() {
             todayUsage={todayUsage}
             boundariesLock={boundariesLock}
             knownTargets={knownTargets}
+            frog={frogLock}
             initialDraftMembers={pendingMerge?.members || null}
             mergeSourceLabel={pendingMerge?.sourceLabel || null}
             onInitialDraftConsumed={clearPendingMerge}
@@ -1286,6 +1631,7 @@ function DesktopApp() {
             setWorkRatio={setWorkRatio}
             taskBonus={taskBonus}
             setTaskBonus={setTaskBonus}
+            frog={frog}
             boundariesLock={boundariesLock}
             setBoundariesLock={setBoundariesLock}
             lastSyncAt={lastSyncAt}
@@ -1299,6 +1645,7 @@ function DesktopApp() {
             syncing={syncing}
             onSyncNow={syncNow}
             trackerError={trackerError}
+            syncError={syncError}
           />
         )}
       </main>
@@ -1320,7 +1667,9 @@ function NavButton({
 }) {
   return (
     <button
+      type="button"
       className={`nav-button ${active ? "active" : ""}`}
+      aria-current={active ? "page" : undefined}
       onClick={onClick}
     >
       <Icon name={icon} />
@@ -1341,6 +1690,7 @@ const FocusPage = memo(function FocusPage({
   trackerError,
   workRatio,
   taskBonus,
+  knownTargets,
   usageRange = "today",
   onUsageRangeChange,
   onMerge,
@@ -1386,6 +1736,42 @@ const FocusPage = memo(function FocusPage({
   const windowsLabel =
     snapshot?.device.name || syncedWindowsDevice?.name || "Windows PC";
   const sessions: WorkRecord[] = dashboard?.sessions || [];
+  // Picker catalog for the frog allowlist: the same synced sources the Boundaries
+  // rows render from — dashboard apps/sites, every known target, plus this PC's
+  // observed/running apps from the tracker snapshot.
+  const frogCatalog = useMemo(() => {
+    const apps = new Map<string, string>();
+    (dashboard?.apps || []).forEach((app: AppItem) => {
+      const key = String(app.packageName || "").toLowerCase();
+      if (key) apps.set(key, app.appName || app.packageName);
+    });
+    (knownTargets || []).forEach((target: KnownTarget) => {
+      if (target.targetKind !== "app") return;
+      const key = String(target.targetKey || "").toLowerCase();
+      if (key) apps.set(key, target.targetLabel || target.targetKey);
+    });
+    for (const entry of snapshot?.usage || []) {
+      if (entry.browserDomain) continue;
+      const key = String(entry.appId || "").toLowerCase();
+      if (key) apps.set(key, entry.appName || entry.appId);
+    }
+    const sites = new Map<string, string>();
+    (dashboard?.sites || []).forEach((site: SiteItem) => {
+      const key = normalizeSiteKey(site.domain);
+      if (key) sites.set(key, site.displayName || site.domain);
+    });
+    (knownTargets || []).forEach((target: KnownTarget) => {
+      if (target.targetKind !== "website") return;
+      const key = normalizeSiteKey(target.targetKey);
+      if (key) sites.set(key, target.targetLabel || target.targetKey);
+    });
+    const byLabel = (a: { label: string }, b: { label: string }) =>
+      a.label.toLowerCase().localeCompare(b.label.toLowerCase());
+    return {
+      apps: [...apps.entries()].map(([key, label]) => ({ key, label })).sort(byLabel),
+      sites: [...sites.entries()].map(([key, label]) => ({ key, label })).sort(byLabel),
+    };
+  }, [dashboard?.apps, dashboard?.sites, knownTargets, snapshot?.usage]);
   const [showAllHistory, setShowAllHistory] = useState(false);
   const [activeSection, setActiveSection] = useState(0);
   const ringsRef = useRef<HTMLElement | null>(null);
@@ -1419,7 +1805,7 @@ const FocusPage = memo(function FocusPage({
     node?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
   return (
-    <div className="page">
+    <div className="page focus-page">
       <header className="page-header">
         <div>
           <p className="eyebrow">{todayLabel()}</p>
@@ -1435,6 +1821,25 @@ const FocusPage = memo(function FocusPage({
         snapshot={snapshot}
         status={status}
         devices={devices}
+      />
+      <FrogCard catalog={frogCatalog} />
+      <section className="hero-balance">
+        <div>
+          <p className="section-label">Time to unwind</p>
+          <div className="balance">{fmt(state.creditBalanceSeconds || 0)}</div>
+          <p className="balance-caption">
+            {(state.creditBalanceSeconds || 0) > 0
+              ? "Ready when you are"
+              : "Earn a little breathing room"}
+          </p>
+          <p>Focused work earns leisure time across Android, Windows, and Chrome.</p>
+        </div>
+        <FocusTimer dashboard={dashboard} workRatio={workRatio} />
+      </section>
+      <ManualWorkLog
+        dashboard={dashboard}
+        workRatio={workRatio}
+        taskBonus={taskBonus}
       />
       <section className="focus-overview" ref={ringsRef}>
         <div className="rings-panel">
@@ -1471,24 +1876,6 @@ const FocusPage = memo(function FocusPage({
           {showAllHistory ? "Show less" : "History — show all"}
         </button>
       </section>
-      <section className="hero-balance">
-        <div>
-          <p className="section-label">Time to unwind</p>
-          <div className="balance">{fmt(state.creditBalanceSeconds || 0)}</div>
-          <p className="balance-caption">
-            {(state.creditBalanceSeconds || 0) > 0
-              ? "Ready when you are"
-              : "Earn a little breathing room"}
-          </p>
-          <p>Focused work earns leisure time across Android, Windows, and Chrome.</p>
-        </div>
-        <FocusTimer dashboard={dashboard} workRatio={workRatio} />
-      </section>
-      <ManualWorkLog
-        dashboard={dashboard}
-        workRatio={workRatio}
-        taskBonus={taskBonus}
-      />
       <section className="device-summary">
         <div className="section-heading">
           <div>
@@ -1932,8 +2319,7 @@ function FocusTimer({
   dashboard: any;
   workRatio: number;
 }) {
-  const addWorkRecord = useMutation(api.focus.addWorkRecord);
-  const saveState = useMutation(api.focus.saveState);
+  const recordWork = useDurableMutation(api.focus.recordWork);
   const [minutes, setMinutes] = useState(25);
   const [left, setLeft] = useState(25 * 60);
   const [running, setRunning] = useState(false);
@@ -1954,11 +2340,29 @@ function FocusTimer({
     );
     return () => clearInterval(id);
   }, [running]);
-  // NOTE: the backend has no atomic credit-increment mutation (saveState is LWW
-  // full-replace), so a concurrent phone write can still win. Mitigation: a single
-  // saveState built from the freshest subscribed snapshot, idempotent recordId,
-  // updatedAt=max(now, remote). Timer preserves tasksCompletedToday (tasks come
-  // from the manual log / mobile); it only banks earned time + work seconds.
+  // FROG METERING: while the timer runs, credit the armed frog one second at a
+  // time in ~5s batches (and flush on pause/stop/unmount), so localStorage is
+  // not written every tick. addTrackedSeconds itself ignores frogs that are not
+  // armed+selected+unticked, so an idle frog never accrues.
+  const frogPendingRef = useRef(0);
+  useEffect(() => {
+    if (!running) return;
+    const id = window.setInterval(() => {
+      frogPendingRef.current += 1;
+      if (frogPendingRef.current >= 5) {
+        addTrackedSeconds(frogPendingRef.current);
+        frogPendingRef.current = 0;
+      }
+    }, 1000);
+    return () => {
+      window.clearInterval(id);
+      if (frogPendingRef.current > 0) {
+        addTrackedSeconds(frogPendingRef.current);
+        frogPendingRef.current = 0;
+      }
+    };
+  }, [running]);
+  // The history entry and earned credit commit atomically and deduplicate by record ID.
   useEffect(() => {
     if (left !== 0 || saved) return;
     setRunning(false);
@@ -1967,29 +2371,11 @@ function FocusTimer({
     const earned = Math.floor(minutes / ratio);
     const now = Date.now();
     const recordId = `windows_${now}`;
-    const latest = dashRef.current?.state || {};
-    const updatedAt = Math.max(now, latest.updatedAt || 0);
-    addWorkRecord({
-      recordId,
-      title: "Desktop focus",
-      durationMinutes: minutes,
-      timestamp: now,
-      source: "DESKTOP_TIMER",
-      earnedMinutesCredited: earned,
-    })
-      .then(() =>
-        saveState({
-          creditBalanceSeconds:
-            (latest.creditBalanceSeconds || 0) + earned * 60,
-          totalWorkSecondsToday:
-            (latest.totalWorkSecondsToday || 0) + minutes * 60,
-          totalScrollSecondsToday: latest.totalScrollSecondsToday || 0,
-          tasksCompletedToday: latest.tasksCompletedToday || 0,
-          lastResetDate: localDate(now),
-          updatedAt,
-        }),
-      )
-      .catch((err) => console.warn("[focuslock] focus timer save failed", err));
+    recordWork({
+      recordId, title: "Desktop focus", durationMinutes: minutes,
+      timestamp: now, source: "DESKTOP_TIMER", earnedMinutesCredited: earned,
+      date: localDate(now), tasksCompleted: 0,
+    }).catch((err) => console.warn("[focuslock] focus timer saved for retry", err));
   }, [left, saved, minutes]);
   const mm = Math.floor(left / 60),
     ss = left % 60;
@@ -2039,9 +2425,7 @@ function ManualWorkLog({
   workRatio: number;
   taskBonus: number;
 }) {
-  const addWorkRecord = useMutation(api.focus.addWorkRecord);
-  const logFocusSession = useMutation(api.focus.logFocusSession);
-  const saveState = useMutation(api.focus.saveState);
+  const recordWork = useDurableMutation(api.focus.recordWork);
   const [minsText, setMinsText] = useState("25");
   const [tasksText, setTasksText] = useState("0");
   const [title, setTitle] = useState("");
@@ -2061,45 +2445,19 @@ function ManualWorkLog({
       const earned =
         Math.floor(mins / Math.max(1, workRatio || 4)) +
         taskCount * Math.max(0, taskBonus || 0);
-      const latest = dashRef.current?.state || {};
-      const updatedAt = Math.max(now, latest.updatedAt || 0);
       const label = title.trim() || "Manual work log";
-      await addWorkRecord({
-        recordId: id,
-        title: label,
-        durationMinutes: mins,
-        timestamp: now,
-        source: "DESKTOP_MANUAL",
-        earnedMinutesCredited: earned,
+      await recordWork({
+        recordId: id, title: label, durationMinutes: mins,
+        timestamp: now, source: "DESKTOP_MANUAL", earnedMinutesCredited: earned,
+        date: localDate(now), tasksCompleted: taskCount,
       });
-      try {
-        await logFocusSession({
-          sessionId: id,
-          title: label,
-          durationMinutes: mins,
-          timestamp: now,
-          source: "DESKTOP_MANUAL",
-          earnedMinutesCredited: earned,
-        });
-      } catch (err) {
-        console.warn(
-          "[focuslock] logFocusSession failed (work record kept)",
-          err,
-        );
-      }
-      await saveState({
-        creditBalanceSeconds: (latest.creditBalanceSeconds || 0) + earned * 60,
-        totalWorkSecondsToday: (latest.totalWorkSecondsToday || 0) + mins * 60,
-        totalScrollSecondsToday: latest.totalScrollSecondsToday || 0,
-        tasksCompletedToday: (latest.tasksCompletedToday || 0) + taskCount,
-        lastResetDate: localDate(now),
-        updatedAt,
-      });
+      addTrackedSeconds(mins * 60);
       setDone(
         `Logged ${mins}m${taskCount ? ` + ${taskCount} task${taskCount === 1 ? "" : "s"}` : ""} → +${earned}m earned.`,
       );
     } catch (err) {
-      console.warn("[focuslock] manual work log failed", err);
+      setDone(String(err));
+      console.warn("[focuslock] manual work log saved for retry", err);
     } finally {
       setBusy(false);
     }
@@ -2560,15 +2918,19 @@ function BoundariesPage({
   todayUsage,
   boundariesLock = false,
   knownTargets,
+  frog,
   initialDraftMembers,
   mergeSourceLabel,
   onInitialDraftConsumed,
 }: any) {
-  const saveApps = useMutation(api.focus.saveBlockedApps);
-  const saveSites = useMutation(api.focus.saveBlockedWebsites);
-  const saveGroups = useMutation(syncApi.saveGroups);
+  const saveApps = useDurableMutation(api.focus.saveBlockedApps);
+  const saveSites = useDurableMutation(api.focus.saveBlockedWebsites);
+  const saveSite = useDurableMutation(api.focus.setBlockedWebsite);
+  const saveGroups = useDurableMutation(syncApi.saveGroups);
   const apps: AppItem[] = dashboard?.apps || [];
   const sites: SiteItem[] = dashboard?.sites || [];
+  const strictActive = Boolean(dashboard?.prefs?.strictMode) &&
+    (!dashboard?.prefs?.strictEndsAt || dashboard.prefs.strictEndsAt > Date.now());
   // Full group list (editable source of truth). The range summary below only
   // supplies tracked seconds; listGroups keeps groups that have zero usage.
   const remoteGroups: TargetGroup[] | undefined = useQuery(
@@ -2950,8 +3312,10 @@ function BoundariesPage({
 
   // Boundaries Lock genuinely blocks removal/unblocking while ON, mirroring Android.
   function guardUnlock(isUnblocking: boolean): boolean {
-    if (boundariesLock && isUnblocking) {
-      setNotice("Boundaries Lock is ON — turn it off in Settings to change this.");
+    if ((boundariesLock || strictActive) && isUnblocking) {
+      setNotice(strictActive
+        ? "Strict Mode keeps these boundaries until the commitment ends."
+        : "Boundaries Lock is ON — turn it off in Settings to change this.");
       return false;
     }
     return true;
@@ -2959,11 +3323,11 @@ function BoundariesPage({
   async function applyNative(nextApps: BoundaryAppRow[], nextSites: SiteItem[]) {
     if (!tauriAvailable()) return;
     // Send the SAME union the enforcement effect sends (dashboard blocks +
-    // exhausted limits/groups), with the in-flight toggle folded into the
-    // dashboard shape. A base-only payload here replaced Rust's blocked-target
-    // set and transiently dropped over-limit groups until the next snapshot
-    // tick (~5s).
-    const { targets } = evaluateBlockedTargets({
+    // exhausted limits/groups + the frog hard lock), with the in-flight toggle
+    // folded into the dashboard shape. A base-only payload here replaced Rust's
+    // blocked-target set and transiently dropped over-limit groups/frog targets
+    // until the next snapshot tick (~5s).
+    const { targets, reasons } = evaluateBlockedTargets({
       dashboard: {
         ...(dashboard || {}),
         apps: toAppItems(nextApps),
@@ -2972,8 +3336,9 @@ function BoundariesPage({
       groups,
       summary: todayUsage,
       usage: snapshot?.usage || EMPTY_USAGE,
+      frog,
     });
-    await invoke("set_blocked_targets", { targets }).catch(() => undefined);
+    await invoke("set_blocked_targets", { targets, reasons }).catch(() => undefined);
   }
 
   async function persistApps(toggled: BoundaryAppRow[], nextApps: BoundaryAppRow[], message: string) {
@@ -2998,11 +3363,15 @@ function BoundariesPage({
   async function persistSites(nextSites: SiteItem[], message: string) {
     setBusy(true);
     try {
-      const result = await saveSites({
-        sites: nextSites.map(stripSite),
-        updatedAt: Date.now(),
-      });
-      if (result?.applied === false) throw new Error("Another device updated your websites. Reload and retry.");
+      const removed = sites.some((site) => !nextSites.some((next) => next.domain === site.domain));
+      const results = removed
+        ? [await saveSites({ sites: nextSites.map(stripSite), updatedAt: Date.now() })]
+        : await Promise.all(nextSites.filter((next) => {
+            const previous = sites.find((site) => site.domain === next.domain);
+            return !previous || previous.isBlocked !== next.isBlocked;
+          }).map((site) => saveSite({ domain: site.domain, displayName: site.displayName,
+            category: site.category, isBlocked: site.isBlocked, updatedAt: Date.now() })));
+      if (results.some((result) => result?.applied === false)) throw new Error("Another device updated your websites. Reload and retry.");
       await applyNative(appRows, nextSites);
       setNotice(message);
     } catch (e) {
@@ -3114,10 +3483,15 @@ function BoundariesPage({
       ];
       const result = await saveSites({ sites: nextSites.map(stripSite), updatedAt: Date.now() });
       if (result?.applied === false) throw new Error("Another device updated your websites. Reload and retry.");
-      await applyNative(appRows, nextSites);
+      // Clear the picker before handing the new blocked target to Rust. The
+      // Windows UI Automation reader can observe an edit control for one more
+      // sample while the native payload is being applied; leaving the typed
+      // value mounted would make a transient `x.com` look like a navigated
+      // browser domain.
       setShowAddSite(false);
       setSiteInput("");
       setSiteError(null);
+      await applyNative(appRows, nextSites);
       setNotice(`Added ${normalized}.`);
     } catch (e) {
       setSiteError(`Couldn't add: ${String(e)}`);
@@ -3146,10 +3520,9 @@ function BoundariesPage({
         </div>
       </header>
 
-      {boundariesLock && (
+      {(boundariesLock || strictActive) && (
         <p className="boundary-notice lock-notice">
-          Boundaries Lock is ON — blocked apps and websites can't be removed or
-          unblocked.
+          {strictActive ? "Strict Mode is active" : "Boundaries Lock is on"} — blocked apps and websites can't be removed or unblocked.
         </p>
       )}
 
@@ -3293,6 +3666,7 @@ function BoundariesPage({
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder={kind === "apps" ? "Search apps" : "Search websites"}
+            aria-label={kind === "apps" ? "Search apps" : "Search websites"}
           />
           {q && (
             <button
@@ -3351,9 +3725,11 @@ function BoundariesPage({
         <button
           type="button"
           className="preset-chip"
-          disabled={busy || boundariesLock}
+          disabled={busy || boundariesLock || strictActive}
           title={
-            boundariesLock
+            strictActive
+              ? "Strict Mode keeps boundaries until the commitment ends"
+              : boundariesLock
               ? "Boundaries Lock is ON — turn it off in Settings"
               : "Unblock every blocked app or website"
           }
@@ -3598,8 +3974,9 @@ function BoundariesPage({
             <p>Paste a URL or enter a domain. FocusLock keeps the hostname only.</p>
             <input
               autoFocus
-              value={siteInput}
-              onChange={(e) => {
+               value={siteInput}
+               aria-label="Website domain"
+               onChange={(e) => {
                 setSiteInput(e.target.value);
                 setSiteError(null);
               }}
@@ -3857,6 +4234,16 @@ function BoundariesPage({
   );
 }
 
+function clampFrogMinutes(minutes: number): number {
+  const value = Math.trunc(Number(minutes));
+  if (!Number.isFinite(value)) return FROG_UI_MIN_REQUIRED_MINUTES;
+  return Math.min(FROG_UI_MAX_REQUIRED_MINUTES, Math.max(FROG_UI_MIN_REQUIRED_MINUTES, value));
+}
+
+function frogWakeLabel(hour: number): string {
+  return `${String(Math.min(23, Math.max(0, Math.trunc(hour) || 0))).padStart(2, "0")}:00`;
+}
+
 function SettingsPage({
   dashboard,
   snapshot,
@@ -3867,6 +4254,7 @@ function SettingsPage({
   setWorkRatio,
   taskBonus,
   setTaskBonus,
+  frog,
   boundariesLock,
   setBoundariesLock,
   lastSyncAt,
@@ -3907,9 +4295,22 @@ function SettingsPage({
     }
   }
   const prefs = dashboard?.prefs || {};
-  const savePrefs = useMutation(syncApi.savePrefs);
+  const savePrefs = useDurableMutation(syncApi.savePrefs);
   const [prefsBusy, setPrefsBusy] = useState(false);
+  const strictActive = useStrictActive(Boolean(prefs.strictMode), prefs.strictEndsAt);
+  const [strictHours, setStrictHours] = useState(24);
+  const [strictError, setStrictError] = useState<string | null>(null);
+  const [strictUntil, setStrictUntil] = useState("");
+  const [strictPlan, setStrictPlan] = useState<"duration" | "until">("duration");
+  const strictUntilInput = strictUntil;
   async function setStrictMode(next: boolean) {
+    if (!next && strictActive) return;
+    const selectedEnd = strictPlan === "until"
+      ? new Date(strictUntil).getTime()
+      : Date.now() + strictHours * 60 * 60 * 1000;
+    const error = next ? strictEndError(selectedEnd, Date.now()) : null;
+    setStrictError(error);
+    if (error) return;
     setPrefsBusy(true);
     try {
       await savePrefs({
@@ -3917,13 +4318,45 @@ function SettingsPage({
         weeklyReport: prefs.weeklyReport ?? false,
         dailyReminderMinutes: prefs.dailyReminderMinutes,
         globalDailyCapMinutes: prefs.globalDailyCapMinutes,
+        strictEndsAt: next ? selectedEnd : 0,
+        strictPreset: prefs.strictPreset || "custom",
+        strictNukeAfterFive: Boolean(prefs.strictNukeAfterFive),
         updatedAt: Math.max(Date.now(), prefs.updatedAt || 0),
       });
     } catch (err) {
+      setStrictError(err instanceof Error ? err.message : "Could not save your commitment. Try again.");
       console.warn("[focuslock] savePrefs failed", err);
     } finally {
       setPrefsBusy(false);
     }
+  }
+  async function updateStrictPlan(plan: "duration" | "until", value?: string | number) {
+    const endsAt = plan === "duration"
+      ? Date.now() + Math.min(MAX_STRICT_HOURS, Math.max(1, Number(value) || 24)) * 60 * 60 * 1000
+      : new Date(String(value || strictUntilInput)).getTime();
+    const error = strictEndError(endsAt, Date.now(), strictActive ? prefs.strictEndsAt : 0);
+    setStrictError(error);
+    if (error) return;
+    setPrefsBusy(true);
+    try {
+      await savePrefs({ strictMode: true, strictEndsAt: endsAt, strictPreset: prefs.strictPreset || "custom", strictNukeAfterFive: Boolean(prefs.strictNukeAfterFive), updatedAt: Date.now() });
+    } catch (err) {
+      setStrictError(err instanceof Error ? err.message : "Could not extend your commitment. Try again.");
+    } finally { setPrefsBusy(false); }
+  }
+  async function setStrictNuke(next: boolean) {
+    setPrefsBusy(true);
+    try { await savePrefs({ strictNukeAfterFive: next, updatedAt: Date.now() }); }
+    finally { setPrefsBusy(false); }
+  }
+  async function setStrictPreset(preset: string) {
+    const plan = preset === "exam" ? 4 : preset === "deep_work" ? 2 : preset === "sleep" ? 8 : 24;
+    setStrictHours(plan);
+    setStrictPlan("duration");
+    setPrefsBusy(true);
+    try {
+      await savePrefs({ strictPreset: preset, strictNukeAfterFive: preset === "exam" || Boolean(prefs.strictNukeAfterFive), updatedAt: Date.now() });
+    } finally { setPrefsBusy(false); }
   }
   return (
     <div className="page narrow">
@@ -3949,6 +4382,47 @@ function SettingsPage({
             onClick={toggle}
             disabled={busy || !tauriAvailable()}
           >
+            <span />
+          </button>
+        </SettingRow>
+        <div className="setting-row">
+          <span className="setting-icon"><Icon name="clock" /></span>
+          <div>
+            <strong>Strict commitment</strong>
+            <p>{strictActive && prefs.strictEndsAt ? `Active until ${new Date(prefs.strictEndsAt).toLocaleString()}.` : "Choose how long Strict Mode stays active."}</p>
+            <div className="setting-inline">
+              <select value={prefs.strictPreset || "custom"} onChange={(e) => void setStrictPreset(e.target.value)} aria-label="Strict mode preset">
+                <option value="custom">Custom</option>
+                <option value="deep_work">Deep work · 2h</option>
+                <option value="exam">Exam · 4h + nuke</option>
+                <option value="sleep">Sleep · 8h</option>
+              </select>
+              <select value={strictPlan} onChange={(e) => setStrictPlan(e.target.value as "duration" | "until")} aria-label="Strict mode timing">
+                <option value="duration">For a duration</option>
+                <option value="until">Until a time</option>
+              </select>
+              {strictPlan === "duration" ? (
+                <select value={strictHours} onChange={(e) => setStrictHours(Number(e.target.value))} aria-label="Strict mode duration">
+                  {STRICT_HOUR_OPTIONS.map((h) => <option key={h} value={h}>{strictDurationLabel(h)}</option>)}
+                </select>
+              ) : (
+                <input type="datetime-local" value={strictUntilInput} onChange={(e) => setStrictUntil(e.target.value)} aria-label="Strict mode end time" />
+              )}
+            </div>
+            <button onClick={() => void (strictActive ? updateStrictPlan(strictPlan, strictPlan === "until" ? strictUntil : strictHours) : setStrictMode(true))}
+              disabled={prefsBusy || (strictPlan === "until" && !strictUntil)}>
+              {strictActive ? "Extend commitment" : "Start commitment"}
+            </button>
+            {strictError && <p role="alert">{strictError}</p>}
+          </div>
+        </div>
+        <ApprovalUnlockPanel />
+        <SettingRow
+          icon="lock"
+          title="Nuke after five attempts"
+          detail="After five blocked launches during this Strict Mode session, start the ten-minute reset on supported blockers."
+        >
+          <button className={`switch ${prefs.strictNukeAfterFive ? "on" : ""}`} onClick={() => void setStrictNuke(!prefs.strictNukeAfterFive)} disabled={prefsBusy} aria-label="Nuke after five blocked attempts">
             <span />
           </button>
         </SettingRow>
@@ -4023,16 +4497,93 @@ function SettingsPage({
         <SettingRow
           icon="lock"
           title="Strict mode"
-          detail="Synced to your account via focus:savePrefs; enforced on Android."
+          detail={strictActive ? "Locked until the selected end time." : "Choose a duration above to start."}
         >
           <button
             className={`switch ${prefs.strictMode ? "on" : ""}`}
             onClick={() => setStrictMode(!prefs.strictMode)}
-            disabled={prefsBusy}
+            disabled={prefsBusy || strictActive}
           >
             <span />
           </button>
         </SettingRow>
+      </section>
+      <section className="settings-group">
+        <h2>Eat the Frog</h2>
+        <SettingRow
+          icon="lock"
+          title="Eat the Frog"
+          detail="Hard-lock every boundary app and website until today's frog is ticked off with enough focus tracked. Device-local, like Android."
+        >
+          <button
+            className={`switch ${frog?.state?.enabled ? "on" : ""}`}
+            role="switch"
+            aria-checked={Boolean(frog?.state?.enabled)}
+            aria-label="Toggle Eat the Frog"
+            onClick={() => frog?.actions?.setEnabled(!frog?.state?.enabled)}
+          >
+            <span />
+          </button>
+        </SettingRow>
+        {frog?.state?.enabled && (
+          <>
+            <div className="setting-row">
+              <span className="setting-icon">
+                <Icon name="clock" />
+              </span>
+              <div>
+                <strong>Focus minutes required</strong>
+                <p>
+                  Tracked focus on the selected frog ({FROG_UI_MIN_REQUIRED_MINUTES}–
+                  {FROG_UI_MAX_REQUIRED_MINUTES} min). The lock releases when the frog is
+                  ticked off and this much focus is tracked.
+                </p>
+                <input
+                  type="range"
+                  min={FROG_UI_MIN_REQUIRED_MINUTES}
+                  max={FROG_UI_MAX_REQUIRED_MINUTES}
+                  step={5}
+                  value={clampFrogMinutes(frog?.state?.requiredMinutes)}
+                  onChange={(e) => frog?.actions?.setRequiredMinutes(Number(e.target.value))}
+                  aria-label="Frog focus minutes required"
+                  style={{ width: "100%" }}
+                />
+              </div>
+              <span className="setting-value">
+                {clampFrogMinutes(frog?.state?.requiredMinutes)}m
+              </span>
+            </div>
+            <div className="setting-row">
+              <span className="setting-icon">
+                <Icon name="clock" />
+              </span>
+              <div>
+                <strong>Wake hour</strong>
+                <p>
+                  24-hour clock (5 = 05:00). The frog arms on the first open at/after it, and
+                  progress resets at the next one.
+                </p>
+                <input
+                  type="range"
+                  min={0}
+                  max={23}
+                  step={1}
+                  value={Math.min(23, Math.max(0, Math.trunc(frog?.state?.wakeHour) || 0))}
+                  onChange={(e) => frog?.actions?.setWakeHour(Number(e.target.value))}
+                  aria-label="Frog wake hour"
+                  style={{ width: "100%" }}
+                />
+              </div>
+              <span className="setting-value">{frogWakeLabel(frog?.state?.wakeHour)}</span>
+            </div>
+            <p className="frog-settings-note">
+              On the first open after {frogWakeLabel(frog?.state?.wakeHour)}, every boundary app
+              and website locks until today's frog is ticked off and{" "}
+              {clampFrogMinutes(frog?.state?.requiredMinutes)} minutes of focus are tracked.
+              Progress resets at the next {frogWakeLabel(frog?.state?.wakeHour)}.
+            </p>
+          </>
+        )}
       </section>
       <section className="settings-group">
         <h2>Protection</h2>
@@ -4166,12 +4717,14 @@ function AccountPage({
   syncing,
   onSyncNow,
   trackerError,
+  syncError,
 }: {
   devices: any[];
   lastSyncAt?: number;
   syncing?: boolean;
   onSyncNow?: () => void;
   trackerError?: string | null;
+  syncError?: string | null;
 }) {
   const auth = useFocusAuth();
   const user = auth.user;
@@ -4180,6 +4733,8 @@ function AccountPage({
   const syncFresh = syncAgeMs !== null && syncAgeMs < 90_000;
   const syncStatus = syncing
     ? "Syncing now…"
+    : syncError
+      ? syncError
     : trackerError
       ? `Tracker issue: ${trackerError}`
       : syncAgeMs === null
@@ -4219,7 +4774,7 @@ function AccountPage({
               {user?.email && <p>{user.email}</p>}
             </div>
             <span className="priority-badge">
-              <Icon name="check" /> Priority Active
+              <Icon name="check" /> Signed in
             </span>
           </section>
           <section className="settings-group">
@@ -4238,11 +4793,10 @@ function AccountPage({
             </div>
           </section>
           <section className="account-note">
-            <strong>Multi-Device Protection Active</strong>
+            <strong>Account sync</strong>
             <p>
-              Auto-sync runs every ~30 seconds and instantly after every focus
-              event. A Nuke on your phone simultaneously locks your desktop
-              companion and browser extensions.
+              Use the same account on every device. Saved changes retry when
+              connected; devices need to be online to receive new boundaries.
             </p>
           </section>
           <section className="settings-group">

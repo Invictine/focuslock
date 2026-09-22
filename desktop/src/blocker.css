@@ -1,0 +1,165 @@
+/* Blocker webview (`index.html#/blocked`). Self-contained like nuke.css: theme
+   tokens come from bootstrap.css, everything else is defined here so the page
+   renders identically in its own webview. */
+
+.blocker-page {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  overflow-y: auto;
+  background: var(--fl-background, #0d0d0f);
+  color: var(--fl-on-surface, #eee9e7);
+}
+.blocker-card {
+  width: min(560px, 100%);
+  display: grid;
+  justify-items: center;
+  gap: 14px;
+  padding: 32px 28px;
+  border: 1px solid var(--fl-outline-variant, #353235);
+  border-radius: var(--fl-radius-extra-large, 24px);
+  background: var(--fl-surface, #0d0d0f);
+  text-align: center;
+}
+.blocker-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+}
+.blocker-pill.hard-lock {
+  color: var(--fl-on-error-container, #ffdad6);
+  background: var(--fl-error-container, #482725);
+}
+.blocker-pill.limit {
+  color: var(--fl-on-secondary-container, #eee0dc);
+  background: var(--fl-secondary-container, #332b29);
+}
+.blocker-pill.boundary {
+  color: var(--fl-on-primary-container, #f4dcd6);
+  background: var(--fl-primary-container, #40302d);
+}
+.blocker-card h1 {
+  margin: 4px 0 0;
+  color: var(--fl-on-surface, #eee9e7);
+  font-size: clamp(27px, 5vw, 38px);
+  line-height: 1.05;
+  letter-spacing: -0.04em;
+}
+.blocker-copy {
+  max-width: 46ch;
+  margin: 0;
+  color: var(--fl-on-surface-variant, #bbb4b1);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.blocker-frog {
+  width: 100%;
+  display: grid;
+  gap: 2px;
+  padding: 16px;
+  border-radius: 18px;
+  background: var(--fl-surface-container-high, #232326);
+  text-align: left;
+}
+.blocker-frog > span {
+  color: var(--fl-on-surface-variant, #bbb4b1);
+  font-size: 11px;
+  font-weight: 600;
+}
+.blocker-frog strong {
+  color: var(--fl-on-surface, #eee9e7);
+  font-size: 16px;
+}
+.blocker-frog small {
+  color: var(--fl-on-surface-variant, #bbb4b1);
+  font-size: 12px;
+}
+.blocker-progress {
+  width: 100%;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 99px;
+  background: var(--fl-surface-container-highest, #2d2d31);
+}
+.blocker-progress span {
+  display: block;
+  height: 100%;
+  background: var(--fl-primary, #dfbdb6);
+}
+.blocker-progress-copy {
+  margin: 0;
+  color: var(--fl-on-surface-variant, #bbb4b1);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.blocker-chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+}
+.blocker-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--fl-outline-variant, #353235);
+  border-radius: 999px;
+  color: var(--fl-on-surface, #eee9e7);
+  background: var(--fl-surface-container-high, #232326);
+  font-size: 12px;
+  line-height: 1.2;
+}
+.blocker-chip.website {
+  background: var(--fl-surface-container-highest, #2d2d31);
+}
+.blocker-actions {
+  width: 100%;
+  display: grid;
+  gap: 8px;
+  margin-top: 6px;
+}
+.blocker-primary,
+.blocker-secondary {
+  width: 100%;
+  padding: 14px 16px;
+  border: 0;
+  border-radius: 14px;
+  font-weight: 700;
+  font-size: 14px;
+  cursor: pointer;
+}
+.blocker-primary {
+  color: var(--fl-on-primary, #30201d);
+  background: var(--fl-primary, #dfbdb6);
+}
+.blocker-primary:hover {
+  filter: brightness(1.06);
+}
+.blocker-secondary {
+  color: var(--fl-on-surface, #eee9e7);
+  background: var(--fl-surface-container-high, #232326);
+}
+.blocker-secondary:hover {
+  background: var(--fl-surface-container-highest, #2d2d31);
+}
+.blocker-complete {
+  margin: 0;
+  padding: 12px 16px;
+  border-radius: 14px;
+  color: var(--fl-on-tertiary-container, #d4e9d8);
+  background: var(--fl-tertiary-container, #29392e);
+  font-weight: 700;
+}
+@media (max-width: 600px) {
+  .blocker-card {
+    padding: 24px 18px;
+  }
+}

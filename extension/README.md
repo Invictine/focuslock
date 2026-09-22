@@ -31,12 +31,12 @@ time, the current website, and explicit Chrome/Android connection health.
 2. Run `npm install` and `npm run build` inside `extension/`.
 3. Open `chrome://extensions`, enable Developer mode, choose **Load unpacked**,
    and select `extension/`.
-4. Pin FocusLock, open its popup, and choose **Sign in to sync**. Authentication
-   opens in the persistent extension dashboard so Chrome cannot close the form
-   mid-flow. Use the account email and Clerk verification code for the same
-   account used by Android and Windows; social OAuth cannot redirect directly
-   to a Chrome extension. The extension uploads absolute per-domain counters about once per
-   minute, so retries cannot double-count time.
+4. Pin FocusLock, open its popup, and choose **Sign in to sync**. The dashboard's
+   **Continue with Google or email** action opens Clerk's HTTPS Account Portal.
+   The extension checks the resulting session through Clerk Sync Host, refreshes
+   its background tracker, then returns to the dashboard and closes the sign-in
+   tab it created. Existing portal sessions connect without another Google prompt. The extension uploads absolute per-domain counters
+   about once per minute, so retries cannot double-count time.
 5. Use **Open boundaries & stats** for block lists, schedules, Frozen lock, and
    the Nuclear option.
 
@@ -44,8 +44,11 @@ The manifest contains the stable public key for development extension ID
 `fkkpmoiageeieaoplphafmhjkkdadcnf`. The matching private `.pem` is local and
 gitignored. This origin must remain in Clerk's allowed origins, Native API must
 be enabled, and Clerk bot protection must remain disabled for extension auth.
-The embedded dashboard hides social OAuth and email-link methods; email
-verification code and password are the supported extension-native paths.
+The build discovers the hosted sign-in and profile URLs from Clerk public environment configuration. Development session sync uses the sign-in website origin; production uses the Clerk API origin. Set `CLERK_SIGN_IN_URL` and `CLERK_SYNC_HOST` to override these defaults (including a valid HTTPS return URL for a custom sign-in page).
+
+Authentication stays on the HTTPS portal because OAuth providers cannot
+return directly to `chrome-extension://`. The extension returns to its own tab only after Clerk confirms the session;
+the stable extension origin must be allowed by Clerk for session syncing.
 
 ## Structure
 

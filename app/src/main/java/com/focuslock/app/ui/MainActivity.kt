@@ -164,6 +164,7 @@ class MainActivity : ComponentActivity() {
                         app.syncManager.startAutoSync(authViewModel)
                         app.syncManager.syncNowAsync(authViewModel)
                     } else {
+                        app.syncManager.onSignedOut()
                         app.syncManager.stopAutoSync()
                     }
                 }
@@ -460,10 +461,13 @@ class MainActivity : ComponentActivity() {
         val crossDeviceState by produceState<CrossDeviceState>(
             CrossDeviceState.Loading,
             refreshTick,
-            convexUrl
+            convexUrl,
+            authState
         ) {
             value = CrossDeviceState.Loading
-            value = if (convexUrl.isBlank()) {
+            value = if (authState != FocusAuthState.SignedIn) {
+                CrossDeviceState.Loading
+            } else if (convexUrl.isBlank()) {
                 CrossDeviceState.Failed("Sync not configured")
             } else {
                 loadCrossDeviceState(convex)
@@ -486,17 +490,19 @@ class MainActivity : ComponentActivity() {
                 },
                 onSignOut = onSignOut,
             )
-            CrossDeviceSection(
-                state = crossDeviceState,
-                localDeviceId = localDeviceId,
-                client = convex.takeIf { convexUrl.isNotBlank() },
-                signedIn = authState == FocusAuthState.SignedIn,
-                onRetry = { refreshTick++ },
-                onNewBucket = onOpenMergeInBoundaries,
-                modifier = Modifier
-                    .padding(horizontal = 20.dp)
-                    .padding(bottom = 24.dp)
-            )
+            if (authState == FocusAuthState.SignedIn) {
+                CrossDeviceSection(
+                    state = crossDeviceState,
+                    localDeviceId = localDeviceId,
+                    client = convex.takeIf { convexUrl.isNotBlank() },
+                    signedIn = true,
+                    onRetry = { refreshTick++ },
+                    onNewBucket = onOpenMergeInBoundaries,
+                    modifier = Modifier
+                        .padding(horizontal = 20.dp)
+                        .padding(bottom = 24.dp)
+                )
+            }
         }
     }
 

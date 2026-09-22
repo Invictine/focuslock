@@ -46,6 +46,12 @@
       stats: {},              // 'YYYY-MM-DD' -> { domain: seconds }
       blockedLog: [],         // { ts, url, domain, listId, listName }
       blockedTotal: 0,
+      strictMode: false,
+      strictEndsAt: 0,
+      strictPreset: 'custom',
+      strictNukeAfterFive: false,
+      strictAttempts: 0,
+      strictSessionKey: '',
       security: { salt: '', hash: '', strict: true },
       settings: { idleTimeoutSec: 60, blockedDelayNote: true, quotes: true }
     };
@@ -74,8 +80,9 @@
   async function save(state) {
     const json = JSON.stringify(state);
     if (json === lastSavedJson) return state;
-    lastSavedJson = json;
     await chrome.storage.local.set({ [KEY]: state });
+    // A failed write must not suppress the next retry of the same payload.
+    lastSavedJson = json;
     return state;
   }
 

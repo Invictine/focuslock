@@ -10,13 +10,23 @@
   * { box-sizing: border-box; }
   body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: var(--fl-background,#0d0d0f); color: var(--fl-on-surface,#eee9e7); font-family: var(--fl-font-family,"Segoe UI",Roboto,system-ui,-apple-system,BlinkMacSystemFont,sans-serif); }
   .card { width: min(560px, 92vw); background: var(--fl-surface-container-low,#141416); border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-large,20px); padding: 36px 32px; text-align: center; }
+  @media (min-width: 700px) { .card { padding: 48px 44px; } }
   .lock { font-size: 16px; color: var(--fl-primary,#dfbdb6); font-weight: 800; letter-spacing:.08em; }
-  h1 { margin: 12px 0 6px; font-size: 28px; letter-spacing: -.02em; }
-  p.sub { color: var(--fl-on-surface-variant,#bbb4b1); margin: 0 0 18px; }
+  h1 { margin: 16px 0 8px; font-size: clamp(28px, 5vw, 36px); letter-spacing: -.035em; }
+  p.sub { color: var(--fl-on-surface-variant,#bbb4b1); margin: 0 auto 24px; max-width: 42ch; line-height: 1.5; }
   .pill { display: inline-block; background: var(--fl-error-container,#482725); color: var(--fl-error,#f2b2ad); border: 1px solid var(--fl-error,#f2b2ad); padding: 6px 14px; border-radius: 999px; font-size: 13px; margin-bottom: 14px; }
   .url { font-size: 13px; color: var(--fl-on-surface-variant,#bbb4b1); word-break: break-all; background: var(--fl-surface-container-lowest,#09090b); border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-medium,12px); padding: 10px 12px; margin: 0 0 18px; }
-  .quote { font-style: italic; color: var(--fl-on-surface,#eee9e7); background: var(--fl-surface-container-lowest,#09090b); border-left: 3px solid var(--fl-primary,#dfbdb6); padding: 12px 14px; border-radius: 0 var(--fl-radius-medium,12px) var(--fl-radius-medium,12px) 0; margin: 0 0 20px; text-align: left; }
+  .frog { text-align: left; background: var(--fl-surface-container-lowest,#09090b); border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-medium,12px); padding: 16px; margin: 0 0 20px; }
+  .frog[hidden] { display: none; }
+  .frog-kicker { color: var(--fl-primary,#dfbdb6); font-size: 12px; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+  .frog-title { margin: 7px 0 5px; font-size: 17px; font-weight: 700; overflow-wrap: anywhere; }
+  .frog-meta { margin: 0; color: var(--fl-on-surface-variant,#bbb4b1); font-size: 13px; line-height: 1.45; }
+  .progress { height: 7px; margin: 13px 0 7px; overflow: hidden; border-radius: 99px; background: var(--fl-surface-container-high,#232326); }
+  .progress > span { display: block; height: 100%; width: 0; border-radius: inherit; background: var(--fl-primary,#dfbdb6); transition: width .2s ease; }
+  .progress-label { color: var(--fl-on-surface-variant,#bbb4b1); font-size: 12px; }
+  .frog-cta { margin-top: 12px; display: inline-block; font-size: 13px; }
   .row { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+  .row button { min-height: 44px; }
   button { cursor: pointer; border-radius: var(--fl-radius-medium,12px); border: 1px solid var(--fl-outline-variant,#353235); background: var(--fl-surface-container-high,#232326); color: var(--fl-on-surface,#eee9e7); padding: 11px 18px; font-size: 14px; font-weight: 650; transition: background .15s ease,border-color .15s ease,transform .15s ease; }
   button:hover { border-color: var(--fl-on-surface-variant,#bbb4b1); } button:active { transform: translateY(1px); }
   button.primary { background: var(--fl-primary,#dfbdb6); border-color: var(--fl-primary,#dfbdb6); color: var(--fl-on-primary,#30201d); }
@@ -27,6 +37,7 @@
   input { width: 100%; background: var(--fl-surface-container-low,#141416); color: var(--fl-on-surface,#eee9e7); border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-medium,12px); padding: 10px 12px; font-size: 14px; margin: 8px 0; }
   .hint { font-size: 12px; color: var(--fl-on-surface-variant,#bbb4b1); margin-top: 14px; }
   a { color: var(--fl-primary,#dfbdb6); }
+  @media (max-width: 420px) { .card { padding: 30px 20px; } .row button { width: 100%; } }
   @media (prefers-reduced-motion: reduce) { *,*::before,*::after { transition:none !important; animation:none !important; } }
 </style>
 </head>
@@ -37,7 +48,14 @@
     <h1>Stay focused.</h1>
     <p class="sub">FocusLock blocked this page so future-you says thanks.</p>
     <div class="url" id="blockedUrl"></div>
-    <div class="quote" id="quote"></div>
+    <section class="frog" id="frogCard" aria-live="polite" hidden>
+      <div class="frog-kicker">Eat the Frog</div>
+      <div class="frog-title" id="frogTitle"></div>
+      <p class="frog-meta" id="frogMeta"></p>
+      <div class="progress" id="frogProgress" role="progressbar" aria-label="Today's frog progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span></span></div>
+      <div class="progress-label" id="frogProgressLabel"></div>
+      <a class="frog-cta" id="frogCta" href="#" hidden>Open Eat the Frog in dashboard →</a>
+    </section>
     <div class="row">
       <button class="primary" id="goBack">← Go back</button>
       <button id="dashboard">Open dashboard</button>

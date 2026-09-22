@@ -34,6 +34,7 @@ import kotlinx.coroutines.sync.Mutex
 import java.util.UUID
 import java.security.MessageDigest
 import kotlin.random.Random
+import org.json.JSONObject
 
 sealed interface SyncStatus {
     data object Idle : SyncStatus
@@ -68,6 +69,7 @@ class FocusSyncManager(
 
     /** Latest Clerk token, read by the cached client's token provider (audit item 9). */
     @Volatile private var currentToken: String? = null
+    @Volatile private var currentAccountId: String? = null
 
     /**
      * Highest timestamp ever observed from the server (snapshot fields + prefs clocks).
@@ -135,14 +137,9 @@ class FocusSyncManager(
     fun groupUsageTodaySecondsFor(groupId: String): Long =
         _groupUsageTodaySeconds.value[groupId] ?: 0L
 
-    private fun clientFor(url: String): ConvexSyncClient {
-        val existing = cachedClient
-        if (existing != null && cachedClientUrl == url) return existing
-        return ConvexSyncClient(url, tokenProvider = { currentToken }).also {
-            cachedClient = it
-            cachedClientUrl = url
-        }
-    }
+    /** Bind one immutable token to one cycle; a later account switch cannot retarget it. */
+    private fun clientFor(url: String, token: String): ConvexSyncClient =
+        ConvexSyncClient(url, tokenProvider = { token })
 
     fun startAutoSync(auth: AuthViewModel) {
         stopAutoSync()
@@ -202,6 +199,15 @@ class FocusSyncManager(
         }
     }
 
+    /** Called when Clerk leaves the signed-in state; prevents a stale bearer token from being reused. */
+    fun onSignedOut() {
+        currentToken = null
+        currentAccountId = null
+        cachedRemotePrefs = null
+        lastPrefsFetchAt = 0L
+        stopAutoSync()
+    }
+
     /**
      * Runs one full sync cycle. Must only be called while holding [syncMutex].
      * Returns true when no step failed (used to reset the backoff).
@@ -211,18 +217,30 @@ class FocusSyncManager(
             _status.value = SyncStatus.Skipped("Clerk not configured — offline mode")
             return true
         }
+        val accountId = try { auth.getAccountId() } catch (_: Exception) { null }
+        if (accountId.isNullOrBlank()) {
+            currentToken = null
+            _status.value = SyncStatus.Skipped("Account is still loading")
+            return true
+        }
+        prepareAccount(accountId)
         val token = try { auth.getConvexToken() } catch (_: Exception) { null }
         if (token.isNullOrBlank()) {
-            _status.value = SyncStatus.Skipped("Not signed in")
+            currentToken = null
+            _status.value = SyncStatus.Error("Session token unavailable — check Clerk Convex JWT setup")
             return true
         }
         currentToken = token
+        if (auth.getAccountId() != accountId || currentAccountId != accountId) {
+            _status.value = SyncStatus.Skipped("Account changed — discarding stale sync")
+            return true
+        }
         val url = try { com.focuslock.app.BuildConfig.CONVEX_URL.trim() } catch (_: Exception) { "" }
         if (url.isBlank() || !url.startsWith("http")) {
             _status.value = SyncStatus.Skipped("Convex URL missing — set convex.url")
             return true
         }
-        val convex = clientFor(url)
+        val convex = clientFor(url, token)
 
         _status.value = SyncStatus.Syncing
         try {
@@ -230,6 +248,12 @@ class FocusSyncManager(
             val lastSuccessfulSync = bank.getLastSyncTimestamp()
             val snapshot = convex.getSnapshot()
                 ?: throw IllegalStateException("Could not load the server snapshot")
+            // A sign-out/account switch can happen while the HTTP request is in flight.
+            // Never apply that response to the next account's local DataStore.
+            if (currentAccountId != accountId || auth.getAccountId() != accountId) {
+                _status.value = SyncStatus.Skipped("Account changed — discarding stale sync")
+                return true
+            }
 
             // Clock-skew fix (item 3): anchor the hybrid clock on the freshest
             // server-seen stamp before any write decision. See [clampedWriteTime].
@@ -394,25 +418,50 @@ class FocusSyncManager(
             // Strict / Lockdown mode: independent LWW clock. Current backends return prefs
             // in getSnapshot; older ones fall back to a throttled getDashboard fetch.
             val effectivePrefs = remotePrefs ?: fetchRemotePrefsThrottled(convex)
+            if (effectivePrefs?.strictMode == false && (effectivePrefs.strictApprovedAt ?: 0L) > 0L) {
+                settings.applyRemoteApprovedUnlock(
+                    expectedEndsAt = effectivePrefs.strictApprovedEndsAt ?: 0L,
+                    approvedAt = effectivePrefs.strictApprovedAt ?: 0L,
+                )
+            }
+            settings.expireLockdownIfNeeded()
             val localLockdown = settings.lockdownModeFlow.first()
+            val localLockdownEndsAt = settings.lockdownEndsAtFlow.first()
+            val localNukeAfterFive = settings.lockdownNukeAfterFiveFlow.first()
+            val localPreset = settings.lockdownPresetFlow.first()
+            val localEnabledAt = settings.getLockdownModeEnabledAt()
             val localLockdownUpdatedAt = settings.getLockdownModeUpdatedAt()
             val remoteStrictMode = effectivePrefs?.strictMode
+            val remoteEndsAt = effectivePrefs?.strictEndsAt ?: 0L
             val remoteLockdownUpdatedAt = effectivePrefs?.updatedAt ?: 0L
-            if (remoteStrictMode != null && remoteLockdownUpdatedAt > localLockdownUpdatedAt) {
+            val localCommitmentWins = localLockdown && localLockdownEndsAt > System.currentTimeMillis() &&
+                (remoteStrictMode != true || remoteEndsAt < localLockdownEndsAt)
+            if (!localCommitmentWins && remoteStrictMode != null && remoteLockdownUpdatedAt > localLockdownUpdatedAt) {
                 settings.applyRemoteLockdown(
                     enabled = remoteStrictMode,
                     updatedAt = remoteLockdownUpdatedAt,
                     enabledAt = remoteLockdownUpdatedAt,
+                    endsAt = remoteEndsAt,
+                    nukeAfterFive = effectivePrefs.strictNukeAfterFive,
+                    preset = effectivePrefs.strictPreset,
                 )
                 pulled++
             } else if (localLockdownUpdatedAt > 0L &&
-                localLockdownUpdatedAt > remoteLockdownUpdatedAt &&
-                (remoteStrictMode == null || localLockdown != remoteStrictMode)
+                (localCommitmentWins || localLockdownUpdatedAt > remoteLockdownUpdatedAt) &&
+                (remoteStrictMode == null || localLockdown != remoteStrictMode ||
+                    localLockdownEndsAt != remoteEndsAt ||
+                    localNukeAfterFive != effectivePrefs?.strictNukeAfterFive ||
+                    localPreset != effectivePrefs?.strictPreset)
             ) {
-                val writeTime = clampedWriteTime(startedAt, localLockdownUpdatedAt)
+                val writeTime = clampedWriteTime(startedAt,
+                    if (localCommitmentWins) maxOf(localLockdownUpdatedAt, remoteLockdownUpdatedAt + 1L)
+                    else localLockdownUpdatedAt)
                 require(
                     convex.savePrefs(
                         strictMode = localLockdown,
+                        strictEndsAt = localLockdownEndsAt,
+                        strictNukeAfterFive = localNukeAfterFive,
+                        strictPreset = localPreset,
                         weeklyReport = effectivePrefs?.weeklyReport,
                         dailyReminderMinutes = effectivePrefs?.dailyReminderMinutes,
                         globalDailyCapMinutes = effectivePrefs?.globalDailyCapMinutes,
@@ -420,7 +469,10 @@ class FocusSyncManager(
                     )
                 ) { "Could not save lockdown preference" }
                 // Re-stamp local so the pushed clock matches the server and we don't re-push.
-                settings.applyRemoteLockdown(localLockdown, writeTime, writeTime)
+                settings.applyRemoteLockdown(
+                    localLockdown, writeTime, localEnabledAt,
+                    localLockdownEndsAt, localNukeAfterFive, localPreset,
+                )
                 pushed++
             }
             } catch (e: Exception) {
@@ -494,6 +546,88 @@ class FocusSyncManager(
             return false
         }
     }
+
+    /**
+     * DataStore is device scoped, while synced data is account scoped. Keep the first
+     * account's offline work for upload, but clear it before a different Clerk subject
+     * can read or push it. The cloud snapshot then becomes the source of truth.
+     */
+    private suspend fun prepareAccount(accountId: String) {
+        val stored = identityPrefs.getString(KEY_SYNC_ACCOUNT_ID, null)?.trim().orEmpty()
+        if (stored == accountId) {
+            currentAccountId = accountId
+            return
+        }
+        if (stored.isNotEmpty()) {
+            val transition = identityPrefs.getString(KEY_ACCOUNT_TRANSITION, null)
+            // A marker makes the handoff recoverable if the process dies between
+            // archiving and clearing DataStore. Never overwrite a committed archive
+            // with a partially-cleared account on the next startup.
+            val transitionPrefix = "$stored->$accountId:"
+            if (transition?.startsWith(transitionPrefix) != true) {
+                // Export first, then commit the marker and payload together. A process
+                // death cannot leave a new marker pointing at an older archive.
+                val archive = exportAccount(stored)
+                check(identityPrefs.edit()
+                    .putString(KEY_ACCOUNT_TRANSITION, "$transitionPrefix${System.currentTimeMillis()}")
+                    .putString("sync_archive_$stored", archive)
+                    .commit()) { "Could not persist account transition" }
+            }
+            bank.resetForAccountSwitch()
+            settings.resetForAccountSwitch()
+            targetGroups.resetForAccountSwitch()
+            // Android UsageStats is device-global. Start the destination account at
+            // the current counter so time observed while another account was active
+            // can never be attributed to this account.
+            captureUsageBaseline(accountId)
+        }
+        restoreAccount(accountId)
+        check(identityPrefs.edit()
+            .putString(KEY_SYNC_ACCOUNT_ID, accountId)
+            .remove(KEY_ACCOUNT_TRANSITION)
+            .commit()) { "Could not persist account identity" }
+        currentAccountId = accountId
+        serverSeenMs = 0L
+        cachedRemotePrefs = null
+        lastPrefsFetchAt = 0L
+    }
+
+    private suspend fun exportAccount(accountId: String): String {
+        val payload = JSONObject().apply {
+            put("bank", bank.exportAccountState())
+            put("settings", settings.exportAccountState())
+            put("groups", targetGroups.exportAccountState())
+        }
+        return payload.toString()
+    }
+
+    private suspend fun restoreAccount(accountId: String) {
+        val raw = identityPrefs.getString("sync_archive_$accountId", null) ?: return
+        try {
+            val payload = JSONObject(raw)
+            bank.restoreAccountState(payload.optJSONObject("bank") ?: return)
+            settings.restoreAccountState(payload.optJSONObject("settings") ?: return)
+            targetGroups.restoreAccountState(payload.optJSONObject("groups") ?: return)
+        } catch (e: Exception) {
+            android.util.Log.w("FocusSyncManager", "account archive restore failed", e)
+        }
+    }
+
+    private suspend fun captureUsageBaseline(accountId: String) {
+        try {
+            val summary = UsageStatsRepository.getTodaySummary(appContext, maxApps = 100)
+            val baseline = JSONObject().apply {
+                summary.topApps.forEach { put(it.packageName, it.foregroundMinutes * 60L) }
+            }
+            identityPrefs.edit().putString("usage_baseline_$accountId", baseline.toString()).commit()
+        } catch (e: Exception) {
+            android.util.Log.w("FocusSyncManager", "usage baseline capture failed", e)
+        }
+    }
+
+    private fun usageBaseline(accountId: String, packageName: String): Long = try {
+        JSONObject(identityPrefs.getString("usage_baseline_$accountId", "{}") ?: "{}").optLong(packageName, 0L)
+    } catch (_: Exception) { 0L }
 
     private data class RecordPushOutcome(val pushed: Int, val failed: Boolean)
 
@@ -574,13 +708,18 @@ class FocusSyncManager(
     }
 
     private suspend fun syncNuke(convex: ConvexSyncClient) {
-        if (settings.nukeActiveFlow.first()) {
+        var nuke = convex.getNuke()
+        val localActive = settings.nukeActiveFlow.first()
+        val localStartedAt = settings.nukeStartedAtFlow.first()
+        if (localActive && (nuke == null || !nuke.optBoolean("isActive", false)) &&
+            localStartedAt > (nuke?.optLong("updatedAt", 0L) ?: 0L)) {
             require(convex.activateNuke()) { "Could not sync Nuke state" }
+            nuke = convex.getNuke()
         }
-        val nuke = convex.getNuke() ?: return
-        if (nuke.optBoolean("isActive", false)) {
-            val startedAt = nuke.optLong("startedAt", System.currentTimeMillis())
-            val meditationDoneAt = nuke.optLong("meditationCompletedAt", 0L)
+        val remoteNuke = nuke ?: return
+        if (remoteNuke.optBoolean("isActive", false)) {
+            val startedAt = remoteNuke.optLong("startedAt", System.currentTimeMillis())
+            val meditationDoneAt = remoteNuke.optLong("meditationCompletedAt", 0L)
             if (!settings.nukeActiveFlow.first()) settings.setNukeActive(true, startedAt)
             if (meditationDoneAt > 0L && settings.nukeMeditationDoneAtFlow.first() == 0L) {
                 settings.setNukeMeditationDone(meditationDoneAt)
@@ -787,7 +926,8 @@ class FocusSyncManager(
         }
         val usage = UsageStatsRepository.getTodaySummary(appContext, maxApps = 100)
         val buckets = usage.topApps.mapNotNull { entry ->
-            val seconds = entry.foregroundMinutes * 60L
+            val seconds = (entry.foregroundMinutes * 60L - usageBaseline(currentAccountId.orEmpty(), entry.packageName))
+                .coerceAtLeast(0L)
             if (seconds <= 0L) null else UsageBucket(
                 date = today(),
                 targetKind = "app",
@@ -880,6 +1020,8 @@ class FocusSyncManager(
          * cannot permanently lock remote writes out of LWW.
          */
         private const val SKEW_CLAMP_MS = 60_000L
+        private const val KEY_SYNC_ACCOUNT_ID = "sync_account_id"
+        private const val KEY_ACCOUNT_TRANSITION = "sync_account_transition"
     }
 }
 

@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import org.json.JSONObject
 
 private val Context.targetGroupsDataStore by preferencesDataStore(name = "focuslock_target_groups")
 
@@ -140,6 +141,30 @@ class TargetGroupsRepository(private val context: Context) {
         0L
     }
 
+    /** Drops account-owned groups and their LWW clock during an account handoff. */
+    suspend fun resetForAccountSwitch() {
+        val committed = editGroups { prefs ->
+            prefs.remove(Keys.GROUPS_JSON)
+            prefs.remove(Keys.TARGET_GROUPS_UPDATED_AT)
+        }
+        if (committed) publish(emptyList())
+    }
+
+    suspend fun exportAccountState(): JSONObject = JSONObject().apply {
+        put("groups", context.targetGroupsDataStore.data.first()[Keys.GROUPS_JSON] ?: "[]")
+        put("updatedAt", getUpdatedAt())
+    }
+
+    suspend fun restoreAccountState(snapshot: JSONObject) {
+        val raw = snapshot.optString("groups", "[]")
+        val restored = decodeGroups(raw)
+        val committed = editGroups { prefs ->
+            prefs[Keys.GROUPS_JSON] = raw
+            prefs[Keys.TARGET_GROUPS_UPDATED_AT] = snapshot.optLong("updatedAt", 0L).coerceAtLeast(0L)
+        }
+        if (committed) publish(restored)
+    }
+
     /**
      * Adds or replaces one group and stamps [Keys.TARGET_GROUPS_UPDATED_AT] to now, so
      * the next sync cycle pushes the rewritten full list. Atomic read-modify-write inside
@@ -234,6 +259,18 @@ class TargetGroupsRepository(private val context: Context) {
             }
         }
         return membershipIndex[key] ?: emptyList()
+    }
+
+    /** A website member covers its domain and subdomains, like a blocked website. */
+    suspend fun groupsForWebsiteHost(host: String): List<TargetGroup> {
+        val normalizedHost = normalizedTargetKey("website", host) ?: return emptyList()
+        val allGroups = currentGroups()
+        return allGroups.filter { group ->
+            group.members.any { member ->
+                member.targetKind == "website" &&
+                    (normalizedHost == member.targetKey || normalizedHost.endsWith(".${member.targetKey}"))
+            }
+        }
     }
 
     /**

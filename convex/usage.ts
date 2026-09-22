@@ -88,6 +88,9 @@ export const recordUsageBatch = mutation({
       if (!/^\d{4}-\d{2}-\d{2}$/.test(bucket.date)) throw new Error("Invalid usage date");
       const targetKey = bucket.targetKey.trim().toLowerCase().slice(0, 500);
       if (!targetKey) throw new Error("Usage target is required");
+      if (![bucket.trackedSeconds, bucket.updatedAt, bucket.blockedSeconds ?? 0, bucket.launchCount ?? 0].every(Number.isFinite)) {
+        throw new Error("Usage counters and timestamps must be finite");
+      }
       const trackedSeconds = Math.max(0, Math.floor(bucket.trackedSeconds));
       const blockedSeconds = bucket.blockedSeconds === undefined
         ? undefined
@@ -107,9 +110,13 @@ export const recordUsageBatch = mutation({
         targetKey,
         targetLabel: bucket.targetLabel.trim().slice(0, 160) || targetKey,
         category: bucket.category?.trim().slice(0, 80),
-        trackedSeconds,
-        blockedSeconds,
-        launchCount,
+        // Counters are cumulative for an installation/day. A cache reset or a
+        // retry with a newer timestamp must never erase already stored usage.
+        trackedSeconds: Math.max(existing?.trackedSeconds ?? 0, trackedSeconds),
+        blockedSeconds: blockedSeconds === undefined ? existing?.blockedSeconds
+          : Math.max(existing?.blockedSeconds ?? 0, blockedSeconds),
+        launchCount: launchCount === undefined ? existing?.launchCount
+          : Math.max(existing?.launchCount ?? 0, launchCount),
         updatedAt: bucket.updatedAt,
       };
       if (existing) await ctx.db.patch(existing._id, value);

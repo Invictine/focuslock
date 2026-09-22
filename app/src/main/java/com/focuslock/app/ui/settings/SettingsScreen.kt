@@ -369,20 +369,6 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
             .padding(top = 16.dp, bottom = 32.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // Header
-        Text(
-            text = "Settings",
-            style = MaterialTheme.typography.headlineMedium.copy(
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface
-            )
-        )
-        Text(
-            text = "Work first, scroll later. TickTick is optional — the built-in Focus Timer always works.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-
         // 1. Productivity Conversion Rules Card — the ratio/bonus controls live in their own
         // composable so slider drag frames don't recompose the rest of this screen.
         Card(
@@ -1156,7 +1142,7 @@ private fun RatioSliderCard(authViewModel: AuthViewModel) {
     var workRatioDraft by remember(workRatio) { mutableFloatStateOf(workRatio.toFloat()) }
     var taskBonusDraft by remember(taskBonus) { mutableFloatStateOf(taskBonus.toFloat()) }
 
-    Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(
                 modifier = Modifier
@@ -1179,31 +1165,16 @@ private fun RatioSliderCard(authViewModel: AuthViewModel) {
             )
         }
 
-        Surface(
-            color = MaterialTheme.colorScheme.surfaceContainerHigh,
-            shape = RoundedCornerShape(16.dp)
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(14.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text(
-                        text = "Current Ratio: $workRatio to 1",
-                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Text(
-                        text = "60 min work = ${60 / workRatio.coerceAtLeast(1)} min screen time",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                }
-            }
-        }
+        Text(
+            text = "Work ratio: $workRatio:1",
+            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        Text(
+            text = "60 minutes of work earns ${60 / workRatio.coerceAtLeast(1)} minutes of leisure.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary
+        )
 
         Slider(
             value = workRatioDraft,
@@ -1223,6 +1194,13 @@ private fun RatioSliderCard(authViewModel: AuthViewModel) {
                 inactiveTrackColor = MaterialTheme.colorScheme.surfaceContainerHighest
             )
         )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("1:1", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("10:1", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
 
         HorizontalDivider(color = MaterialTheme.colorScheme.surfaceContainerHighest)
 
@@ -1232,7 +1210,7 @@ private fun RatioSliderCard(authViewModel: AuthViewModel) {
             color = MaterialTheme.colorScheme.onSurface
         )
         Text(
-            text = "+$taskBonus extra minutes awarded for every TickTick task checked off.",
+            text = "+$taskBonus minutes per completed TickTick task.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -1255,6 +1233,13 @@ private fun RatioSliderCard(authViewModel: AuthViewModel) {
                 inactiveTrackColor = MaterialTheme.colorScheme.surfaceContainerHighest
             )
         )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("0 min", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("20 min", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 

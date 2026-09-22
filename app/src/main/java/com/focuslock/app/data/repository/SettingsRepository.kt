@@ -25,6 +25,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.net.URI
 import java.util.concurrent.atomic.AtomicBoolean
+import org.json.JSONObject
 
 private val Context.dataStore by preferencesDataStore(name = "focuslock_settings")
 
@@ -89,6 +90,12 @@ class SettingsRepository(private val context: Context) {
         val LOCKDOWN_MODE = booleanPreferencesKey("lockdown_mode")
         val LOCKDOWN_MODE_ENABLED_AT = longPreferencesKey("lockdown_mode_enabled_at")
         val LOCKDOWN_MODE_UPDATED_AT = longPreferencesKey("lockdown_mode_updated_at")
+        val LOCKDOWN_ENDS_AT = longPreferencesKey("lockdown_ends_at")
+        val LOCKDOWN_ATTEMPT_COUNT = intPreferencesKey("lockdown_attempt_count")
+        val LOCKDOWN_LAST_ATTEMPT_AT = longPreferencesKey("lockdown_last_attempt_at")
+        val LOCKDOWN_LAST_ATTEMPT_PACKAGE = stringPreferencesKey("lockdown_last_attempt_package")
+        val LOCKDOWN_NUKE_AFTER_FIVE = booleanPreferencesKey("lockdown_nuke_after_five")
+        val LOCKDOWN_PRESET = stringPreferencesKey("lockdown_preset")
         // Boundaries lock: when true, Boundaries UI must not allow removing blocked apps/websites.
         val BOUNDARIES_LOCK = booleanPreferencesKey("boundaries_lock")
         val BOUNDARIES_LOCK_UPDATED_AT = longPreferencesKey("boundaries_lock_updated_at")
@@ -369,6 +376,7 @@ class SettingsRepository(private val context: Context) {
                 preferences[PreferencesKeys.STRICT_MODE] ?: false
             }
         }
+
         .onEach { enabled ->
             _lockdownMode.value = enabled
             lockdownModeLoaded.value = true
@@ -381,12 +389,30 @@ class SettingsRepository(private val context: Context) {
             emit(false)
         }
 
+    val lockdownEndsAtFlow: Flow<Long> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.LOCKDOWN_ENDS_AT] ?: 0L
+    }
+
+    val lockdownAttemptCountFlow: Flow<Int> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.LOCKDOWN_ATTEMPT_COUNT] ?: 0
+    }
+
+    val lockdownNukeAfterFiveFlow: Flow<Boolean> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.LOCKDOWN_NUKE_AFTER_FIVE] ?: false
+    }
+
+    val lockdownPresetFlow: Flow<String> = context.dataStore.data.map { preferences ->
+        preferences[PreferencesKeys.LOCKDOWN_PRESET] ?: "Custom"
+    }
+
     @Deprecated("Use lockdownModeFlow", ReplaceWith("lockdownModeFlow"))
     val strictModeFlow: Flow<Boolean> get() = lockdownModeFlow
 
     /** Cached lockdown flag; falls back to DataStore only until the cache is warm. */
-    suspend fun isLockdownModeEnabled(): Boolean =
-        if (lockdownModeLoaded.value) _lockdownMode.value else lockdownModeFlow.first()
+    suspend fun isLockdownModeEnabled(): Boolean {
+        expireLockdownIfNeeded()
+        return if (lockdownModeLoaded.value) _lockdownMode.value else lockdownModeFlow.first()
+    }
 
     /** Non-suspending lockdown read for already-warm hot paths. */
     fun isLockdownNow(): Boolean = _lockdownMode.value
@@ -496,6 +522,108 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun getBlockedAppsUpdatedAt(): Long =
         readSettingsPrefs()[PreferencesKeys.BLOCKED_APPS_UPDATED_AT] ?: 0L
+
+    /**
+     * Clears only data that is synchronized through the user's cloud account.
+     * Device permissions, UI preferences, and third-party integrations remain local.
+     */
+    suspend fun resetForAccountSwitch() {
+        val committed = editSettings { preferences ->
+            @Suppress("UNCHECKED_CAST")
+            fun removeAny(key: Preferences.Key<*>) {
+                preferences.remove(key as Preferences.Key<Any>)
+            }
+            listOf(
+                PreferencesKeys.BLOCKED_APPS_JSON,
+                PreferencesKeys.BLOCKED_WEBSITES_JSON,
+                PreferencesKeys.BLOCKED_APPS_UPDATED_AT,
+                PreferencesKeys.BLOCKED_WEBSITES_UPDATED_AT,
+                PreferencesKeys.WORK_RATIO,
+                PreferencesKeys.WORK_RATIO_UPDATED_AT,
+                PreferencesKeys.TASK_COMPLETION_BONUS,
+                PreferencesKeys.TASK_COMPLETION_BONUS_UPDATED_AT,
+                PreferencesKeys.STRICT_MODE,
+                PreferencesKeys.STRICT_MODE_ENABLED_AT,
+                PreferencesKeys.STRICT_MODE_UPDATED_AT,
+                PreferencesKeys.LOCKDOWN_MODE,
+                PreferencesKeys.LOCKDOWN_MODE_ENABLED_AT,
+                PreferencesKeys.LOCKDOWN_MODE_UPDATED_AT,
+                PreferencesKeys.LOCKDOWN_ENDS_AT,
+                PreferencesKeys.LOCKDOWN_ATTEMPT_COUNT,
+                PreferencesKeys.LOCKDOWN_LAST_ATTEMPT_AT,
+                PreferencesKeys.LOCKDOWN_LAST_ATTEMPT_PACKAGE,
+                PreferencesKeys.LOCKDOWN_NUKE_AFTER_FIVE,
+                PreferencesKeys.LOCKDOWN_PRESET,
+                PreferencesKeys.BOUNDARIES_LOCK,
+                PreferencesKeys.BOUNDARIES_LOCK_UPDATED_AT,
+                PreferencesKeys.NUKE_ACTIVE,
+                PreferencesKeys.NUKE_STARTED_AT,
+                PreferencesKeys.NUKE_MEDITATION_DONE_AT,
+            ).forEach(::removeAny)
+        }
+        if (committed) {
+            _blockedApps.value = BlockedApp.DEFAULT_DOOMSCROLL_APPS
+            _blockedWebsites.value = BlockedWebsite.DEFAULT_BLOCKED_WEBSITES
+            _lockdownMode.value = false
+            _nukeActive.value = false
+            blockedAppsLoaded.value = true
+            blockedWebsitesLoaded.value = true
+            lockdownModeLoaded.value = true
+            nukeActiveLoaded.value = true
+        }
+    }
+
+    suspend fun exportAccountState(): JSONObject {
+        val p = readSettingsPrefs()
+        return JSONObject().apply {
+            put("apps", p[PreferencesKeys.BLOCKED_APPS_JSON] ?: "")
+            put("sites", p[PreferencesKeys.BLOCKED_WEBSITES_JSON] ?: "")
+            put("appsAt", p[PreferencesKeys.BLOCKED_APPS_UPDATED_AT] ?: 0L)
+            put("sitesAt", p[PreferencesKeys.BLOCKED_WEBSITES_UPDATED_AT] ?: 0L)
+            put("ratio", p[PreferencesKeys.WORK_RATIO] ?: 4)
+            put("ratioAt", p[PreferencesKeys.WORK_RATIO_UPDATED_AT] ?: 0L)
+            put("bonus", p[PreferencesKeys.TASK_COMPLETION_BONUS] ?: 5)
+            put("bonusAt", p[PreferencesKeys.TASK_COMPLETION_BONUS_UPDATED_AT] ?: 0L)
+            put("lockdown", p[PreferencesKeys.LOCKDOWN_MODE] ?: false)
+            put("lockdownAt", p[PreferencesKeys.LOCKDOWN_MODE_UPDATED_AT] ?: 0L)
+            put("lockdownEnds", p[PreferencesKeys.LOCKDOWN_ENDS_AT] ?: 0L)
+            put("boundariesLock", p[PreferencesKeys.BOUNDARIES_LOCK] ?: false)
+            put("boundariesLockAt", p[PreferencesKeys.BOUNDARIES_LOCK_UPDATED_AT] ?: 0L)
+            put("nukeAfterFive", p[PreferencesKeys.LOCKDOWN_NUKE_AFTER_FIVE] ?: false)
+            put("preset", p[PreferencesKeys.LOCKDOWN_PRESET] ?: "")
+            put("nuke", p[PreferencesKeys.NUKE_ACTIVE] ?: false)
+            put("nukeStarted", p[PreferencesKeys.NUKE_STARTED_AT] ?: 0L)
+            put("nukeMeditation", p[PreferencesKeys.NUKE_MEDITATION_DONE_AT] ?: 0L)
+        }
+    }
+
+    suspend fun restoreAccountState(s: JSONObject) {
+        val committed = editSettings { p ->
+            s.optString("apps").takeIf { it.isNotBlank() }?.let { p[PreferencesKeys.BLOCKED_APPS_JSON] = it }
+            s.optString("sites").takeIf { it.isNotBlank() }?.let { p[PreferencesKeys.BLOCKED_WEBSITES_JSON] = it }
+            p[PreferencesKeys.BLOCKED_APPS_UPDATED_AT] = s.optLong("appsAt", 0L)
+            p[PreferencesKeys.BLOCKED_WEBSITES_UPDATED_AT] = s.optLong("sitesAt", 0L)
+            p[PreferencesKeys.WORK_RATIO] = s.optInt("ratio", 4)
+            p[PreferencesKeys.WORK_RATIO_UPDATED_AT] = s.optLong("ratioAt", 0L)
+            p[PreferencesKeys.TASK_COMPLETION_BONUS] = s.optInt("bonus", 5)
+            p[PreferencesKeys.TASK_COMPLETION_BONUS_UPDATED_AT] = s.optLong("bonusAt", 0L)
+            p[PreferencesKeys.LOCKDOWN_MODE] = s.optBoolean("lockdown", false)
+            p[PreferencesKeys.LOCKDOWN_MODE_UPDATED_AT] = s.optLong("lockdownAt", 0L)
+            p[PreferencesKeys.LOCKDOWN_ENDS_AT] = s.optLong("lockdownEnds", 0L)
+            p[PreferencesKeys.BOUNDARIES_LOCK] = s.optBoolean("boundariesLock", false)
+            p[PreferencesKeys.BOUNDARIES_LOCK_UPDATED_AT] = s.optLong("boundariesLockAt", 0L)
+            p[PreferencesKeys.LOCKDOWN_NUKE_AFTER_FIVE] = s.optBoolean("nukeAfterFive", false)
+            p[PreferencesKeys.LOCKDOWN_PRESET] = s.optString("preset", "")
+            p[PreferencesKeys.NUKE_ACTIVE] = s.optBoolean("nuke", false)
+            p[PreferencesKeys.NUKE_STARTED_AT] = s.optLong("nukeStarted", 0L)
+            p[PreferencesKeys.NUKE_MEDITATION_DONE_AT] = s.optLong("nukeMeditation", 0L)
+        }
+        if (committed) {
+            _blockedApps.value = decodeBlockedApps(s.optString("apps"))
+            _blockedWebsites.value = decodeBlockedWebsites(s.optString("sites"))
+            _lockdownMode.value = s.optBoolean("lockdown", false)
+        }
+    }
 
     /**
      * Atomic read-modify-write helpers (race fix, item 6): decode → mutate → encode
@@ -1117,23 +1245,125 @@ class SettingsRepository(private val context: Context) {
         }
     }
 
-    suspend fun setLockdownMode(enabled: Boolean) {
+    suspend fun setLockdownMode(enabled: Boolean, endsAt: Long = 0L) {
         val now = System.currentTimeMillis()
         // Opportunistic migration so legacy timestamps survive the rename.
         ensureLockdownMigrated()
         val committed = editSettings { preferences ->
+            if (enabled && isLockdownActiveIn(preferences)) {
+                val currentEnd = preferences[PreferencesKeys.LOCKDOWN_ENDS_AT]
+                    ?: (preferences[PreferencesKeys.LOCKDOWN_MODE_ENABLED_AT] ?: now) + LOCKDOWN_DISABLE_COOLDOWN_MS
+                if (currentEnd > now) {
+                    if (endsAt > currentEnd) {
+                        preferences[PreferencesKeys.LOCKDOWN_ENDS_AT] = endsAt.coerceAtMost(now + MAX_LOCKDOWN_DURATION_HOURS * 60 * 60 * 1000L)
+                        preferences[PreferencesKeys.LOCKDOWN_MODE_UPDATED_AT] = now
+                    }
+                    return@editSettings
+                }
+            }
+            if (!enabled && isLockdownActiveIn(preferences)) {
+                val currentEnd = preferences[PreferencesKeys.LOCKDOWN_ENDS_AT]
+                    ?: (preferences[PreferencesKeys.LOCKDOWN_MODE_ENABLED_AT] ?: now) + LOCKDOWN_DISABLE_COOLDOWN_MS
+                if (currentEnd > now) return@editSettings
+            }
             preferences[PreferencesKeys.LOCKDOWN_MODE] = enabled
             preferences[PreferencesKeys.LOCKDOWN_MODE_UPDATED_AT] = now
             if (enabled) {
                 preferences[PreferencesKeys.LOCKDOWN_MODE_ENABLED_AT] = now
+                preferences[PreferencesKeys.LOCKDOWN_ENDS_AT] =
+                    if (endsAt > now) endsAt.coerceAtMost(now + MAX_LOCKDOWN_DURATION_HOURS * 60 * 60 * 1000L)
+                    else now + LOCKDOWN_DISABLE_COOLDOWN_MS
+                preferences[PreferencesKeys.LOCKDOWN_ATTEMPT_COUNT] = 0
+                preferences.remove(PreferencesKeys.LOCKDOWN_LAST_ATTEMPT_AT)
+                preferences.remove(PreferencesKeys.LOCKDOWN_LAST_ATTEMPT_PACKAGE)
             }
             // NOTE: LOCKDOWN_MODE_ENABLED_AT is intentionally kept on disable so the
             // cooldown window stays auditable (and re-enabling restarts it).
         }
         if (committed) {
-            _lockdownMode.value = enabled
+            _lockdownMode.value = readSettingsPrefs()[PreferencesKeys.LOCKDOWN_MODE] ?: false
             lockdownModeLoaded.value = true
         }
+    }
+
+    /** Applies a server-approved email unlock only to the exact active commitment it names. */
+    suspend fun applyRemoteApprovedUnlock(expectedEndsAt: Long, approvedAt: Long): Boolean {
+        if (expectedEndsAt <= 0L || approvedAt <= 0L) return false
+        var applied = false
+        val committed = editSettings { preferences ->
+            val enabledAt = preferences[PreferencesKeys.LOCKDOWN_MODE_ENABLED_AT] ?: 0L
+            val endsAt = preferences[PreferencesKeys.LOCKDOWN_ENDS_AT] ?: 0L
+            if (preferences[PreferencesKeys.LOCKDOWN_MODE] == true && endsAt == expectedEndsAt && enabledAt in 1L..approvedAt) {
+                preferences[PreferencesKeys.LOCKDOWN_MODE] = false
+                preferences[PreferencesKeys.LOCKDOWN_MODE_UPDATED_AT] = approvedAt
+                preferences[PreferencesKeys.LOCKDOWN_ENDS_AT] = 0L
+                applied = true
+            }
+        }
+        if (committed && applied) { _lockdownMode.value = false; lockdownModeLoaded.value = true }
+        return committed && applied
+    }
+
+    suspend fun extendLockdown(newEndsAt: Long) {
+        val now = System.currentTimeMillis()
+        editSettings { preferences ->
+            val current = preferences[PreferencesKeys.LOCKDOWN_ENDS_AT] ?: 0L
+            if (isLockdownActiveIn(preferences) && newEndsAt > maxOf(current, now)) {
+                preferences[PreferencesKeys.LOCKDOWN_ENDS_AT] = newEndsAt.coerceAtMost(now + MAX_LOCKDOWN_DURATION_HOURS * 60 * 60 * 1000L)
+                preferences[PreferencesKeys.LOCKDOWN_MODE_UPDATED_AT] = now
+            }
+        }
+    }
+
+    suspend fun setLockdownNukeAfterFive(enabled: Boolean) {
+        editSettings { preferences ->
+            preferences[PreferencesKeys.LOCKDOWN_NUKE_AFTER_FIVE] = enabled
+            preferences[PreferencesKeys.LOCKDOWN_MODE_UPDATED_AT] = System.currentTimeMillis()
+        }
+    }
+
+    suspend fun setLockdownPreset(preset: String) {
+        editSettings { preferences ->
+            preferences[PreferencesKeys.LOCKDOWN_PRESET] = preset.take(40)
+            preferences[PreferencesKeys.LOCKDOWN_MODE_UPDATED_AT] = System.currentTimeMillis()
+        }
+    }
+
+    /** Counts a distinct blocked launch in the current commitment, across all apps. */
+    suspend fun recordStrictBlockedAttempt(packageName: String): Int {
+        val now = System.currentTimeMillis()
+        var count = 0
+        editSettings { preferences ->
+            val endsAt = preferences[PreferencesKeys.LOCKDOWN_ENDS_AT] ?: 0L
+            if (!isLockdownActiveIn(preferences) || (endsAt > 0 && endsAt <= now)) return@editSettings
+            val lastAt = preferences[PreferencesKeys.LOCKDOWN_LAST_ATTEMPT_AT] ?: 0L
+            val lastPackage = preferences[PreferencesKeys.LOCKDOWN_LAST_ATTEMPT_PACKAGE]
+            count = preferences[PreferencesKeys.LOCKDOWN_ATTEMPT_COUNT] ?: 0
+            if (lastPackage == packageName && now - lastAt < 2_000L) return@editSettings
+            count += 1
+            preferences[PreferencesKeys.LOCKDOWN_ATTEMPT_COUNT] = count
+            preferences[PreferencesKeys.LOCKDOWN_LAST_ATTEMPT_AT] = now
+            preferences[PreferencesKeys.LOCKDOWN_LAST_ATTEMPT_PACKAGE] = packageName
+        }
+        return count
+    }
+
+    /** Expiry is persisted so all flow collectors and the next sync see the same state. */
+    suspend fun expireLockdownIfNeeded(now: Long = System.currentTimeMillis()): Boolean {
+        var expired = false
+        val committed = editSettings { preferences ->
+            val endsAt = preferences[PreferencesKeys.LOCKDOWN_ENDS_AT] ?: 0L
+            if (isLockdownActiveIn(preferences) && endsAt > 0L && endsAt <= now) {
+                preferences[PreferencesKeys.LOCKDOWN_MODE] = false
+                preferences[PreferencesKeys.LOCKDOWN_MODE_UPDATED_AT] = now
+                expired = true
+            }
+        }
+        if (committed && expired) {
+            _lockdownMode.value = false
+            lockdownModeLoaded.value = true
+        }
+        return expired
     }
 
     /** One-time migration: if lockdown_mode missing but strict_mode present, copy value+timestamps. */
@@ -1179,9 +1409,12 @@ class SettingsRepository(private val context: Context) {
 
     /** Millis remaining before Lockdown Mode may be turned off again. 0 = may disable now. */
     suspend fun lockdownCooldownRemainingMs(now: Long = System.currentTimeMillis()): Long {
-        val enabledAt = getLockdownModeEnabledAt()
+        val preferences = readSettingsPrefs()
+        val enabledAt = preferences[PreferencesKeys.LOCKDOWN_MODE_ENABLED_AT] ?: 0L
         if (enabledAt <= 0L) return 0L
-        return (enabledAt + LOCKDOWN_DISABLE_COOLDOWN_MS - now).coerceAtLeast(0L)
+        val endsAt = preferences[PreferencesKeys.LOCKDOWN_ENDS_AT]
+            ?: enabledAt + LOCKDOWN_DISABLE_COOLDOWN_MS
+        return (endsAt - now).coerceAtLeast(0L)
     }
 
     /**
@@ -1189,18 +1422,38 @@ class SettingsRepository(private val context: Context) {
      * Cooldown anchor (ENABLED_AT) is only set when enabling and never cleared, so a
      * remote disable can't be abused to dodge the local 24h lock.
      */
-    suspend fun applyRemoteLockdown(enabled: Boolean, updatedAt: Long, enabledAt: Long = updatedAt) {
+    suspend fun applyRemoteLockdown(
+        enabled: Boolean,
+        updatedAt: Long,
+        enabledAt: Long = updatedAt,
+        endsAt: Long = 0L,
+        nukeAfterFive: Boolean? = null,
+        preset: String? = null,
+    ) {
         ensureLockdownMigrated()
         val committed = editSettings { preferences ->
+            val currentEnd = preferences[PreferencesKeys.LOCKDOWN_ENDS_AT]
+                ?: (preferences[PreferencesKeys.LOCKDOWN_MODE_ENABLED_AT] ?: 0L) + LOCKDOWN_DISABLE_COOLDOWN_MS
+            if (!enabled && isLockdownActiveIn(preferences) && currentEnd > System.currentTimeMillis()) {
+                return@editSettings
+            }
+            if (enabled && isLockdownActiveIn(preferences) && currentEnd > System.currentTimeMillis() &&
+                endsAt > 0L && endsAt < currentEnd) return@editSettings
             preferences[PreferencesKeys.LOCKDOWN_MODE] = enabled
             preferences[PreferencesKeys.LOCKDOWN_MODE_UPDATED_AT] = updatedAt
+            preferences[PreferencesKeys.LOCKDOWN_ENDS_AT] =
+                if (endsAt > 0L) endsAt else enabledAt + LOCKDOWN_DISABLE_COOLDOWN_MS
+            if (nukeAfterFive != null) preferences[PreferencesKeys.LOCKDOWN_NUKE_AFTER_FIVE] = nukeAfterFive
+            if (preset != null) preferences[PreferencesKeys.LOCKDOWN_PRESET] = preset.take(40)
             if (enabled) {
                 val current = preferences[PreferencesKeys.LOCKDOWN_MODE_ENABLED_AT] ?: 0L
-                if (current <= 0L) preferences[PreferencesKeys.LOCKDOWN_MODE_ENABLED_AT] = enabledAt
+                if (current <= 0L || enabledAt > 0L) {
+                    preferences[PreferencesKeys.LOCKDOWN_MODE_ENABLED_AT] = enabledAt
+                }
             }
         }
         if (committed) {
-            _lockdownMode.value = enabled
+            _lockdownMode.value = readSettingsPrefs()[PreferencesKeys.LOCKDOWN_MODE] ?: false
             lockdownModeLoaded.value = true
         }
     }
@@ -1280,6 +1533,8 @@ class SettingsRepository(private val context: Context) {
     companion object {
         /** Cooldown before Lockdown Mode can be turned off again once enabled. */
         const val LOCKDOWN_DISABLE_COOLDOWN_MS = 24 * 60 * 60 * 1000L
+        const val MIN_LOCKDOWN_DURATION_HOURS = 1
+        const val MAX_LOCKDOWN_DURATION_HOURS = 30 * 24
 
         /** Cooldown before Strict Mode can be turned off again once enabled. */
         @Deprecated("Use LOCKDOWN_DISABLE_COOLDOWN_MS")

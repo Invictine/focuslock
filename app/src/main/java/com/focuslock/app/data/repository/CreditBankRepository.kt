@@ -41,6 +41,7 @@ import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import org.json.JSONObject
 
 private val Context.bankDataStore by preferencesDataStore(name = "focuslock_bank")
 
@@ -257,6 +258,59 @@ class CreditBankRepository(private val context: Context) {
         editBankPrefs { prefs ->
             prefs[Keys.LAST_SYNC_TIMESTAMP] = timestamp
         }
+    }
+
+    /** Durable account handoff payload; used before another Clerk account opens locally. */
+    suspend fun exportAccountState(): JSONObject {
+        val p = readBankPrefs()
+        return JSONObject().apply {
+            put("balance", p[Keys.CREDIT_BALANCE_SECONDS] ?: 0L)
+            put("work", p[Keys.TOTAL_WORK_SECONDS_TODAY] ?: 0L)
+            put("scroll", p[Keys.TOTAL_SCROLL_SECONDS_TODAY] ?: 0L)
+            put("tasks", p[Keys.TASKS_COMPLETED_TODAY] ?: 0)
+            put("date", p[Keys.LAST_RESET_DATE] ?: "")
+            put("history", p[Keys.WORK_HISTORY_JSON] ?: "[]")
+            put("credited", p[Keys.CREDITED_IDS_JSON] ?: "[]")
+            put("updatedAt", p[Keys.STATE_UPDATED_AT] ?: 0L)
+        }
+    }
+
+    suspend fun restoreAccountState(snapshot: JSONObject) {
+        stateMutex.withLock {
+            editBankPrefs { p ->
+                p[Keys.CREDIT_BALANCE_SECONDS] = snapshot.optLong("balance", 0L).coerceAtLeast(0L)
+                p[Keys.TOTAL_WORK_SECONDS_TODAY] = snapshot.optLong("work", 0L).coerceAtLeast(0L)
+                p[Keys.TOTAL_SCROLL_SECONDS_TODAY] = snapshot.optLong("scroll", 0L).coerceAtLeast(0L)
+                p[Keys.TASKS_COMPLETED_TODAY] = snapshot.optInt("tasks", 0).coerceAtLeast(0)
+                p[Keys.LAST_RESET_DATE] = snapshot.optString("date", "")
+                p[Keys.WORK_HISTORY_JSON] = snapshot.optString("history", "[]")
+                p[Keys.CREDITED_IDS_JSON] = snapshot.optString("credited", "[]")
+                p[Keys.STATE_UPDATED_AT] = snapshot.optLong("updatedAt", 0L).coerceAtLeast(0L)
+            }
+        }
+        _liveBalanceSeconds.value = snapshot.optLong("balance", 0L).coerceAtLeast(0L)
+        _workHistory.value = decodeHistory(snapshot.optString("history", "[]"))
+    }
+
+    /** Clears state owned by the signed-in account before another account is opened. */
+    suspend fun resetForAccountSwitch() = withContext(Dispatchers.IO) {
+        stateMutex.withLock {
+            editBankPrefs { prefs ->
+                prefs.remove(Keys.CREDIT_BALANCE_SECONDS)
+                prefs.remove(Keys.TOTAL_WORK_SECONDS_TODAY)
+                prefs.remove(Keys.TOTAL_SCROLL_SECONDS_TODAY)
+                prefs.remove(Keys.TASKS_COMPLETED_TODAY)
+                prefs.remove(Keys.LAST_RESET_DATE)
+                prefs.remove(Keys.WORK_HISTORY_JSON)
+                prefs.remove(Keys.CREDITED_IDS_JSON)
+                prefs.remove(Keys.LAST_SYNC_TIMESTAMP)
+                prefs.remove(Keys.STATE_UPDATED_AT)
+            }
+        }
+        pendingScrollSeconds = 0L
+        _liveBalanceSeconds.value = 0L
+        _workHistory.value = emptyList()
+        cachedResetDate = null
     }
 
     suspend fun getStateUpdatedAt(): Long =

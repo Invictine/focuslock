@@ -2,24 +2,52 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod auth;
+mod blocker;
 mod tracking;
 mod windows_capture;
 
+use tauri::Manager;
 use tracking::TrackerRuntime;
 
 fn main() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(|app| {
-            use tauri::Manager;
             let data_dir = app.path().app_data_dir()?;
             let runtime = TrackerRuntime::load(data_dir.join("activity-v1.json"))
                 .map_err(Box::<dyn std::error::Error>::from)?;
+            // The blocker window exists for the whole app lifetime, hidden.
+            // If it cannot be created the tracker falls back to minimizing.
+            if let Err(error) = blocker::build_blocker_window(app.handle()) {
+                eprintln!("Could not create the blocker window: {error}");
+            }
+            app.manage(blocker::BlockerRuntime::new());
             runtime.start(app.handle().clone());
             app.manage(runtime);
             app.manage(auth::BrowserAuthRuntime::load(data_dir.join("auth-session.json")));
             Ok(())
+        })
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                if window.label() == blocker::BLOCKER_LABEL {
+                    // The blocker is hidden, never destroyed, so the tracker can
+                    // show it again on the next block.
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+            tauri::WindowEvent::Destroyed if window.label() == blocker::BLOCKER_LABEL => {
+                if let Some(state) = window.app_handle().try_state::<blocker::BlockerRuntime>() {
+                    state.note_window_destroyed();
+                }
+            }
+            tauri::WindowEvent::Destroyed if window.label() == "main" => {
+                // The hidden blocker keeps the event loop alive, so closing the
+                // main window still has to quit FocusLock.
+                window.app_handle().exit(0);
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             auth::get_browser_auth_state,
@@ -35,7 +63,19 @@ fn main() {
             tracking::start_tracking,
             tracking::stop_tracking,
             tracking::clear_tracking_data,
+            blocker::get_blocker_state,
+            blocker::blocker_action,
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .expect("error while running FocusLock desktop");
+    app.run(|app_handle, event| {
+        if matches!(
+            event,
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+        ) {
+            if let Some(state) = app_handle.try_state::<blocker::BlockerRuntime>() {
+                state.hide(app_handle);
+            }
+        }
+    });
 }
