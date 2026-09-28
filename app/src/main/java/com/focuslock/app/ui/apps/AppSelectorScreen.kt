@@ -496,17 +496,27 @@ internal fun AppPickerScreen(
     // dropped (revert) and a snackbar explains why.
     val onAppToggle: (AppRowItem, Boolean) -> Unit = remember(settings, scope, snackbarHostState) {
         { app, checked ->
-            appOverrides.value = appOverrides.value + (app.packageName to checked)
-            scope.launch {
-                val ok = try {
-                    settings.setAppBlockedFull(app.packageName, app.appName, app.category, checked)
-                    true
-                } catch (_: Exception) {
-                    false
+            if (app.isPermanent) {
+                // A permanent block is enforced regardless of the legacy isBlocked flag
+                // (the service ORs the dedicated store with the legacy mirror), and
+                // setAppBlockedFull preserves isPermanent. Refuse the flip so the switch
+                // can never show "off" while the app stays blocked.
+                scope.launch {
+                    snackbarHostState.showSnackbar("Permanent blocks cannot be removed in FocusLock.")
                 }
-                appOverrides.value = appOverrides.value - app.packageName
-                if (!ok) {
-                    snackbarHostState.showSnackbar("Couldn't update ${app.appName}. Change reverted.")
+            } else {
+                appOverrides.value = appOverrides.value + (app.packageName to checked)
+                scope.launch {
+                    val ok = try {
+                        settings.setAppBlockedFull(app.packageName, app.appName, app.category, checked)
+                        true
+                    } catch (_: Exception) {
+                        false
+                    }
+                    appOverrides.value = appOverrides.value - app.packageName
+                    if (!ok) {
+                        snackbarHostState.showSnackbar("Couldn't update ${app.appName}. Change reverted.")
+                    }
                 }
             }
         }
@@ -2560,7 +2570,10 @@ private fun InstalledAppRow(
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
     val compactActions = configuration.screenWidthDp < 400 || configuration.fontScale >= 1.2f
-    val switchEnabled = !(boundariesFrozen && app.isBlocked)
+    // Permanent rows are never flippable: the switch renders on/locked and every tap
+    // routes through the toggle handler, which refuses with the permanent-block
+    // snackbar. Frozen boundaries keep their toast refusal for other blocked rows.
+    val switchEnabled = !app.isPermanent && !(boundariesFrozen && app.isBlocked)
     val rowEnabled = true
     val interactionSource = remember { MutableInteractionSource() }
     Card(
@@ -2583,7 +2596,9 @@ private fun InstalledAppRow(
                 onClick = {
                     when {
                         selectionMode -> onSelectionToggle?.invoke()
-                        switchEnabled -> onToggle(app, !app.isBlocked)
+                        // Permanent rows go through the handler too, which refuses the
+                        // flip with the permanent-block snackbar instead of allowing it.
+                        app.isPermanent || switchEnabled -> onToggle(app, !app.isBlocked)
                         else -> Toast.makeText(context, lockedMessage, Toast.LENGTH_SHORT).show()
                     }
                 }
@@ -2657,11 +2672,13 @@ private fun InstalledAppRow(
                     }
                 )
             } else {
-                // Plain Box while unfrozen so switch-area taps fall through to the row
-                // handler exactly once (a disabled clickable would still swallow them).
-                // Only while frozen does the Box become clickable, to surface the refusal.
+                // Plain Box while the switch is flippable so switch-area taps fall
+                // through to the row handler exactly once (a disabled clickable would
+                // still swallow them). Frozen non-permanent rows get the clickable
+                // refusal overlay; permanent rows fall through so the row handler can
+                // surface the permanent-block snackbar instead of the frozen toast.
                 Box(
-                    modifier = if (switchEnabled) {
+                    modifier = if (switchEnabled || app.isPermanent) {
                         Modifier
                     } else {
                         Modifier.clickable {
@@ -2674,10 +2691,12 @@ private fun InstalledAppRow(
                     }
                 ) {
                     Switch(
-                        checked = app.isBlocked,
+                        // Permanent is enforced no matter what the legacy isBlocked flag
+                        // says (the service ORs both stores), so it always renders on.
+                        checked = app.isBlocked || app.isPermanent,
                         onCheckedChange = null,
                         enabled = switchEnabled,
-                        thumbContent = if (app.isBlocked) {
+                        thumbContent = if (app.isBlocked || app.isPermanent) {
                             {
                                 Icon(
                                     imageVector = Icons.Rounded.Check,
@@ -2693,7 +2712,7 @@ private fun InstalledAppRow(
                         modifier = Modifier.semantics {
                             contentDescription = buildString {
                                 append(app.appName)
-                                append(" block toggle")
+                                append(if (app.isPermanent) " permanently blocked" else " block toggle")
                                 if (!app.isInstalled) append(", app not installed")
                             }
                         }

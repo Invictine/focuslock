@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.Home
@@ -68,6 +69,7 @@ import com.focuslock.app.ui.components.SectionHeader
 import com.focuslock.app.ui.components.formatUsageSeconds
 import com.focuslock.app.ui.dashboard.DashboardScreen
 import com.focuslock.app.ui.debug.DebugDataScreen
+import com.focuslock.app.ui.permalock.PermalockScreen
 import com.focuslock.app.ui.permissions.PermissionHelper
 import com.focuslock.app.ui.permissions.PermissionReturnWatcher
 import com.focuslock.app.ui.settings.SettingsScreen
@@ -86,6 +88,7 @@ enum class NavigationItem(
     DASHBOARD("Focus", Icons.Rounded.Home, Icons.Rounded.Home),
     APPS("Boundaries", Icons.Rounded.GridView, Icons.Rounded.GridView),
     STRICT("Strict", Icons.Rounded.Lock, Icons.Rounded.Lock),
+    PERMALOCK("Permalock", Icons.Rounded.Block, Icons.Rounded.Block),
     SETTINGS("Settings", Icons.Rounded.Settings, Icons.Rounded.Settings),
     ACCOUNT("Account", Icons.Rounded.Person, Icons.Rounded.Person)
 }
@@ -274,12 +277,13 @@ class MainActivity : ComponentActivity() {
                             containerColor = MaterialTheme.colorScheme.surfaceContainer,
                             tonalElevation = 0.dp
                         ) {
-                            // Bottom nav keeps Focus + Boundaries + Strict; Settings/Account
-                            // are reached via the dashboard header (gear/avatar).
+                            // Bottom nav keeps Focus + Boundaries + Strict + Permalock;
+                            // Settings/Account are reached via the dashboard header (gear/avatar).
                             NavigationItem.entries.filter {
                                 it == NavigationItem.DASHBOARD ||
                                     it == NavigationItem.APPS ||
-                                    it == NavigationItem.STRICT
+                                    it == NavigationItem.STRICT ||
+                                    it == NavigationItem.PERMALOCK
                             }.forEach { item ->
                                 val isSelected = currentTab == item
                                 NavigationBarItem(
@@ -338,6 +342,7 @@ class MainActivity : ComponentActivity() {
                                 onPendingMergeConsumed = { pendingMergeTarget = null },
                             )
                             NavigationItem.STRICT -> StrictModeScreen()
+                            NavigationItem.PERMALOCK -> PermalockScreen()
                             NavigationItem.SETTINGS -> SettingsScreen(
                                 // highlightKind omitted (defaults null): the screen derives
                                 // the next missing permission from its own checks.
