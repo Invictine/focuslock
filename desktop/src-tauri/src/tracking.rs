@@ -22,6 +22,42 @@ use uuid::Uuid;
 
 const DEFAULT_REASON: &str = "blocked";
 
+/// Reason carried by a device-local permanent block. Permanence lives in
+/// `TrackingStore::permanent_targets` (never in Convex), so this reason also
+/// acts as the precedence marker: it always wins over `frog`/`limit`/`blocked`.
+/// Shared with `blocker` (overlay actions, close handling).
+pub(crate) const PERMANENT_REASON: &str = "permanent";
+
+/// Executables that can never be permanently blocked. Blocking the Windows
+/// shell makes the machine unrecoverable, so this is the desktop analog of
+/// Android's `PermanentBlocksRepository.isProtectedPackage` (own package,
+/// launcher, system UI, ...). `own_app_id()` is protected separately.
+const PROTECTED_APP_IDS: &[&str] = &[
+    "explorer.exe",
+    "dwm.exe",
+    "winlogon.exe",
+    "csrss.exe",
+    "smss.exe",
+    "wininit.exe",
+    "services.exe",
+    "lsass.exe",
+    "taskhostw.exe",
+    "sihost.exe",
+    "ctfmon.exe",
+    "startmenuexperiencehost.exe",
+    "searchhost.exe",
+    "shellexperiencehost.exe",
+    // OS/UWP hosts: blocking one of these takes whole classes of windows with
+    // it and cannot be undone from the app.
+    "applicationframehost.exe",
+    "runtimebroker.exe",
+    "textinputhost.exe",
+    "lockapp.exe",
+    "logonui.exe",
+    "shellhost.exe",
+    "searchapp.exe",
+];
+
 /// Consecutive `capture_foreground` failures after which the blocker is hidden:
 /// with no idea what the foreground is, a stuck always-on-top window must not
 /// trap the user. A single transient error keeps enforcement up.
@@ -113,6 +149,79 @@ fn clean_reasons(reasons: HashMap<String, String>) -> HashMap<String, String> {
         .collect()
 }
 
+/// Union device-local permanent targets into an enforcement set and force their
+/// reason. Called from the add command, `set_blocked_targets` and the load path,
+/// so permanence holds in every direction: a caller payload (UI flush, Convex
+/// refresh) can never remove a permanent target and can never downgrade its
+/// reason to `frog`/`limit`/`blocked`.
+fn merge_permanent_targets(
+    targets: &mut BlockedTargets,
+    reasons: &mut HashMap<String, String>,
+    permanent: &[String],
+) {
+    for app_id in permanent {
+        if !targets.app_ids.iter().any(|existing| existing == app_id) {
+            targets.app_ids.push(app_id.clone());
+        }
+        reasons.insert(app_id.clone(), PERMANENT_REASON.to_string());
+    }
+    targets.app_ids = clean_values(std::mem::take(&mut targets.app_ids));
+    targets.app_ids.retain(|id| id != own_app_id());
+}
+
+/// One rejected entry from `add_permanent_targets`, reported back to the UI so
+/// it can explain why an id was not accepted.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PermanentRejection {
+    pub id: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PermanentAddResult {
+    pub added: Vec<String>,
+    pub rejected: Vec<PermanentRejection>,
+}
+
+/// Normalizes a caller-supplied batch and decides which ids may become
+/// permanent: protected ids are rejected, ids already permanent (or repeated
+/// within the batch) are reported as duplicates, and the rest are returned
+/// sorted/deduped. Empty ids are dropped without a report — the UI never sends
+/// them, and there is no meaningful name to surface.
+fn plan_permanent_additions(
+    existing: &[String],
+    app_ids: Vec<String>,
+) -> (Vec<String>, Vec<PermanentRejection>) {
+    let mut added: Vec<String> = Vec::new();
+    let mut rejected: Vec<PermanentRejection> = Vec::new();
+    for raw in app_ids {
+        let key = normalize_key(&raw);
+        if key.is_empty() {
+            continue;
+        }
+        if is_protected_app_id(&key) {
+            rejected.push(PermanentRejection {
+                id: key,
+                reason: "protected".into(),
+            });
+            continue;
+        }
+        if existing.iter().any(|id| id == &key) || added.iter().any(|id| id == &key) {
+            rejected.push(PermanentRejection {
+                id: key,
+                reason: "duplicate".into(),
+            });
+            continue;
+        }
+        added.push(key);
+    }
+    added.sort();
+    added.dedup();
+    (added, rejected)
+}
+
 /// Lowercased executable name of this process; used to keep FocusLock's own
 /// windows out of matching.
 fn own_app_id() -> &'static str {
@@ -126,6 +235,14 @@ fn own_app_id() -> &'static str {
                 .unwrap_or_else(|| "focuslock-desktop.exe".into())
         })
         .as_str()
+}
+
+/// Shell-critical executables (and FocusLock itself) can never become a
+/// permanent block. Mirrors the `FROG_NEVER_BLOCK_APP_IDS` list the Windows UI
+/// already treats as untouchable.
+fn is_protected_app_id(app_id: &str) -> bool {
+    let key = normalize_key(app_id);
+    key == own_app_id() || key.contains("focuslock") || PROTECTED_APP_IDS.contains(&key.as_str())
 }
 
 /// A blocked foreground target with the reason its rule carries.
@@ -259,6 +376,11 @@ struct TrackingStore {
     blocked_targets: BlockedTargets,
     #[serde(default)]
     blocked_reasons: HashMap<String, String>,
+    /// Device-local permanent blocks. Kept in a separate list from
+    /// `blocked_targets` so a UI/Convex-driven target flush can never clear
+    /// them; `set_blocked_targets` unions this list back in on every write.
+    #[serde(default)]
+    permanent_targets: Vec<String>,
     usage: BTreeMap<String, UsageEntry>,
     /// Set by `record` when usage data changed; the worker persists only when
     /// this is set instead of rewriting the file on a fixed timer.
@@ -289,6 +411,7 @@ impl TrackingStore {
             config: TrackerConfig::default(),
             blocked_targets: BlockedTargets::default(),
             blocked_reasons: HashMap::new(),
+            permanent_targets: Vec::new(),
             usage: BTreeMap::new(),
             dirty: false,
             usage_generation: 0,
@@ -593,6 +716,21 @@ impl TrackerRuntime {
             last_error: self.last_error.lock().ok().and_then(|v| v.clone()),
         }
     }
+    /// Pausing the tracker is refused while device-local permanent blocks
+    /// exist. With tracking stopped nothing would show the blocker, so pausing
+    /// would release every permanent block until the user manually restarted
+    /// enforcement.
+    fn ensure_pause_allowed(&self) -> Result<(), String> {
+        let store = self
+            .store
+            .lock()
+            .map_err(|_| "Tracking store lock was poisoned".to_string())?;
+        if store.permanent_targets.is_empty() {
+            Ok(())
+        } else {
+            Err("Permanent blocks are active. Tracking cannot be paused.".to_string())
+        }
+    }
     fn snapshot(&self) -> Result<TrackingSnapshot, String> {
         let store = self
             .store
@@ -668,10 +806,14 @@ pub fn stop_tracking(
     app: AppHandle,
     state: State<'_, TrackerRuntime>,
     blocker: State<'_, BlockerRuntime>,
-) -> TrackerStatus {
+) -> Result<TrackerStatus, String> {
+    // Pausing enforcement must not release a permanent block: while tracking is
+    // stopped nothing would re-show the blocker, and the in-app list can never
+    // be removed.
+    state.ensure_pause_allowed()?;
     state.stop();
     blocker.hide(&app);
-    state.status()
+    Ok(state.status())
 }
 #[tauri::command]
 pub fn set_tracker_config(
@@ -688,6 +830,61 @@ pub fn set_tracker_config(
     Ok(normalized)
 }
 #[tauri::command]
+pub fn get_permanent_targets(state: State<'_, TrackerRuntime>) -> Result<Vec<String>, String> {
+    Ok(state
+        .store
+        .lock()
+        .map_err(|_| "Tracking store lock was poisoned".to_string())?
+        .permanent_targets
+        .clone())
+}
+
+/// Add device-local permanent blocks. There is deliberately no companion
+/// remove/clear command: permanence is irreversible from inside FocusLock,
+/// mirroring Android's `canRemoveInApp() = false`.
+#[tauri::command]
+pub fn add_permanent_targets(
+    app_ids: Vec<String>,
+    app: AppHandle,
+    state: State<'_, TrackerRuntime>,
+    blocker: State<'_, BlockerRuntime>,
+) -> Result<PermanentAddResult, String> {
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|_| "Tracking store lock was poisoned".to_string())?;
+    let (added, rejected) = plan_permanent_additions(&store.permanent_targets, app_ids);
+    if !added.is_empty() {
+        let mut permanent = store.permanent_targets.clone();
+        permanent.extend(added.iter().cloned());
+        store.permanent_targets = clean_values(permanent);
+        // Merge into the enforcement set immediately: the permanent block must
+        // hold from this moment, before the next UI/Convex flush arrives.
+        // (Clone/assign because `store` is a MutexGuard: the borrow checker
+        // cannot split disjoint fields through DerefMut.)
+        let permanent = store.permanent_targets.clone();
+        let mut blocked_targets = store.blocked_targets.clone();
+        let mut blocked_reasons = store.blocked_reasons.clone();
+        merge_permanent_targets(&mut blocked_targets, &mut blocked_reasons, &permanent);
+        store.blocked_targets = blocked_targets;
+        store.blocked_reasons = blocked_reasons;
+        let matcher = BlockedMatcher::new(&store.blocked_targets, &store.blocked_reasons);
+        persist_store(&state.store_path, &store)?;
+        let empty = store.blocked_targets.app_ids.is_empty() && store.blocked_targets.domains.is_empty();
+        drop(store);
+        if let Ok(mut value) = state.matcher.lock() {
+            *value = Arc::new(matcher);
+        }
+        // Only take down a stranded blocker when nothing is left to enforce.
+        // Adding a permanent target never hides an active overlay.
+        if empty {
+            blocker.hide(&app);
+        }
+    }
+    Ok(PermanentAddResult { added, rejected })
+}
+
+#[tauri::command]
 pub fn set_blocked_targets(
     targets: BlockedTargets,
     reasons: Option<HashMap<String, String>>,
@@ -695,18 +892,22 @@ pub fn set_blocked_targets(
     state: State<'_, TrackerRuntime>,
     blocker: State<'_, BlockerRuntime>,
 ) -> Result<BlockedTargets, String> {
-    let normalized = targets.normalized();
-    let normalized_reasons = clean_reasons(reasons.unwrap_or_default());
+    let mut normalized = targets.normalized();
+    let mut normalized_reasons = clean_reasons(reasons.unwrap_or_default());
+    let mut store = state
+        .store
+        .lock()
+        .map_err(|_| "Tracking store lock was poisoned".to_string())?;
+    // Permanence is device-local and authoritative. Union it in AFTER the
+    // caller's payload so no UI/Convex flush can drop a permanent id, and force
+    // the reason so frog/limit/blocked can never downgrade it.
+    let permanent = store.permanent_targets.clone();
+    merge_permanent_targets(&mut normalized, &mut normalized_reasons, &permanent);
     let matcher = BlockedMatcher::new(&normalized, &normalized_reasons);
-    {
-        let mut store = state
-            .store
-            .lock()
-            .map_err(|_| "Tracking store lock was poisoned".to_string())?;
-        store.blocked_targets = normalized.clone();
-        store.blocked_reasons = normalized_reasons;
-        persist_store(&state.store_path, &store)?;
-    }
+    store.blocked_targets = normalized.clone();
+    store.blocked_reasons = normalized_reasons;
+    persist_store(&state.store_path, &store)?;
+    drop(store);
     if let Ok(mut value) = state.matcher.lock() {
         *value = Arc::new(matcher);
     }
@@ -751,6 +952,15 @@ fn load_store(path: &Path) -> Result<TrackingStore, String> {
     store.config = store.config.normalized();
     store.blocked_targets = store.blocked_targets.normalized();
     store.blocked_reasons = clean_reasons(store.blocked_reasons);
+    // Permanence is normalized first, then defensively merged into the
+    // enforcement set here — before any command runs — so a restart enforces
+    // permanent blocks from the very first tracker sample. The full protected
+    // set is stripped (not just FocusLock itself): a hand-edited store file
+    // must not be able to permanently block the Windows shell.
+    store.permanent_targets = clean_values(store.permanent_targets);
+    store.permanent_targets.retain(|id| !is_protected_app_id(id));
+    let permanent = store.permanent_targets.clone();
+    merge_permanent_targets(&mut store.blocked_targets, &mut store.blocked_reasons, &permanent);
     // Enforce the retention window once at startup; stale days beyond it are
     // rewritten out of the file on the next dirty persist.
     store.prune_old_days();
@@ -887,5 +1097,133 @@ mod tests {
         ]));
         assert_eq!(cleaned.get("youtube.com").map(String::as_str), Some("frog"));
         assert_eq!(cleaned.len(), 1);
+    }
+    #[test]
+    fn permanent_merge_cannot_be_dropped_by_a_caller_payload() {
+        // Mirrors the merge inside `set_blocked_targets`: a UI/Convex payload
+        // omits the permanent id, the store's permanent list is unioned back in
+        // with the "permanent" reason and stays enforced.
+        let permanent = vec!["steam.exe".to_string()];
+        let mut targets = BlockedTargets {
+            app_ids: vec!["discord.exe".into()],
+            domains: vec![],
+        };
+        let mut reasons = HashMap::from([("steam.exe".to_string(), "frog".to_string())]);
+        merge_permanent_targets(&mut targets, &mut reasons, &permanent);
+        assert!(targets.app_ids.contains(&"steam.exe".to_string()));
+        assert_eq!(
+            reasons.get("steam.exe").map(String::as_str),
+            Some(PERMANENT_REASON)
+        );
+        let matcher = BlockedMatcher::new(&targets, &reasons);
+        let matched = matcher
+            .match_target(&captured_window("steam.exe", None))
+            .expect("permanent app stays enforced");
+        assert_eq!(matched.reason, PERMANENT_REASON);
+    }
+    #[test]
+    fn permanent_reason_wins_over_frog_limit_and_blocked() {
+        let permanent = vec!["steam.exe".to_string(), "discord.exe".to_string()];
+        let mut targets = BlockedTargets {
+            app_ids: vec![],
+            domains: vec![],
+        };
+        let mut reasons = HashMap::from([
+            ("steam.exe".to_string(), "frog".to_string()),
+            ("discord.exe".to_string(), "limit".to_string()),
+        ]);
+        merge_permanent_targets(&mut targets, &mut reasons, &permanent);
+        assert_eq!(
+            reasons.get("steam.exe").map(String::as_str),
+            Some(PERMANENT_REASON)
+        );
+        assert_eq!(
+            reasons.get("discord.exe").map(String::as_str),
+            Some(PERMANENT_REASON)
+        );
+    }
+    #[test]
+    fn protected_and_duplicate_additions_are_rejected() {
+        let existing = vec!["steam.exe".to_string()];
+        let (added, rejected) = plan_permanent_additions(
+            &existing,
+            vec![
+                " Steam.exe ".into(),
+                "explorer.exe".into(),
+                own_app_id().to_string(),
+                "discord.exe".into(),
+                "discord.exe".into(),
+            ],
+        );
+        assert_eq!(added, vec!["discord.exe".to_string()]);
+        assert_eq!(rejected.len(), 4);
+        let reasons: HashMap<_, _> = rejected
+            .iter()
+            .map(|entry| (entry.id.as_str(), entry.reason.as_str()))
+            .collect();
+        assert_eq!(reasons.get("steam.exe"), Some(&"duplicate"));
+        assert_eq!(reasons.get("discord.exe"), Some(&"duplicate"));
+        assert_eq!(reasons.get("explorer.exe"), Some(&"protected"));
+        assert_eq!(reasons.get(own_app_id()), Some(&"protected"));
+    }
+    #[test]
+    fn permanent_targets_survive_reload_and_re_merge_into_enforcement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.json");
+        let mut store = load_store(&path).unwrap();
+        store.permanent_targets = vec![" Steam.exe ".into(), own_app_id().to_string()];
+        persist_store(&path, &store).unwrap();
+        let reloaded = load_store(&path).unwrap();
+        assert_eq!(reloaded.permanent_targets, vec!["steam.exe".to_string()]);
+        assert!(reloaded
+            .blocked_targets
+            .app_ids
+            .contains(&"steam.exe".to_string()));
+        assert_eq!(
+            reloaded.blocked_reasons.get("steam.exe").map(String::as_str),
+            Some(PERMANENT_REASON)
+        );
+    }
+    #[test]
+    fn protected_permanents_are_stripped_on_load() {
+        // A hand-edited store file must not be able to permanently block the
+        // Windows shell: load normalization strips the whole protected set.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.json");
+        let mut store = load_store(&path).unwrap();
+        store.permanent_targets = vec![
+            " Steam.exe ".into(),
+            "explorer.exe".into(),
+            own_app_id().to_string(),
+            "discord.exe".into(),
+        ];
+        persist_store(&path, &store).unwrap();
+        let reloaded = load_store(&path).unwrap();
+        assert_eq!(
+            reloaded.permanent_targets,
+            vec!["discord.exe".to_string(), "steam.exe".to_string()]
+        );
+        assert!(!reloaded
+            .blocked_targets
+            .app_ids
+            .contains(&"explorer.exe".to_string()));
+    }
+    #[test]
+    fn pause_is_refused_while_permanent_blocks_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = TrackerRuntime::load(dir.path().join("usage.json")).unwrap();
+        assert!(runtime.ensure_pause_allowed().is_ok());
+        runtime
+            .store
+            .lock()
+            .unwrap()
+            .permanent_targets
+            .push("steam.exe".into());
+        let error = runtime
+            .ensure_pause_allowed()
+            .expect_err("pausing must be refused while a permanent block exists");
+        assert!(error.contains("Permanent blocks are active"));
+        runtime.store.lock().unwrap().permanent_targets.clear();
+        assert!(runtime.ensure_pause_allowed().is_ok());
     }
 }

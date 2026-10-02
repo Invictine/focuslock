@@ -96,7 +96,7 @@ fun permissionCopy(kind: PermissionKind): PermissionCopy = when (kind) {
     )
     PermissionKind.NOTIFICATION_LISTENER -> PermissionCopy(
         title = "Notification access",
-        why = "Catches TickTick Pomodoros and completed tasks automatically as they finish.",
+        why = "Optional. TickTick notifications do not verify logged focus time and do not earn credits.",
         steps = listOf(
             "1. Tap Open settings to go to Notification access",
             "2. Find FocusLock and turn it ON",

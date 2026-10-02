@@ -9,7 +9,6 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -20,6 +19,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -39,6 +39,9 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -52,6 +55,9 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.compose.ui.text.font.FontWeight
@@ -100,6 +106,7 @@ fun StrictModeScreen() {
 
     var showEnableDialog by remember { mutableStateOf(false) }
     var showDisableDialog by remember { mutableStateOf(false) }
+    var activationMode by rememberSaveable { mutableStateOf("manual") }
     var durationHours by rememberSaveable { mutableStateOf(24) }
     var enableUntilTime by rememberSaveable { mutableStateOf(false) }
     var untilHour by rememberSaveable { mutableStateOf(22) }
@@ -124,10 +131,8 @@ fun StrictModeScreen() {
         StaggeredFadeSlide(visible = entered, index = 0, screenKey = "strict") {
             ScreenHeader(title = "Strict Mode")
         }
-        StaggeredFadeSlide(visible = entered, index = 1, modifier = Modifier.fillMaxWidth(), screenKey = "strict") {
-            // Instant hero switch (direct if/else): the previous AnimatedContent kept
-            // both hero cards composed during the fade and read as views opening/closing.
-            if (strictMode) {
+        if (strictMode) {
+            StaggeredFadeSlide(visible = entered, index = 1, modifier = Modifier.fillMaxWidth(), screenKey = "strict") {
                 StrictActiveCard(
                     settings = settings,
                     endsAt = endsAt,
@@ -137,41 +142,59 @@ fun StrictModeScreen() {
                     onNukeAfterFiveChange = { enabled -> scope.launch { settings.setLockdownNukeAfterFive(enabled) } },
                     onDisableClick = {
                         scope.launch {
-                            val canDisable = try {
-                                settings.canDisableLockdownMode()
-                            } catch (_: Exception) {
-                                true
-                            }
+                            val canDisable = try { settings.canDisableLockdownMode() } catch (_: Exception) { true }
                             if (!canDisable) {
-                                val remaining = try {
-                                    settings.lockdownCooldownRemainingMs()
-                                } catch (_: Exception) {
-                                    0L
-                                }
-                                Toast.makeText(
-                                    context,
-                                    "Strict Mode locked: ${formatLockdownRemaining(remaining)} remaining",
-                                    Toast.LENGTH_LONG
-                                ).show()
-                            } else {
-                                showDisableDialog = true
-                            }
+                                val remaining = try { settings.lockdownCooldownRemainingMs() } catch (_: Exception) { 0L }
+                                Toast.makeText(context, "Strict Mode locked: ${formatLockdownRemaining(remaining)} remaining", Toast.LENGTH_LONG).show()
+                            } else showDisableDialog = true
                         }
                     }
                 )
-            } else {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    StrictOffCard(onEnableClick = { showEnableDialog = true })
-                    if (attempts > 0) {
-                        Text("Last commitment: $attempts blocked ${if (attempts == 1) "attempt" else "attempts"}.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
             }
         }
 
         StaggeredFadeSlide(visible = entered, index = 2, modifier = Modifier.fillMaxWidth(), screenKey = "strict") {
+            StrictActivationSwitcher(selected = activationMode, onSelect = { activationMode = it })
+        }
+
+        StaggeredFadeSlide(visible = entered, index = 3, modifier = Modifier.fillMaxWidth(), screenKey = "strict") {
+            when (activationMode) {
+                "schedule" -> StrictAutomationCard(
+                    mode = StrictAutomationMode.SCHEDULE,
+                    places = places,
+                    windows = windows,
+                    onSavePlace = { scope.launch { automation.upsertPlace(it) } },
+                    onDeletePlace = { scope.launch { automation.deletePlace(it) } },
+                    onSaveWindow = { scope.launch { automation.upsertRecurringWindow(it) } },
+                    onDeleteWindow = { scope.launch { automation.deleteRecurringWindow(it) } }
+                )
+                "location" -> StrictAutomationCard(
+                    mode = StrictAutomationMode.LOCATION,
+                    places = places,
+                    windows = windows,
+                    onSavePlace = { scope.launch { automation.upsertPlace(it) } },
+                    onDeletePlace = { scope.launch { automation.deletePlace(it) } },
+                    onSaveWindow = { scope.launch { automation.upsertRecurringWindow(it) } },
+                    onDeleteWindow = { scope.launch { automation.deleteRecurringWindow(it) } }
+                )
+                else -> StrictManualActivation(
+                    strictMode = strictMode,
+                    attempts = attempts,
+                    preset = preset,
+                    onPresetChange = { selected ->
+                        durationHours = when (selected) { "deep_work" -> 2; "exam" -> 4; "sleep" -> 8; else -> 24 }
+                        enableUntilTime = false
+                        scope.launch {
+                            settings.setLockdownPreset(selected)
+                            if (selected == "exam") settings.setLockdownNukeAfterFive(true)
+                        }
+                    },
+                    onEnableClick = { showEnableDialog = true }
+                )
+            }
+        }
+
+        StaggeredFadeSlide(visible = entered, index = 4, modifier = Modifier.fillMaxWidth(), screenKey = "strict") {
             StrictProtectionCard(
                 appCount = blockedApps.count { it.isBlocked },
                 websiteCount = blockedWebsites.count { it.isBlocked },
@@ -183,29 +206,9 @@ fun StrictModeScreen() {
             )
         }
 
-        StaggeredFadeSlide(visible = entered, index = 3, modifier = Modifier.fillMaxWidth(), screenKey = "strict") {
+        StaggeredFadeSlide(visible = entered, index = 5, modifier = Modifier.fillMaxWidth(), screenKey = "strict") {
             StrictRulesCard()
         }
-
-        StaggeredFadeSlide(visible = entered, index = 4, modifier = Modifier.fillMaxWidth(), screenKey = "strict") {
-            StrictPreferencesCard(
-                preset = preset,
-                onPresetChange = { selected ->
-                    durationHours = when (selected) { "deep_work" -> 2; "exam" -> 4; "sleep" -> 8; else -> 24 }
-                    enableUntilTime = false
-                    scope.launch {
-                        settings.setLockdownPreset(selected)
-                        if (selected == "exam") settings.setLockdownNukeAfterFive(true)
-                    }
-                }
-            )
-        }
-            StrictAutomationCard(places, windows,
-            onSavePlace = { scope.launch { automation.upsertPlace(it) } },
-            onDeletePlace = { scope.launch { automation.deletePlace(it) } },
-            onSaveWindow = { scope.launch { automation.upsertRecurringWindow(it) } },
-            onDeleteWindow = { scope.launch { automation.deleteRecurringWindow(it) } }
-        )
 
         ApprovalUnlockCard(settings)
 
@@ -346,25 +349,79 @@ private fun StrictEnableOptions(
     }
 }
 
+private enum class StrictAutomationMode { SCHEDULE, LOCATION }
+
+@Composable
+private fun StrictActivationSwitcher(selected: String, onSelect: (String) -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        shape = MaterialTheme.shapes.large,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("Activation", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text("Choose how you want to set up Strict Mode.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            val options = listOf("manual" to "Manual", "schedule" to "Schedule", "location" to "Location")
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                options.forEachIndexed { index, (key, label) ->
+                    SegmentedButton(
+                        selected = selected == key,
+                        onClick = { onSelect(key) },
+                        shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
+                        label = { Text(label, maxLines = 1) }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StrictManualActivation(
+    strictMode: Boolean,
+    attempts: Int,
+    preset: String,
+    onPresetChange: (String) -> Unit,
+    onEnableClick: () -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (!strictMode) {
+            StrictOffCard(onEnableClick = onEnableClick)
+            if (attempts > 0) {
+                Text("Last commitment: $attempts blocked ${if (attempts == 1) "attempt" else "attempts"}.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        StrictPreferencesCard(preset = preset, onPresetChange = onPresetChange)
+    }
+}
+
 @Composable
 private fun StrictPreferencesCard(preset: String, onPresetChange: (String) -> Unit) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer), shape = MaterialTheme.shapes.large, modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Session preset", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text("Choose the kind of commitment you are making.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            listOf("deep_work" to "Deep work", "exam" to "Exam", "sleep" to "Sleep").forEach { (key, label) ->
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                    Text(label, modifier = Modifier.weight(1f))
-                    Switch(checked = preset == key, onCheckedChange = { if (it) onPresetChange(key) })
+            Text("Commitment style", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text("Choose the kind of focus session. This preset is saved with your commitment.",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            val options = listOf("deep_work" to "Deep work", "exam" to "Exam", "sleep" to "Sleep")
+            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                options.forEachIndexed { index, (key, label) ->
+                    SegmentedButton(
+                        selected = preset == key,
+                        onClick = { onPresetChange(key) },
+                        shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
+                        label = { Text(label, maxLines = 1) }
+                    )
                 }
             }
-            Text("This preset is saved with your commitment.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
 
 @Composable
 private fun StrictAutomationCard(
+    mode: StrictAutomationMode,
     places: List<StrictPlaceRule>,
     windows: List<StrictRecurringWindow>,
     onSavePlace: (StrictPlaceRule) -> Unit,
@@ -382,59 +439,86 @@ private fun StrictAutomationCard(
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
         shape = MaterialTheme.shapes.large, modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Automatic activation", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text("Strict Mode also blocks during these local times or when this phone detects a saved place.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("At a place", fontWeight = FontWeight.SemiBold)
-            Text("Search an address or use a fresh device location, then set a radius.", style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Button(onClick = { showPlacePicker = true }, modifier = Modifier.fillMaxWidth()) { Text("Choose place") }
-            places.forEach { place ->
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text(place.label, Modifier.weight(1f))
-                    Switch(place.enabled, onCheckedChange = { onSavePlace(place.copy(enabled = it)) })
-                    TextButton(onClick = { onDeletePlace(place.id) }) { Text("Remove") }
+            if (mode == StrictAutomationMode.LOCATION) {
+                Text("Activate at a place", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text("Strict Mode activates when Android observes an app launch while you're near a saved place.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Location access and a recent position are required.", style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Button(onClick = { showPlacePicker = true }, modifier = Modifier.fillMaxWidth()) { Text("Choose place") }
+                places.forEach { place ->
+                    Row(
+                        Modifier.fillMaxWidth().toggleable(value = place.enabled, role = Role.Switch) { onSavePlace(place.copy(enabled = it)) },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
+                            Text(place.label, fontWeight = FontWeight.Medium)
+                            Text("Saved place", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(
+                            checked = place.enabled,
+                            onCheckedChange = null,
+                            modifier = Modifier.semantics { contentDescription = "Activate Strict Mode at ${place.label}" }
+                        )
+                        TextButton(onClick = { onDeletePlace(place.id) }) { Text("Remove") }
+                    }
                 }
-            }
-            Text("Every week", fontWeight = FontWeight.SemiBold)
-            OutlinedTextField(value = windowName, onValueChange = { windowName = it },
-                label = { Text("Schedule name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                listOf("M", "T", "W", "T", "F", "S", "S").forEachIndexed { index, label ->
-                    val day = index + 1
-                    Text(label, modifier = Modifier.weight(1f).clickable {
-                        days = if (day in days) days - day else days + day
-                    }.padding(vertical = 8.dp),
-                        color = if (day in days) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.onSurfaceVariant)
+                if (places.isEmpty()) Text("No places yet", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                Text("Activate on a schedule", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                Text("Strict Mode activates during enabled weekly windows.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                OutlinedTextField(value = windowName, onValueChange = { windowName = it },
+                    label = { Text("Schedule name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                listOf(
+                    listOf("Mon" to 1, "Tue" to 2, "Wed" to 3, "Thu" to 4),
+                    listOf("Fri" to 5, "Sat" to 6, "Sun" to 7)
+                ).forEach { rowDays ->
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        rowDays.forEach { (label, day) ->
+                            FilterChip(
+                                selected = day in days,
+                                onClick = { days = if (day in days) days - day else days + day },
+                                label = { Text(label) },
+                                modifier = Modifier.weight(1f).height(48.dp)
+                            )
+                        }
+                    }
                 }
-            }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    TextButton(onClick = {
+                        TimePickerDialog(context, { _, h, m -> startMinute = h * 60 + m },
+                            startMinute / 60, startMinute % 60, true).show()
+                    }) { Text("From %02d:%02d".format(startMinute / 60, startMinute % 60)) }
+                    TextButton(onClick = {
+                        TimePickerDialog(context, { _, h, m -> endMinute = h * 60 + m },
+                            endMinute / 60, endMinute % 60, true).show()
+                    }) { Text("To %02d:%02d".format(endMinute / 60, endMinute % 60)) }
+                }
                 TextButton(onClick = {
-                    TimePickerDialog(context, { _, h, m -> startMinute = h * 60 + m },
-                        startMinute / 60, startMinute % 60, true).show()
-                }) { Text("From %02d:%02d".format(startMinute / 60, startMinute % 60)) }
-                TextButton(onClick = {
-                    TimePickerDialog(context, { _, h, m -> endMinute = h * 60 + m },
-                        endMinute / 60, endMinute % 60, true).show()
-                }) { Text("To %02d:%02d".format(endMinute / 60, endMinute % 60)) }
-            }
-            TextButton(onClick = {
-                if (days.isNotEmpty() && startMinute != endMinute) {
-                    onSaveWindow(StrictRecurringWindow(UUID.randomUUID().toString(),
-                        windowName.ifBlank { "Weekly focus" }, days, startMinute, endMinute))
-                    windowName = ""
+                    if (days.isNotEmpty() && startMinute != endMinute) {
+                        onSaveWindow(StrictRecurringWindow(UUID.randomUUID().toString(),
+                            windowName.ifBlank { "Weekly focus" }, days, startMinute, endMinute))
+                        windowName = ""
+                    }
+                }, enabled = days.isNotEmpty() && startMinute != endMinute) { Text("Add weekly window") }
+                windows.forEach { window ->
+                    Row(
+                        Modifier.fillMaxWidth().toggleable(value = window.enabled, role = Role.Switch) { onSaveWindow(window.copy(enabled = it)) },
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
+                            Text(window.label, fontWeight = FontWeight.Medium)
+                            Text("${window.daysOfWeek.size} days · %02d:%02d–%02d:%02d".format(window.startMinuteOfDay / 60, window.startMinuteOfDay % 60, window.endMinuteOfDay / 60, window.endMinuteOfDay % 60),
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Switch(checked = window.enabled, onCheckedChange = null,
+                            modifier = Modifier.semantics { contentDescription = "Enable schedule ${window.label}" })
+                        TextButton(onClick = { onDeleteWindow(window.id) }) { Text("Remove") }
+                    }
                 }
-            }) { Text("Add weekly window") }
-            windows.forEach { window ->
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text(window.label, Modifier.weight(1f))
-                    Switch(window.enabled, onCheckedChange = { onSaveWindow(window.copy(enabled = it)) })
-                    TextButton(onClick = { onDeleteWindow(window.id) }) { Text("Remove") }
-                }
+                if (windows.isEmpty()) Text("No weekly windows yet", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            Text("Place rules are checked when Android observes an app launch. Location access and a recent position are required.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
     if (showPlacePicker) {
@@ -491,7 +575,9 @@ private fun StrictProtectionCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .toggleable(value = boundariesLock, role = Role.Switch, onValueChange = onBoundariesLockChange),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
@@ -512,7 +598,8 @@ private fun StrictProtectionCard(
                 }
                 Switch(
                     checked = boundariesLock,
-                    onCheckedChange = onBoundariesLockChange
+                    onCheckedChange = null,
+                    modifier = Modifier.semantics { contentDescription = "Boundaries Lock" }
                 )
             }
         }
@@ -556,7 +643,7 @@ private fun StrictOffCard(onEnableClick: () -> Unit) {
                 }
             }
             Text(
-                text = "Choose 1–24 hours or a clock time. Unlocks remain unavailable until your commitment ends.",
+                text = "Choose 1 hour to 30 days or a date and time. Unlocks remain unavailable until your commitment ends.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

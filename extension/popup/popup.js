@@ -5,9 +5,9 @@ const syncHost = process.env.CLERK_SYNC_HOST;
 const M = self.FocusLockMatcher;
 const S = self.FocusLockStore;
 const app = document.getElementById('app');
-const extensionRoot = chrome.runtime.getURL('.');
-const popupUrl = chrome.runtime.getURL('popup/popup.html');
 let clerk = null;
+let renderedAccountId = null;
+let accountError = '';
 
 let activeTab = null;
 let activeUrl = '';
@@ -16,6 +16,7 @@ let localState = null;
 let cloud = null;
 let busy = false;
 let message = '';
+let messageTimer = null;
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>'"]/g, (char) => ({
@@ -43,7 +44,7 @@ function relativeTime(timestamp) {
 
 function deviceStatus(device, fallback) {
   if (!device) return { state: 'off', title: fallback, detail: 'Not connected to this account' };
-  const fresh = Date.now() - device.lastSeen < 10 * 60 * 1000;
+  const fresh = Date.now() - device.lastSeen < 20 * 60 * 1000;
   const healthy = device.trackingStatus === 'active';
   return {
     state: healthy && fresh ? 'ok' : 'idle',
@@ -65,7 +66,10 @@ function icon(name) {
 
 function render() {
   if (!clerk?.loaded) return;
+  app.setAttribute('aria-busy', String(busy));
   const signedIn = Boolean(clerk.user && clerk.session);
+  const strict = localState?.strictMode === true
+    && (!Number(localState.strictEndsAt) || Number(localState.strictEndsAt) > Date.now());
   const localSeconds = localState?.stats?.[S.todayKey()]?.[domain] || 0;
   const localTotal = Object.values(localState?.stats?.[S.todayKey()] || {}).reduce((sum, value) => sum + Number(value || 0), 0);
   const totalSeconds = signedIn && cloud?.summary ? cloud.summary.totalTrackedSeconds : localTotal;
@@ -93,7 +97,7 @@ function render() {
     ` : `
       <section class="summary" aria-labelledby="today-heading">
         <div><p class="label" id="today-heading">Screen time today</p><h1>${formatDuration(totalSeconds)}</h1></div>
-        <p class="summary-meta">Across ${cloud?.devices?.length || 1} connected device${(cloud?.devices?.length || 1) === 1 ? '' : 's'}</p>
+        <p class="summary-meta">${cloud?.lastWarning ? escapeHtml(cloud.lastWarning) : cloud?.summary ? `Across ${cloud?.devices?.length || 1} connected device${(cloud?.devices?.length || 1) === 1 ? '' : 's'}` : 'This browser · sync pending'}</p>
       </section>
 
       <section class="connections" aria-label="Connection status">
@@ -102,13 +106,16 @@ function render() {
       </section>
     `}
 
+    ${accountError ? `<p class="error" role="alert">${escapeHtml(accountError)} <button class="text-button" id="account-retry" type="button">Open account settings</button></p>` : ''}
+
     <section class="current-site">
       <div class="site-heading"><div><p class="label">Current website</p><h2>${escapeHtml(domain || 'Chrome page')}</h2></div><strong>${formatDuration(localSeconds)}</strong></div>
-      <div class="progress" aria-label="Current website share of today"><i style="width:${Math.min(100, totalSeconds ? localSeconds / totalSeconds * 100 : 0)}%"></i></div>
+      <div class="progress" role="progressbar" aria-label="Current website share of today" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.min(100, totalSeconds ? Math.round(localSeconds / totalSeconds * 100) : 0)}"><i style="width:${Math.min(100, totalSeconds ? localSeconds / totalSeconds * 100 : 0)}%"></i></div>
       <div class="site-actions">
-        <button class="primary" id="block-site" ${!domain ? 'disabled' : ''}>Block this site</button>
-        <button class="secondary" id="allow-site" ${!domain ? 'disabled' : ''}>Allow 5 min</button>
+        <button class="primary" id="block-site" ${!domain || strict ? 'disabled' : ''}>Block this site</button>
+        <button class="secondary" id="allow-site" ${!domain || strict ? 'disabled' : ''}>Allow 5 min</button>
       </div>
+      ${strict ? '<p class="summary-meta" role="status">Strict Mode is active. Boundaries are locked until it ends.</p>' : ''}
     </section>
 
     ${message ? `<p class="feedback" role="status">${escapeHtml(message)}</p>` : ''}
@@ -123,7 +130,8 @@ function render() {
 function flash(text) {
   message = text;
   render();
-  setTimeout(() => { message = ''; render(); }, 2800);
+  clearTimeout(messageTimer);
+  messageTimer = setTimeout(() => { message = ''; render(); }, 2800);
 }
 
 function bindEvents(signedIn) {
@@ -131,30 +139,47 @@ function bindEvents(signedIn) {
   document.getElementById('settings')?.addEventListener('click', () => chrome.tabs.create({ url: chrome.runtime.getURL('options/options.html?tab=settings') }));
   document.getElementById('account')?.addEventListener('click', () => openAccountPage(signedIn ? 'profile' : 'signin'));
   document.getElementById('signin')?.addEventListener('click', () => openAccountPage('signin'));
-  document.getElementById('signout')?.addEventListener('click', async () => { await clerk.signOut(); await chrome.runtime.sendMessage({ type: 'cloudSignOut' }); });
+  document.getElementById('account-retry')?.addEventListener('click', () => openAccountPage('signin'));
+  document.getElementById('signout')?.addEventListener('click', async () => {
+    try { await clerk.signOut(); await chrome.runtime.sendMessage({ type: 'cloudSignOut' }); cloud = null; render(); }
+    catch (error) { flash(error?.message || 'Could not sign out.'); }
+  });
   document.getElementById('sync')?.addEventListener('click', () => refreshCloud(true));
   document.getElementById('allow-site')?.addEventListener('click', async () => {
-    await chrome.runtime.sendMessage({ type: 'snooze', url: activeUrl, minutes: 5 });
-    flash('Allowed for 5 minutes.');
+    try {
+      const result = await chrome.runtime.sendMessage({ type: 'snooze', url: activeUrl, minutes: 5 });
+      if (result?.ok !== true) throw new Error(result?.error || 'This site cannot be paused right now.');
+      flash('Allowed for 5 minutes.');
+    } catch (error) { flash(error?.message || 'Could not allow this website.'); }
   });
   document.getElementById('block-site')?.addEventListener('click', async () => {
     if (signedIn) {
-      const result = await chrome.runtime.sendMessage({ type: 'setSharedSite', domain, isBlocked: true });
+      let result;
+      try { result = await chrome.runtime.sendMessage({ type: 'setSharedSite', domain, isBlocked: true }); }
+      catch (error) { flash(error?.message || 'Could not sync this website.'); return; }
       if (!result?.ok) { flash(result?.error || 'Could not sync this website.'); return; }
       localState = await S.load();
       flash(`Blocked ${domain} on your account`);
       return;
     }
-    await S.update((state) => {
+    let outcome = 'blocked';
+    try { await S.update((state) => {
+      if (state.strictMode && (!state.strictEndsAt || state.strictEndsAt > Date.now())) { outcome = 'strict'; return state; }
       const list = state.lists.find((item) => item.id === 'list_social') || state.lists[0];
-      if (!list || list.lockedUntil > Date.now()) return state;
+      if (!list) { outcome = 'missing'; return state; }
+      if (list.lockedUntil > Date.now()) { outcome = 'locked'; return state; }
       if (!list.sites.includes(domain)) list.sites.push(domain);
       list.enabled = true;
       return state;
     });
-    await chrome.runtime.sendMessage({ type: 'refresh' });
-    localState = await S.load();
-    flash(`Blocked ${domain}`);
+      if (outcome !== 'blocked') {
+        flash(outcome === 'strict' ? 'Strict Mode is active. Settings are locked until it ends.' : outcome === 'locked' ? 'This block list is frozen and cannot be edited.' : 'Create a block list before blocking this site.');
+        return;
+      }
+      await chrome.runtime.sendMessage({ type: 'refresh' });
+      localState = await S.load();
+      flash(`Blocked ${domain}`);
+    } catch (error) { flash(error?.message || 'Could not block this website.'); }
   });
 }
 
@@ -167,10 +192,13 @@ function openAccountPage(view) {
 
 async function refreshCloud(forceSync) {
   if (!clerk?.session) return;
+  const accountId = clerk.user?.id;
+  const session = clerk.session;
   busy = true;
   render();
   try {
-    cloud = await chrome.runtime.sendMessage({ type: 'cloudSnapshot', sync: Boolean(forceSync) });
+    const result = await chrome.runtime.sendMessage({ type: 'cloudSnapshot', sync: Boolean(forceSync) });
+    if (clerk.user?.id === accountId && clerk.session === session) cloud = result;
   } catch (error) {
     cloud = { error: error?.message || 'Could not reach the background tracker' };
   } finally {
@@ -180,23 +208,42 @@ async function refreshCloud(forceSync) {
 }
 
 async function init() {
-  clerk = await createClerkClient({ publishableKey, syncHost, background: true });
   [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   activeUrl = activeTab?.url || '';
   // Internal browser/extension pages are not blockable websites. Keep the
   // popup useful without exposing the extension id as a fake domain.
   domain = /^https?:\/\//i.test(activeUrl) ? M.domainOf(activeUrl) : '';
   localState = await S.load();
-  clerk.addListener(() => {
+  let authTimeout;
+  try {
+    clerk = await Promise.race([
+      createClerkClient({ publishableKey, syncHost, background: true }),
+      new Promise((_, reject) => { authTimeout = setTimeout(() => reject(new Error('Account connection timed out')), 5000); }),
+    ]);
+  } catch {
+    accountError = 'Account connection is unavailable. Local tracking and boundaries are still ready.';
+    clerk = { loaded: true, user: null, session: null, addListener: () => () => {} };
+  } finally { clearTimeout(authTimeout); }
+  renderedAccountId = clerk.user?.id || null;
+  clerk.addListener?.(() => {
+    const accountId = clerk.user?.id || null;
+    if (accountId !== renderedAccountId) { cloud = null; renderedAccountId = accountId; }
     render();
     if (clerk.session && !cloud && !busy) void refreshCloud(true);
   });
   render();
   if (clerk.session) {
-    await chrome.runtime.sendMessage({ type: 'cloudAuthRefresh' });
-    await refreshCloud(true);
+    try {
+      await chrome.runtime.sendMessage({ type: 'cloudAuthRefresh' });
+      await refreshCloud(true);
+    } catch { accountError = 'Account sync is unavailable. Local tracking and boundaries are still active.'; render(); }
   }
 }
+
+chrome.storage.onChanged?.addListener((changes, area) => {
+  if (area !== 'local' || !changes[S.KEY]) return;
+  void S.load().then((latest) => { localState = latest; render(); }).catch(() => {});
+});
 
 init().catch((error) => {
   app.innerHTML = `<section class="fatal"><h1>FocusLock couldn't start</h1><p>${escapeHtml(error?.message || error)}</p><p>Rebuild the extension and verify its Clerk configuration.</p></section>`;

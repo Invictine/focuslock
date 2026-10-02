@@ -1,5 +1,6 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
+import { validateUpdatedAt } from "./storageDiff";
 
 async function requireUserId(ctx: any): Promise<string> {
   const identity = await ctx.auth.getUserIdentity();
@@ -142,6 +143,24 @@ function mapGroup(group: any) {
   };
 }
 
+function sameGroupContent(row: any, group: CanonicalGroup): boolean {
+  if (
+    row.groupId !== group.groupId ||
+    row.name !== group.name ||
+    row.category !== group.category ||
+    row.dailyLimitMinutes !== group.dailyLimitMinutes ||
+    row.limitEnabled !== group.limitEnabled ||
+    row.members.length !== group.members.length
+  ) return false;
+
+  return row.members.every((member: Member, index: number) => {
+    const next = group.members[index];
+    return member.targetKind === next.targetKind &&
+      member.targetKey === next.targetKey &&
+      member.targetLabel === next.targetLabel;
+  });
+}
+
 async function loadGroups(ctx: any, userId: string) {
   const rows = await ctx.db
     .query("targetGroups")
@@ -202,6 +221,7 @@ export const saveGroups = mutation({
   },
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
+    validateUpdatedAt(args.updatedAt);
 
     const version = await ctx.db
       .query("syncVersions")
@@ -219,12 +239,38 @@ export const saveGroups = mutation({
       .query("targetGroups")
       .withIndex("by_user", (q: any) => q.eq("userId", userId))
       .collect();
-    const storedVersion = Math.max(version?.updatedAt ?? 0, ...existing.map((row) => row.updatedAt));
+    const storedVersion = Math.max(version?.updatedAt ?? 0, ...existing.map((row) => row.updatedAt ?? 0));
     if (args.updatedAt < storedVersion) return { applied: false, updatedAt: storedVersion };
-    for (const row of existing) await ctx.db.delete(row._id);
+    const effectiveClock = Math.max(args.updatedAt, storedVersion + 1);
+
+    // Diff by stable groupId so a collection sync does not churn every row.
+    // Keep the first row for a legacy duplicate ID and remove any duplicates
+    // while applying the canonical collection.
+    const existingById = new Map<string, any>();
+    const duplicateRows: any[] = [];
+    for (const row of existing) {
+      if (existingById.has(row.groupId)) duplicateRows.push(row);
+      else existingById.set(row.groupId, row);
+    }
+    const nextIds = new Set(canonical.map((group) => group.groupId));
+    let mutatedRows = 0;
+    for (const row of existing) {
+      if (!nextIds.has(row.groupId)) {
+        await ctx.db.delete(row._id);
+        mutatedRows++;
+      }
+    }
+    for (const row of duplicateRows) {
+      if (nextIds.has(row.groupId)) {
+        await ctx.db.delete(row._id);
+        mutatedRows++;
+      }
+    }
 
     for (const group of canonical) {
-      await ctx.db.insert("targetGroups", {
+      const current = existingById.get(group.groupId);
+      if (current && sameGroupContent(current, group)) continue;
+      const value = {
         userId,
         groupId: group.groupId,
         name: group.name,
@@ -232,14 +278,19 @@ export const saveGroups = mutation({
         members: group.members,
         dailyLimitMinutes: group.dailyLimitMinutes,
         limitEnabled: group.limitEnabled,
-        updatedAt: args.updatedAt,
-      });
+        updatedAt: effectiveClock,
+      };
+      if (current) await ctx.db.patch(current._id, value);
+      else await ctx.db.insert("targetGroups", value);
+      mutatedRows++;
     }
 
-    const versionValue = { userId, collection: "targetGroups" as const, updatedAt: args.updatedAt };
-    if (version) await ctx.db.patch(version._id, versionValue);
-    else await ctx.db.insert("syncVersions", versionValue);
+    const collectionClock = mutatedRows ? effectiveClock : Math.max(args.updatedAt, storedVersion);
+    const versionValue = { userId, collection: "targetGroups" as const, updatedAt: collectionClock };
+    if (version) {
+      if (version.updatedAt !== collectionClock) await ctx.db.patch(version._id, versionValue);
+    } else await ctx.db.insert("syncVersions", versionValue);
 
-    return { applied: true, updatedAt: args.updatedAt, groupCount: canonical.length };
+    return { applied: true, updatedAt: collectionClock, groupCount: canonical.length };
   },
 });

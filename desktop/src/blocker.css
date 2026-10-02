@@ -45,6 +45,11 @@
   color: var(--fl-on-primary-container, #f4dcd6);
   background: var(--fl-primary-container, #40302d);
 }
+/* Permanent blocks reuse the hard-lock (error) palette: no escape hatch. */
+.blocker-pill.permanent {
+  color: var(--fl-on-error-container, #ffdad6);
+  background: var(--fl-error-container, #482725);
+}
 .blocker-card h1 {
   margin: 4px 0 0;
   color: var(--fl-on-surface, #eee9e7);

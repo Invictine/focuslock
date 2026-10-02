@@ -6,15 +6,15 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -31,6 +31,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.focuslock.app.FocusLockApplication
 import com.focuslock.app.data.model.BlockedApp
 import com.focuslock.app.data.repository.PermanentBlocksRepository
+import com.focuslock.app.data.repository.PermanentWebsitePolicy
 import com.focuslock.app.service.InstalledApp
 import com.focuslock.app.service.InstalledAppsRepository
 import com.focuslock.app.ui.components.AppIconTileForPackage
@@ -90,10 +91,20 @@ fun PermalockScreen() {
     val settings = FocusLockApplication.instance.settingsRepository
     val permanentPackages by permanentBlocks.packagesFlow
         .collectAsStateWithLifecycle(initialValue = emptySet())
+    val permanentDomains by permanentBlocks.domainsFlow
+        .collectAsStateWithLifecycle(initialValue = emptySet())
+    val appNames by permanentBlocks.appNamesFlow
+        .collectAsStateWithLifecycle(initialValue = emptyMap())
+    val legacyWebsites by settings.blockedWebsitesFlow
+        .collectAsStateWithLifecycle(initialValue = emptyList())
+    val websiteUnion = remember(permanentDomains, legacyWebsites) {
+        permanentDomains + legacyWebsites.filter { it.isPermanent }
+            .mapNotNull { PermanentWebsitePolicy.normalize(it.domain) }
+    }
     // Enforcement ORs the dedicated store with the legacy Settings mirror
     // (AppMonitorAccessibilityService), so a backup-restored permanent enforces even
-    // though it never landed in the dedicated store. Display and picker exclusion use
-    // the union; nothing is migrated or mutated — the mirror stays display-only.
+    // before startup migration reaches the dedicated store. Display and picker
+    // exclusion use the union throughout that transition.
     val legacyBlockedApps by settings.blockedAppsFlow
         .collectAsStateWithLifecycle(initialValue = emptyList<BlockedApp>())
     val legacyPermanentPackages = remember(legacyBlockedApps) {
@@ -115,6 +126,7 @@ fun PermalockScreen() {
     val snackbarHostState = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     var pickerOpen by rememberSaveable { mutableStateOf(false) }
+    var websiteDialogOpen by rememberSaveable { mutableStateOf(false) }
     // Back from the picker returns to the Permalock overview instead of leaving the app.
     BackHandler(enabled = pickerOpen) { pickerOpen = false }
 
@@ -126,7 +138,7 @@ fun PermalockScreen() {
                 // The dedicated write is the durable operation; legacy Settings
                 // metadata is only a display mirror (same order as AppSelectorScreen).
                 val ok = try {
-                    permanentBlocks.add(picked.packageName)
+                    permanentBlocks.add(picked.packageName, picked.appName)
                 } catch (_: Exception) {
                     false
                 }
@@ -140,7 +152,7 @@ fun PermalockScreen() {
                     // add() returns false for protected packages; same refusal copy as
                     // the Boundaries permanent flow so both screens explain it alike.
                     snackbarHostState.showSnackbar(
-                        "That app is protected so you can always recover your phone."
+                        "Couldn't save this block. Protected phone recovery apps cannot be permanently blocked."
                     )
                 }
             }
@@ -161,8 +173,12 @@ fun PermalockScreen() {
         } else {
             PermalockOverview(
                 permanentPackages = permanentUnion,
+                permanentDomains = websiteUnion,
+                savedAppNames = appNames + legacyBlockedApps.associate { it.packageName to it.appName }
+                    .filterKeys { it !in appNames },
                 hasLegacyOnlyPermanents = hasLegacyOnlyPermanents,
                 onBlockApp = { pickerOpen = true },
+                onBlockWebsite = { websiteDialogOpen = true },
             )
         }
         SnackbarHost(
@@ -172,54 +188,159 @@ fun PermalockScreen() {
                 .padding(16.dp)
         )
     }
+    if (websiteDialogOpen) {
+        PermanentWebsiteDialog(
+            permanentDomains = websiteUnion,
+            onDismiss = { websiteDialogOpen = false },
+            onConfirm = { domain ->
+                val saved = permanentBlocks.addWebsite(domain)
+                if (saved) {
+                    // The append-only store is authoritative; keep the ordinary
+                    // settings mirror for sync and existing website metadata.
+                    try { settings.setWebsitePermanent(domain, true) } catch (_: Exception) { }
+                    websiteDialogOpen = false
+                    scope.launch { snackbarHostState.showSnackbar("Permanently blocked $domain.") }
+                }
+                saved
+            }
+        )
+    }
+}
+
+@Composable
+private fun PermanentWebsiteDialog(
+    permanentDomains: Set<String>,
+    onDismiss: () -> Unit,
+    onConfirm: suspend (String) -> Boolean,
+) {
+    var input by rememberSaveable { mutableStateOf("") }
+    var confirmedDomain by rememberSaveable { mutableStateOf<String?>(null) }
+    var saving by remember { mutableStateOf(false) }
+    var error by rememberSaveable { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    val normalized = remember(input) { PermanentWebsitePolicy.normalize(input) }
+    val alreadyBlocked = normalized != null && permanentDomains.any {
+        normalized == it || normalized.endsWith(".$it")
+    }
+    AlertDialog(
+        onDismissRequest = { if (!saving) onDismiss() },
+        title = { Text(if (confirmedDomain == null) "Block a website" else "Permanently block $confirmedDomain?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (confirmedDomain == null) {
+                    OutlinedTextField(
+                        value = input,
+                        onValueChange = { input = it; error = null },
+                        label = { Text("Website or URL") },
+                        placeholder = { Text("example.com") },
+                        singleLine = true,
+                        isError = error != null || alreadyBlocked || (input.isNotBlank() && normalized == null),
+                        supportingText = {
+                            Text(error ?: if (alreadyBlocked) "This website is already in PermaLock."
+                                else if (input.isNotBlank() && normalized == null) "Enter a valid website, such as example.com."
+                                else "The domain and its subdomains will stay blocked.")
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (normalized != null && !alreadyBlocked) {
+                        Text("Website: $normalized", style = MaterialTheme.typography.bodyMedium)
+                    }
+                } else {
+                    Text("$confirmedDomain and its subdomains will stay blocked indefinitely. FocusLock will not offer credits, emergency passes, grace time, or an in-app removal control for this website.")
+                    error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                enabled = !saving && (confirmedDomain != null || (normalized != null && !alreadyBlocked)),
+                onClick = {
+                    val domain = confirmedDomain
+                    if (domain == null) {
+                        confirmedDomain = normalized
+                    } else {
+                        saving = true
+                        error = null
+                        scope.launch {
+                            val saved = try { onConfirm(domain) } catch (_: Exception) { false }
+                            if (!saved) error = "Couldn't save the permanent block. Try again."
+                            saving = false
+                        }
+                    }
+                }
+            ) { Text(if (saving) "Saving…" else if (confirmedDomain == null) "Continue" else "Block permanently") }
+        },
+        dismissButton = {
+            TextButton(enabled = !saving, onClick = {
+                if (confirmedDomain == null) onDismiss() else { confirmedDomain = null; error = null }
+            }) { Text(if (confirmedDomain == null) "Cancel" else "Back") }
+        }
+    )
 }
 
 @Composable
 private fun PermalockOverview(
     permanentPackages: Set<String>,
+    permanentDomains: Set<String>,
+    savedAppNames: Map<String, String>,
     hasLegacyOnlyPermanents: Boolean,
     onBlockApp: () -> Unit,
+    onBlockWebsite: () -> Unit,
 ) {
     val context = LocalContext.current
-    // Labels resolve once per set; getAppLabel stays memory-cached afterwards.
-    val rows: List<Pair<String, String>> = remember(permanentPackages, context) {
-        permanentPackages
-            .map { pkg -> pkg to InstalledAppsRepository.getAppLabel(context, pkg) }
-            .sortedBy { (_, label) -> label.lowercase() }
+    val appContext = remember(context) { context.applicationContext }
+    var rows by remember { mutableStateOf<List<Pair<String, String>>>(emptyList()) }
+    LaunchedEffect(permanentPackages, savedAppNames, appContext) {
+        val packages = permanentPackages.toList()
+        val existingLabels = rows.toMap()
+        // Keep existing labels visible across store updates and show package names for
+        // newly added entries until PackageManager resolves their labels on IO.
+        rows = packages.map { packageName ->
+            packageName to (savedAppNames[packageName] ?: existingLabels[packageName] ?: packageName)
+        }
+        rows = withContext(Dispatchers.IO) {
+            packages
+                .map { packageName ->
+                    packageName to (savedAppNames[packageName]
+                        ?: InstalledAppsRepository.getAppLabel(appContext, packageName))
+                }
+                .sortedBy { (_, label) -> label.lowercase() }
+        }
     }
     var entered by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { entered = true }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = UiTokens.ScreenPadding)
-            .padding(bottom = 32.dp),
-        verticalArrangement = Arrangement.spacedBy(UiTokens.ItemGap)
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(
+            start = UiTokens.ScreenPadding,
+            end = UiTokens.ScreenPadding,
+            bottom = 32.dp
+        )
     ) {
-        StaggeredFadeSlide(visible = entered, index = 0, screenKey = "permalock") {
-            ScreenHeader(
-                title = "Permalock",
-                subtitle = "Blocks that stay, with no way back in the app."
-            )
+        item(key = "permalock-header", contentType = "screenHeader") {
+            StaggeredFadeSlide(visible = entered, index = 0, screenKey = "permalock") {
+                ScreenHeader(
+                    title = "Permalock",
+                    subtitle = "Blocks that stay, with no way back in the app."
+                )
+            }
         }
 
-        StaggeredFadeSlide(
-            visible = entered,
-            index = 1,
-            modifier = Modifier.fillMaxWidth(),
-            screenKey = "permalock"
-        ) {
-            PermalockExplainerCard(onBlockApp = onBlockApp)
+        item(key = "permalock-explainer", contentType = "explainerCard") {
+            Spacer(Modifier.height(UiTokens.ItemGap))
+            StaggeredFadeSlide(
+                visible = entered,
+                index = 1,
+                modifier = Modifier.fillMaxWidth(),
+                screenKey = "permalock"
+            ) {
+                PermalockExplainerCard(onBlockApp = onBlockApp, onBlockWebsite = onBlockWebsite)
+            }
         }
 
-        StaggeredFadeSlide(
-            visible = entered,
-            index = 2,
-            modifier = Modifier.fillMaxWidth(),
-            screenKey = "permalock"
-        ) {
+        item(key = "permalock-list-header", contentType = "sectionHeader") {
+            Spacer(Modifier.height(UiTokens.ItemGap))
             Column(verticalArrangement = Arrangement.spacedBy(UiTokens.ItemGap)) {
                 SectionHeader(title = "Permanently blocked")
                 if (hasLegacyOnlyPermanents) {
@@ -229,26 +350,85 @@ private fun PermalockOverview(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                if (rows.isEmpty()) {
+                if (permanentPackages.isEmpty() && permanentDomains.isEmpty()) {
                     PermanentEmptyCard()
-                } else {
-                    Card(
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceContainer
-                        ),
-                        shape = MaterialTheme.shapes.large,
-                        modifier = Modifier.fillMaxWidth()
+                }
+            }
+        }
+
+        if (rows.isNotEmpty()) {
+            item(key = "permalock-list-spacer", contentType = "spacer") {
+                Spacer(Modifier.height(UiTokens.ItemGap))
+            }
+            itemsIndexed(
+                items = rows,
+                key = { _, item -> item.first },
+                contentType = { _, _ -> "permanentAppRow" }
+            ) { index, (packageName, appName) ->
+                val first = index == 0
+                val last = index == rows.lastIndex
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceContainer,
+                    shape = RoundedCornerShape(
+                        topStart = if (first) 20.dp else 0.dp,
+                        topEnd = if (first) 20.dp else 0.dp,
+                        bottomStart = if (last) 20.dp else 0.dp,
+                        bottomEnd = if (last) 20.dp else 0.dp
+                    ),
+                    modifier = Modifier.animateItem()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(
+                            top = if (first) 4.dp else 0.dp,
+                            bottom = if (last) 4.dp else 0.dp
+                        )
                     ) {
-                        Column(Modifier.padding(vertical = 4.dp)) {
-                            rows.forEachIndexed { index, (packageName, appName) ->
-                                PermanentAppRow(packageName = packageName, appName = appName)
-                                if (index != rows.lastIndex) {
-                                    HorizontalDivider(
-                                        modifier = Modifier.padding(start = 68.dp),
-                                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
-                                    )
-                                }
-                            }
+                        PermanentAppRow(packageName = packageName, appName = appName)
+                        if (!last) {
+                            HorizontalDivider(
+                                modifier = Modifier.padding(start = 68.dp),
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        if (permanentDomains.isNotEmpty()) {
+            item(key = "permalock-websites-header") {
+                Spacer(Modifier.height(20.dp))
+                SectionHeader(title = "Websites")
+                Spacer(Modifier.height(8.dp))
+            }
+            val websites = permanentDomains.sorted()
+            itemsIndexed(websites, key = { _, domain -> "website:$domain" }) { index, domain ->
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceContainer,
+                    shape = RoundedCornerShape(
+                        topStart = if (index == 0) 20.dp else 0.dp,
+                        topEnd = if (index == 0) 20.dp else 0.dp,
+                        bottomStart = if (index == websites.lastIndex) 20.dp else 0.dp,
+                        bottomEnd = if (index == websites.lastIndex) 20.dp else 0.dp
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Icon(Icons.Rounded.Language, contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Column(Modifier.weight(1f)) {
+                            Text(domain, style = MaterialTheme.typography.titleSmall,
+                                overflow = TextOverflow.Ellipsis, maxLines = 2)
+                            Text("Includes subdomains", style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Surface(color = MaterialTheme.colorScheme.errorContainer,
+                            shape = RoundedCornerShape(10.dp)) {
+                            Text("Permanent", style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp))
                         }
                     }
                 }
@@ -258,7 +438,7 @@ private fun PermalockOverview(
 }
 
 @Composable
-private fun PermalockExplainerCard(onBlockApp: () -> Unit) {
+private fun PermalockExplainerCard(onBlockApp: () -> Unit, onBlockWebsite: () -> Unit) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
         shape = MaterialTheme.shapes.large,
@@ -291,7 +471,7 @@ private fun PermalockExplainerCard(onBlockApp: () -> Unit) {
                 }
             }
             Text(
-                text = "Apps blocked here stay blocked. No timers, no credits, no emergency passes, and no in-app removal.",
+                text = "Apps and websites blocked here stay blocked. App blocks survive uninstalling and reinstalling the blocked app. No timers, credits, emergency passes, or in-app removal.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -309,6 +489,15 @@ private fun PermalockExplainerCard(onBlockApp: () -> Unit) {
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text("Block an app", fontWeight = FontWeight.SemiBold)
+            }
+            OutlinedButton(
+                onClick = onBlockWebsite,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                shape = MaterialTheme.shapes.large
+            ) {
+                Icon(Icons.Rounded.Language, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Block a website", fontWeight = FontWeight.SemiBold)
             }
         }
     }
@@ -331,7 +520,7 @@ private fun PermanentEmptyCard() {
                 color = MaterialTheme.colorScheme.onSurface
             )
             Text(
-                text = "Once you block an app here, it stays blocked and FocusLock will not offer a way to remove it.",
+                text = "Once you block an app or website here, it stays blocked and FocusLock will not offer a way to remove it.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

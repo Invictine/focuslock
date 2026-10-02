@@ -213,12 +213,13 @@ fun FrogPickerBody(
 fun LazyListScope.FrogCardItem(
     entranceIndex: Int = 1,
     key: String = "frog",
+    onOpenSettings: (() -> Unit)? = null,
 ) {
     item(key = key) {
         // "frog" screen key: the entrance plays once per process, not on every
         // Focus-tab return (the legacy null-key path replays it each time).
         HomeEntrance(index = entranceIndex, screenKey = "frog") {
-            FrogCard()
+            FrogCard(onOpenSettings = onOpenSettings)
         }
     }
 }
@@ -229,15 +230,28 @@ fun LazyListScope.FrogCardItem(
  * collects the frog flows directly, matching how the other home cards are wired.
  */
 @Composable
-fun FrogCard(modifier: Modifier = Modifier) {
+fun FrogCard(modifier: Modifier = Modifier, onOpenSettings: (() -> Unit)? = null) {
     val frogRepo = FocusLockApplication.instance.frogRepository
     val scope = rememberCoroutineScope()
     val state by frogRepo.frogStateFlow.collectAsStateWithLifecycle(initialValue = null)
     var showPicker by remember { mutableStateOf(false) }
 
     val frogState = state
-    // Feature off: no card at all (the toggle lives in Settings).
-    if (frogState?.enabled == false) return
+    if (frogState?.enabled == false) {
+        if (onOpenSettings != null) Surface(
+            onClick = onOpenSettings,
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
+            shape = MaterialTheme.shapes.large,
+            modifier = modifier.fillMaxWidth(),
+        ) {
+            Column(Modifier.padding(16.dp)) {
+                Text("Eat the frog", style = MaterialTheme.typography.titleSmall)
+                Text("Off · Enable in settings", style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        return
+    }
 
     Card(
         colors = CardDefaults.cardColors(
@@ -279,7 +293,7 @@ fun FrogCard(modifier: Modifier = Modifier) {
                         },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
@@ -294,7 +308,7 @@ fun FrogCard(modifier: Modifier = Modifier) {
                         onClick = { scope.launch { frogRepo.tickOffFrog(true) } },
                         shape = MaterialTheme.shapes.medium,
                         contentPadding = PaddingValues(horizontal = 12.dp),
-                        modifier = Modifier.height(40.dp),
+                        modifier = Modifier.heightIn(min = 48.dp),
                     ) {
                         Text("Tick off", style = MaterialTheme.typography.labelMedium)
                     }

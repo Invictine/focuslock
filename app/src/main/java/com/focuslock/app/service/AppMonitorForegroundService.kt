@@ -5,6 +5,8 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.os.IBinder
+import android.os.SystemClock
+import android.app.NotificationManager
 import androidx.core.app.NotificationCompat
 import com.focuslock.app.FocusLockApplication
 import com.focuslock.app.R
@@ -20,10 +22,23 @@ import kotlinx.coroutines.launch
 class AppMonitorForegroundService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private lateinit var notificationManager: NotificationManager
+    private lateinit var notificationPendingIntent: PendingIntent
 
     // Only one collector may be alive at a time: onStartCommand can fire repeatedly
     // (every MainActivity.onCreate) and must not stack duplicate collectors.
     private var updateJob: Job? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        notificationManager = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        notificationPendingIntent = PendingIntent.getActivity(
+            this,
+            0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -31,12 +46,12 @@ class AppMonitorForegroundService : Service() {
         startForeground(NOTIFICATION_ID, buildNotification("FocusLock Active: Monitoring doomscroll apps"))
 
         updateJob?.cancel()
-        updateJob = scope.launch {
+        updateJob = scope.launch(Dispatchers.IO) {
             var lastNotifiedMinuteBucket = Long.MIN_VALUE
             var lastLockedState: Boolean? = null
             var lastNotifyAt = 0L
             FocusLockApplication.instance.creditBankRepository.liveBalanceSeconds.collectLatest { seconds ->
-                val now = System.currentTimeMillis()
+                val now = SystemClock.elapsedRealtime()
                 val locked = seconds <= 0
                 // Throttle: notify only on minute-bucket change, locked/unlocked flip,
                 // or at most every 10s — never on every per-second tick.
@@ -58,8 +73,7 @@ class AppMonitorForegroundService : Service() {
                     "Screen Time Locked! Complete work in TickTick to unlock."
                 }
                 val notification = buildNotification(text)
-                val manager = getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager
-                manager.notify(NOTIFICATION_ID, notification)
+                notificationManager.notify(NOTIFICATION_ID, notification)
             }
         }
 
@@ -67,18 +81,11 @@ class AppMonitorForegroundService : Service() {
     }
 
     private fun buildNotification(contentText: String): Notification {
-        val pendingIntent = PendingIntent.getActivity(
-            this,
-            0,
-            Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
         return NotificationCompat.Builder(this, FocusLockApplication.CHANNEL_MONITOR)
             .setContentTitle("FocusLock Protection")
             .setContentText(contentText)
             .setSmallIcon(android.R.drawable.ic_lock_idle_lock)
-            .setContentIntent(pendingIntent)
+            .setContentIntent(notificationPendingIntent)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()

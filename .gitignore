@@ -11,6 +11,13 @@ build/
 app/build/
 .kotlin/
 captures/
+artifacts/
+/*.log
+
+# Generated design review captures
+design/home-lab/screenshots/
+design/home-lab/results.json
+design/home-lab/offline-results.json
 
 # IDE
 .idea/

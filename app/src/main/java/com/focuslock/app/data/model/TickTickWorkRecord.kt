@@ -7,7 +7,8 @@ enum class WorkRecordSource {
     TICKTICK_NOTIFICATION,
     TICKTICK_API,
     TICKTICK_APP_FOCUS,
-    MANUAL_ENTRY
+    MANUAL_ENTRY,
+    TICKTICK_FOCUS_API
 }
 
 @Serializable

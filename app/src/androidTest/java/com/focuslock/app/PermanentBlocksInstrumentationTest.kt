@@ -5,12 +5,16 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.focuslock.app.data.repository.PermanentBlockPolicy
 import com.focuslock.app.data.repository.PermanentBlocksRepository
+import com.focuslock.app.data.repository.PermanentWebsitePolicy
 import com.focuslock.app.data.repository.SettingsRepository
 import com.focuslock.app.data.repository.StrictModeAutomationRepository
+import com.focuslock.app.data.model.BlockedApp
+import com.focuslock.app.data.model.BlockedWebsite
 import com.focuslock.app.data.repository.StrictRecurringWindow
 import java.time.ZoneId
 import java.time.ZonedDateTime
 import java.util.UUID
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -37,6 +41,42 @@ class PermanentBlocksInstrumentationTest {
         recreated.warm()
         assertTrue(recreated.isPermanentlyBlocked(packageName))
         assertTrue(PermanentBlockPolicy.shouldEnforce(packageName, setOf(packageName), emptySet()))
+    }
+
+    @Test
+    fun permanentAppRetainsItsDisplayNameAndMigratesLegacyCommitments() = runBlocking {
+        val packageName = "com.focuslock.test.${UUID.randomUUID()}"
+        val migratedPackage = "com.focuslock.legacy.${UUID.randomUUID()}"
+        val website = "legacy-${UUID.randomUUID().toString().replace("-", "")}.example"
+        val writer = PermanentBlocksRepository(context)
+        assertTrue(writer.add(packageName, "Saved app label"))
+        val settings = SettingsRepository(context)
+        settings.setAppPermanent(packageName, true)
+        writer.migrateLegacy(
+            settings.getBlockedApps() + BlockedApp(migratedPackage, "Legacy label", isPermanent = true),
+            settings.getBlockedWebsites() + BlockedWebsite(website, website, isPermanent = true),
+        )
+
+        val recreated = PermanentBlocksRepository(context)
+        recreated.warm()
+        assertTrue(recreated.isPermanentlyBlocked(packageName))
+        assertTrue(recreated.isPermanentlyBlocked(migratedPackage))
+        assertTrue(recreated.isPermanentlyBlockedDomain("sub.$website"))
+        assertTrue(recreated.appNamesFlow.first()[packageName] == "Saved app label")
+        assertTrue(recreated.appNamesFlow.first()[migratedPackage] == "Legacy label")
+    }
+
+    @Test
+    fun permanentWebsiteNormalizationValidatesAndMatchesSubdomains() = runBlocking {
+        val repository = PermanentBlocksRepository(context)
+        val domain = "site-${UUID.randomUUID().toString().replace("-", "")}.example"
+        assertTrue(PermanentWebsitePolicy.normalize("HTTPS://www.$domain/path") == domain)
+        assertTrue(PermanentWebsitePolicy.normalize("not a domain") == null)
+        assertTrue(repository.addWebsite("https://$domain/login"))
+        repository.warm()
+        assertTrue(repository.isPermanentlyBlockedDomain("child.$domain"))
+        assertFalse(repository.isPermanentlyBlockedDomain("$domain.evil.example"))
+        assertFalse(repository.addWebsite("invalid host"))
     }
 
     @Test

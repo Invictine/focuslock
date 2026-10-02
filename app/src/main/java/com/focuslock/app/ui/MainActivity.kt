@@ -37,6 +37,7 @@ import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -51,6 +52,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import com.focuslock.app.BuildConfig
 import com.focuslock.app.FocusLockApplication
 import com.focuslock.app.auth.AccountScreen
@@ -76,6 +78,8 @@ import com.focuslock.app.ui.settings.SettingsScreen
 import com.focuslock.app.ui.strict.StrictModeScreen
 import com.focuslock.app.ui.theme.FocusLockTheme
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -142,6 +146,22 @@ class MainActivity : ComponentActivity() {
         // Start protection only once the core permissions exist. POST_NOTIFICATIONS is
         // requested separately afterwards, and only when the monitor service actually starts.
         startMonitorServiceIfPermitted()
+
+        // Import completed TickTick sessions on return and while the app stays visible.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                while (true) {
+                    try {
+                        (application as FocusLockApplication).tickTickFocusSync.sync()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        Log.w("TickTickFocusSync", "Automatic focus sync failed; will retry")
+                    }
+                    delay(60_000L)
+                }
+            }
+        }
 
         setContent {
             FocusLockTheme {
@@ -222,6 +242,7 @@ class MainActivity : ComponentActivity() {
                 } else {
                     var currentTab by rememberSaveable { mutableStateOf(NavigationItem.DASHBOARD) }
                     var showDebug by rememberSaveable { mutableStateOf(false) }
+                    val tabStateHolder = rememberSaveableStateHolder()
                     // Cross-device "New bucket…": a usage row asks to open the merge editor
                     // in the Boundaries picker. Plain state; consumed (cleared) by the
                     // picker as soon as it opens the editor.
@@ -330,6 +351,9 @@ class MainActivity : ComponentActivity() {
                         // AnimatedContent crossfade kept outgoing+incoming screens
                         // composed simultaneously, which produced the "views closing /
                         // appearing weirdly" effect and extra composition cost.
+                        // Keep each tab's scroll/form state while disposing its collectors
+                        // and layout. Returning to a tab doesn't jump back to the top.
+                        tabStateHolder.SaveableStateProvider(currentTab.name) {
                         when (currentTab) {
                             NavigationItem.DASHBOARD -> DashboardScreen(
                                 onOpenTickTick = { openTickTick() },
@@ -363,6 +387,7 @@ class MainActivity : ComponentActivity() {
                                     currentTab = NavigationItem.APPS
                                 },
                             )
+                        }
                         }
                         }
                         }

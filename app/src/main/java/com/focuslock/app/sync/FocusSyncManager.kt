@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
+import android.os.SystemClock
 import android.provider.Settings
 import com.focuslock.app.auth.AuthViewModel
 import com.focuslock.app.data.model.BlockedApp
@@ -24,6 +25,12 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -31,6 +38,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.UUID
 import java.security.MessageDigest
 import kotlin.random.Random
@@ -43,6 +51,23 @@ sealed interface SyncStatus {
     data class Skipped(val reason: String) : SyncStatus
     data class Error(val message: String) : SyncStatus
 }
+
+/** Whether a remote full aggregate may replace the bank without losing local edits. */
+internal fun remoteBankStateWins(
+    remotePresent: Boolean,
+    remoteUpdatedAt: Long,
+    localUpdatedAt: Long,
+    localDirtySinceSync: Boolean,
+): Boolean = remotePresent && remoteUpdatedAt > localUpdatedAt && !localDirtySinceSync
+
+/** Prefer the durable acknowledged state version; use the legacy clock only pre-migration. */
+internal fun bankStateIsDirty(
+    localUpdatedAt: Long,
+    syncedUpdatedAt: Long?,
+    lastSuccessfulSync: Long,
+    hasMeaningfulLocalState: Boolean,
+): Boolean = syncedUpdatedAt?.let { localUpdatedAt != it }
+    ?: (localUpdatedAt > lastSuccessfulSync || (lastSuccessfulSync == 0L && hasMeaningfulLocalState))
 
 /** Bidirectional, timestamp-aware Clerk/Convex synchronization. */
 class FocusSyncManager(
@@ -58,6 +83,13 @@ class FocusSyncManager(
     }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO + exceptionHandler)
     private var loop: Job? = null
+    private var policyWatchJob: Job? = null
+    @Volatile private var retainedAuth: AuthViewModel? = null
+    @Volatile private var lastPolicyRefreshRequestAt = 0L
+    @Volatile private var policyRefreshInFlight = false
+    @Volatile private var monitorPolicyActiveUntil = 0L
+    private val policyRefreshLock = Any()
+    private val appVisible = MutableStateFlow(false)
     private val identityPrefs = appContext.getSharedPreferences("focuslock_device", Context.MODE_PRIVATE)
     private val connectivityManager = appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
 
@@ -66,6 +98,7 @@ class FocusSyncManager(
 
     /** Consecutive failed cycles; drives the exponential backoff in the auto-sync loop. */
     private var consecutiveFailures = 0
+    @Volatile private var lastUsageSummaryFetchAt = 0L
 
     /** Latest Clerk token, read by the cached client's token provider (audit item 9). */
     @Volatile private var currentToken: String? = null
@@ -80,9 +113,10 @@ class FocusSyncManager(
     // One client per base URL; the shared OkHttp client is pooled process-wide.
     @Volatile private var cachedClient: ConvexSyncClient? = null
     @Volatile private var cachedClientUrl: String? = null
+    @Volatile private var cachedSnapshot: ConvexSyncClient.Snapshot? = null
 
     // Fallback cache for backends whose getSnapshot payload has no prefs: a throttled
-    // getDashboard fetch so the 30s sync loop never adds a heavy call every cycle.
+    // getDashboard fetch so the routine sync loop never adds a heavy call every cycle.
     @Volatile private var cachedRemotePrefs: ConvexSyncClient.Prefs? = null
     @Volatile private var lastPrefsFetchAt = 0L
 
@@ -91,17 +125,16 @@ class FocusSyncManager(
 
     /**
      * Today's combined tracked seconds per group (`groupId -> trackedSeconds`), refreshed
-     * from `usage:getUsageSummary(today..today)` once per sync cycle. The accessibility
-     * service reads it synchronously on the enforcement hot path, so it deliberately never
-     * blocks; it can lag ~30s and it is not cleared when a fetch fails (stale is
-     * acceptable, but treating an outage as 0 would under-block).
+     * from `usage:getUsageSummary(today..today)` every minute while visible or while the
+     * accessibility monitor is using a selected/group target, and every four hours idle.
+     * The enforcement path reads it synchronously and keeps the last good cache on errors.
      */
     private val _groupUsageTodaySeconds = MutableStateFlow<Map<String, Long>>(emptyMap())
     val groupUsageTodaySeconds: StateFlow<Map<String, Long>> = _groupUsageTodaySeconds.asStateFlow()
 
     /**
-     * All-time, all-device target catalog (`usage:listKnownTargets`), refreshed once per
-     * sync cycle. The merge picker unions this with its local app/website sources so a
+     * All-time, all-device target catalog (`usage:listKnownTargets`), refreshed on the
+     * four-hour window. The merge picker unions this with its local app/website sources so a
      * target that only ever existed on another device (a Windows exe, an extension-only
      * domain) is still selectable. Empty until the first successful fetch and deliberately
      * never cleared on a failed one: a remote-only candidate is lost for good if a
@@ -113,6 +146,7 @@ class FocusSyncManager(
     /** `"kind:key"` -> target over the last successful catalog fetch; empty until then. */
     @Volatile
     private var knownTargetIndex: Map<String, KnownTarget> = emptyMap()
+    @Volatile private var lastKnownTargetsFetchAt = 0L
 
     /**
      * Non-suspending lookup over the last successful catalog fetch. Website keys are
@@ -143,6 +177,56 @@ class FocusSyncManager(
 
     fun startAutoSync(auth: AuthViewModel) {
         stopAutoSync()
+        retainedAuth = auth
+        policyWatchJob = scope.launch {
+            val dirty = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+            val strictDirty = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+            launch {
+                settings.blockedWebsitesFlow.drop(1).distinctUntilChanged().collect { dirty.tryEmit(Unit) }
+            }
+            launch {
+                targetGroups.groups.drop(1).distinctUntilChanged().collect { dirty.tryEmit(Unit) }
+            }
+            // Lockdown is a cloud policy too. Watch every persisted field that can
+            // change its enforcement semantics so activation reaches the extension
+            // without waiting for the next background loop. The existing debounce
+            // coalesces the multi-key writes made by SettingsRepository.
+            launch {
+                settings.lockdownModeFlow.drop(1).distinctUntilChanged().collect { strictDirty.tryEmit(Unit) }
+            }
+            launch {
+                settings.lockdownEndsAtFlow.drop(1).distinctUntilChanged().collect { strictDirty.tryEmit(Unit) }
+            }
+            launch {
+                settings.lockdownNukeAfterFiveFlow.drop(1).distinctUntilChanged().collect { strictDirty.tryEmit(Unit) }
+            }
+            launch {
+                settings.lockdownPresetFlow.drop(1).distinctUntilChanged().collect { strictDirty.tryEmit(Unit) }
+            }
+            // Strict activation must not be lost behind the generic policy throttle:
+            // an activation can happen while an accessibility refresh is in flight,
+            // and the app may background before the next four-hour loop. This queue
+            // waits for the mutex, then validates the same auth/account captured at
+            // the event; remote application may cause one harmless equal-state pass,
+            // but cannot create a repeating event because the flows are distinct.
+            launch {
+                strictDirty.debounce(POLICY_SYNC_DEBOUNCE_MS).collect {
+                    val strictAuth = retainedAuth ?: return@collect
+                    val accountAtRequest = currentAccountId ?: return@collect
+                    scope.launch {
+                        syncMutex.withLock {
+                            if (retainedAuth !== strictAuth || currentAccountId != accountAtRequest) return@withLock
+                            performSync(strictAuth)
+                        }
+                    }
+                }
+            }
+            dirty.debounce(POLICY_SYNC_DEBOUNCE_MS).collect {
+                // Boundary/group edits are low-volume policy changes, so sync promptly
+                // while coalescing a burst of related preference edits into one cycle.
+                requestPolicyRefresh()
+            }
+        }
         loop = scope.launch {
             while (isActive) {
                 // null = cycle was skipped (offline, or lock held elsewhere) and must
@@ -177,12 +261,51 @@ class FocusSyncManager(
                 // While offline, poll at the base cadence instead of the failure backoff
                 // so a regained connection is picked up quickly; a real attempt then
                 // resets the backoff on success (item 9).
-                delay(nextLoopDelayMs(consecutiveFailures, offline))
+                awaitNextCycle(nextLoopDelayMs(consecutiveFailures, offline))
             }
         }
     }
 
-    fun stopAutoSync() { loop?.cancel(); loop = null }
+    fun stopAutoSync() {
+        loop?.cancel(); loop = null
+        policyWatchJob?.cancel(); policyWatchJob = null
+    }
+
+    /** Use a shorter polling cadence only while the app is visible. */
+    fun setAppVisible(visible: Boolean) {
+        appVisible.value = visible
+    }
+
+    /** Queue a throttled refresh away from the accessibility binder/event callback. */
+    fun requestPolicyRefresh(activeTarget: Boolean = false) {
+        val now = SystemClock.elapsedRealtime()
+        if (activeTarget) monitorPolicyActiveUntil = now + ACTIVE_POLICY_WINDOW_MS
+        val auth = retainedAuth ?: return
+        val accountAtRequest = currentAccountId ?: return // initial cycle discovers the account
+        synchronized(policyRefreshLock) {
+            if (policyRefreshInFlight || now - lastPolicyRefreshRequestAt < POLICY_REFRESH_THROTTLE_MS) return
+            lastPolicyRefreshRequestAt = now
+            policyRefreshInFlight = true
+        }
+        scope.launch {
+            try {
+                syncMutex.withLock {
+                    if (retainedAuth !== auth || currentAccountId != accountAtRequest) return@withLock
+                    performSync(auth)
+                }
+            } finally {
+                synchronized(policyRefreshLock) { policyRefreshInFlight = false }
+            }
+        }
+    }
+
+    fun isRapidPolicyRefreshActive(): Boolean =
+        appVisible.value || SystemClock.elapsedRealtime() < monitorPolicyActiveUntil
+
+    private suspend fun awaitNextCycle(delayMs: Long) {
+        val visibleAtStart = appVisible.value
+        withTimeoutOrNull(delayMs) { appVisible.first { it != visibleAtStart } }
+    }
 
     fun syncNowAsync(auth: AuthViewModel) = scope.launch { syncNow(auth) }
 
@@ -201,10 +324,23 @@ class FocusSyncManager(
 
     /** Called when Clerk leaves the signed-in state; prevents a stale bearer token from being reused. */
     fun onSignedOut() {
+        retainedAuth = null
+        monitorPolicyActiveUntil = 0L
+        synchronized(policyRefreshLock) {
+            lastPolicyRefreshRequestAt = 0L
+            policyRefreshInFlight = false
+        }
         currentToken = null
         currentAccountId = null
         cachedRemotePrefs = null
         lastPrefsFetchAt = 0L
+        lastKnownTargetsFetchAt = 0L
+        lastUsageSummaryFetchAt = 0L
+        _groupUsageTodaySeconds.value = emptyMap()
+        totalTrackedSecondsToday = 0L
+        _knownTargets.value = emptyList()
+        knownTargetIndex = emptyMap()
+        cachedSnapshot = null
         stopAutoSync()
     }
 
@@ -246,7 +382,13 @@ class FocusSyncManager(
         try {
             val startedAt = System.currentTimeMillis()
             val lastSuccessfulSync = bank.getLastSyncTimestamp()
-            val snapshot = convex.getSnapshot()
+            val summaryDue = startedAt - lastUsageSummaryFetchAt >= usageSummaryIntervalMs()
+            val knownTargetsDue = startedAt - lastKnownTargetsFetchAt >= KNOWN_TARGETS_INTERVAL_MS
+            val snapshot = convex.getSnapshot(
+                cached = cachedSnapshot,
+                usageDate = if (summaryDue) today() else null,
+                includeKnownTargets = knownTargetsDue,
+            )
                 ?: throw IllegalStateException("Could not load the server snapshot")
             // A sign-out/account switch can happen while the HTTP request is in flight.
             // Never apply that response to the next account's local DataStore.
@@ -254,6 +396,12 @@ class FocusSyncManager(
                 _status.value = SyncStatus.Skipped("Account changed — discarding stale sync")
                 return true
             }
+            cachedSnapshot = snapshot.copy(
+                usageSummary = null,
+                usageSummaryIncluded = false,
+                knownTargets = null,
+                knownTargetsIncluded = false,
+            )
 
             // Clock-skew fix (item 3): anchor the hybrid clock on the freshest
             // server-seen stamp before any write decision. See [clampedWriteTime].
@@ -281,48 +429,90 @@ class FocusSyncManager(
                 fresh.workSecondsToday > 0L ||
                 fresh.scrollSecondsToday > 0L ||
                 fresh.tasksCompletedToday > 0
+            val localBankDirtySinceSync = bankStateIsDirty(
+                localUpdatedAt = localStateUpdatedAt,
+                syncedUpdatedAt = fresh.syncedStateUpdatedAt,
+                lastSuccessfulSync = lastSuccessfulSync,
+                hasMeaningfulLocalState = hasMeaningfulLocalState,
+            )
 
             var pulled = 0
             var pushed = 0
+            var expiredUsageSkipped = 0
             val stepErrors = mutableListOf<String>()
 
             try {
-            val remoteStateWins = snapshot.state != null && remoteStateUpdatedAt > localStateUpdatedAt &&
-                !(lastSuccessfulSync == 0L && localStateUpdatedAt == 0L && hasMeaningfulLocalState)
+            val remoteCounters = snapshot.state?.let { state ->
+                CreditBankRepository.ExternalStateCounters(
+                    earnedSeconds = state.optLong("externalEarnedSeconds", 0L),
+                    spentSeconds = state.optLong("externalSpentSeconds", 0L),
+                    date = state.optString("externalDate", ""),
+                    workSecondsToday = state.optLong("externalWorkSecondsToday", 0L),
+                    scrollSecondsToday = state.optLong("externalScrollSecondsToday", 0L),
+                    tasksCompletedToday = state.optLong("externalTasksCompletedToday", 0L),
+                )
+            } ?: CreditBankRepository.ExternalStateCounters()
+            val acknowledgedEarned = remoteCounters.earnedSeconds.coerceAtLeast(0L)
+            val acknowledgedSpent = remoteCounters.spentSeconds.coerceAtLeast(0L)
+            val remoteStateWins = remoteBankStateWins(
+                remotePresent = snapshot.state != null,
+                remoteUpdatedAt = remoteStateUpdatedAt,
+                localUpdatedAt = localStateUpdatedAt,
+                localDirtySinceSync = localBankDirtySinceSync,
+            )
             if (remoteStateWins) {
-                val state = snapshot.state
-                bank.applyRemoteState(
+                val state = requireNotNull(snapshot.state)
+                require(bank.applyRemoteState(
                     balanceSeconds = state.optLong("creditBalanceSeconds", 0L),
                     workSecondsToday = state.optLong("totalWorkSecondsToday", 0L),
                     scrollSecondsToday = state.optLong("totalScrollSecondsToday", 0L),
                     tasksCompletedToday = state.optInt("tasksCompletedToday", 0),
                     lastResetDate = state.optString("lastResetDate", today()),
                     updatedAt = remoteStateUpdatedAt,
-                )
+                    externalCounters = remoteCounters,
+                    expectedLocalUpdatedAt = fresh.stateUpdatedAt,
+                )) { "Could not apply remote focus state" }
                 pulled++
-            } else if (snapshot.state == null || localStateUpdatedAt > remoteStateUpdatedAt ||
-                (lastSuccessfulSync == 0L && hasMeaningfulLocalState)) {
+            } else {
+                // Apply only Chrome's positive lifetime/daily deltas to the freshest
+                // Android bank state, then CAS the resulting full aggregate against the
+                // exact server state and external counters we read above. This avoids
+                // sending an additive balance twice when retries or two clients race.
+                val merged = bank.mergeExternalCountersAndRead(remoteCounters, remoteStateUpdatedAt)
+                val externalChangedAggregate = merged.balanceSeconds != fresh.balanceSeconds ||
+                    merged.workSecondsToday != fresh.workSecondsToday ||
+                    merged.scrollSecondsToday != fresh.scrollSecondsToday ||
+                    merged.tasksCompletedToday != fresh.tasksCompletedToday ||
+                    merged.lastResetDate != fresh.lastResetDate
+                if (snapshot.state == null || localBankDirtySinceSync ||
+                    localStateUpdatedAt > remoteStateUpdatedAt || externalChangedAggregate) {
                 // Push the freshly-read values (never the pre-network ones) with a
                 // skew-clamped writeTime; applyRemoteState re-stamps locally unless a
                 // newer local write (e.g. a credit) made the stamp stale already.
-                val writeTime = clampedWriteTime(startedAt, fresh.stateUpdatedAt)
+                val writeTime = clampedWriteTime(startedAt, merged.stateUpdatedAt)
                 require(convex.saveState(
-                    localBalance,
-                    fresh.workSecondsToday,
-                    fresh.scrollSecondsToday,
-                    fresh.tasksCompletedToday,
-                    fresh.lastResetDate.ifBlank { today() },
+                    merged.balanceSeconds,
+                    merged.workSecondsToday,
+                    merged.scrollSecondsToday,
+                    merged.tasksCompletedToday,
+                    merged.lastResetDate.ifBlank { today() },
                     writeTime,
+                    expectedUpdatedAt = remoteStateUpdatedAt,
+                    acknowledgedExternalEarnedSeconds = acknowledgedEarned,
+                    acknowledgedExternalSpentSeconds = acknowledgedSpent,
                 )) { "Could not save focus state" }
-                bank.applyRemoteState(
-                    localBalance,
-                    fresh.workSecondsToday,
-                    fresh.scrollSecondsToday,
-                    fresh.tasksCompletedToday,
-                    fresh.lastResetDate.ifBlank { today() },
+                require(bank.applyRemoteState(
+                    merged.balanceSeconds,
+                    merged.workSecondsToday,
+                    merged.scrollSecondsToday,
+                    merged.tasksCompletedToday,
+                    merged.lastResetDate.ifBlank { today() },
                     writeTime,
-                )
+                    externalCounters = remoteCounters,
+                    expectedLocalUpdatedAt = merged.stateUpdatedAt,
+                )) { "Could not commit synced focus state" }
                 pushed++
+                }
             }
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
@@ -369,7 +559,10 @@ class FocusSyncManager(
             try {
                 // Merged target groups: full-replace LWW (same shape as boundaries) plus
                 // the per-group usage cache for the accessibility enforcement fast path.
-                val groupsOutcome = syncTargetGroups(convex, startedAt)
+                val groupsOutcome = syncTargetGroups(
+                    convex, startedAt, snapshot.groupsState,
+                    snapshot.usageSummary, snapshot.usageSummaryIncluded,
+                )
                 pulled += groupsOutcome.pulled
                 pushed += groupsOutcome.pushed
             } catch (e: Exception) {
@@ -417,7 +610,8 @@ class FocusSyncManager(
 
             // Strict / Lockdown mode: independent LWW clock. Current backends return prefs
             // in getSnapshot; older ones fall back to a throttled getDashboard fetch.
-            val effectivePrefs = remotePrefs ?: fetchRemotePrefsThrottled(convex)
+            val effectivePrefs = if (snapshot.prefsIncluded) remotePrefs
+                else fetchRemotePrefsThrottled(convex)
             if (effectivePrefs?.strictMode == false && (effectivePrefs.strictApprovedAt ?: 0L) > 0L) {
                 settings.applyRemoteApprovedUnlock(
                     expectedEndsAt = effectivePrefs.strictApprovedEndsAt ?: 0L,
@@ -494,7 +688,7 @@ class FocusSyncManager(
             }
 
             try {
-                syncNuke(convex)
+                syncNuke(convex, snapshot)
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 android.util.Log.w("FocusSyncManager", "nuke sync step failed", e)
@@ -502,7 +696,7 @@ class FocusSyncManager(
             }
 
             try {
-                syncDeviceAndUsage(convex, startedAt)
+                expiredUsageSkipped += syncDeviceAndUsage(convex, startedAt)
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 android.util.Log.w("FocusSyncManager", "device/usage sync step failed", e)
@@ -510,10 +704,10 @@ class FocusSyncManager(
             }
 
             try {
-                // Known-target catalog for the merge picker: once per cycle. Its own
+                // Known-target catalog for the merge picker: at most once per refresh window. Its own
                 // failure domain — a catalog hiccup is UI-only, so it never reaches
                 // stepErrors (which would trip the sync backoff).
-                refreshKnownTargets(convex)
+                refreshKnownTargets(convex, snapshot)
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 android.util.Log.w("FocusSyncManager", "known-targets refresh failed", e)
@@ -528,8 +722,11 @@ class FocusSyncManager(
             if (stepErrors.isEmpty()) {
                 bank.setLastSyncTimestamp(System.currentTimeMillis())
                 val finishedAt = System.currentTimeMillis()
+                val expiredWarning = if (expiredUsageSkipped > 0) {
+                    " · skipped $expiredUsageSkipped usage bucket(s) outside retention"
+                } else ""
                 _status.value = SyncStatus.Done(
-                    "Synced · ↑$pushed ↓$pulled · ${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date(finishedAt))}",
+                    "Synced · ↑$pushed ↓$pulled$expiredWarning · ${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date(finishedAt))}",
                 )
             } else {
                 val finishedAt = System.currentTimeMillis()
@@ -587,9 +784,21 @@ class FocusSyncManager(
             .remove(KEY_ACCOUNT_TRANSITION)
             .commit()) { "Could not persist account identity" }
         currentAccountId = accountId
+        monitorPolicyActiveUntil = 0L
+        synchronized(policyRefreshLock) {
+            lastPolicyRefreshRequestAt = 0L
+            policyRefreshInFlight = false
+        }
         serverSeenMs = 0L
         cachedRemotePrefs = null
         lastPrefsFetchAt = 0L
+        lastKnownTargetsFetchAt = 0L
+        lastUsageSummaryFetchAt = 0L
+        _groupUsageTodaySeconds.value = emptyMap()
+        totalTrackedSecondsToday = 0L
+        _knownTargets.value = emptyList()
+        knownTargetIndex = emptyMap()
+        cachedSnapshot = null
     }
 
     private suspend fun exportAccount(accountId: String): String {
@@ -699,16 +908,17 @@ class FocusSyncManager(
 
     /** Exponential backoff + jitter, capped at [MAX_BACKOFF_DELAY_MS] (audit item 7). */
     private fun nextLoopDelayMs(failures: Int, offline: Boolean = false): Long {
+        val baseDelay = if (appVisible.value) VISIBLE_LOOP_DELAY_MS else BACKGROUND_LOOP_DELAY_MS
         // Offline cycles are neutral: keep polling for connectivity at the base rate.
-        if (offline) return BASE_LOOP_DELAY_MS + Random.nextLong(0L, JITTER_MAX_MS)
-        if (failures <= 0) return BASE_LOOP_DELAY_MS
+        if (offline) return baseDelay + Random.nextLong(0L, JITTER_MAX_MS)
+        if (failures <= 0) return baseDelay
         val exponent = failures.coerceAtMost(MAX_BACKOFF_EXPONENT)
-        val backoff = (BASE_LOOP_DELAY_MS shl exponent).coerceAtMost(MAX_BACKOFF_DELAY_MS)
+        val backoff = (baseDelay shl exponent).coerceAtMost(MAX_BACKOFF_DELAY_MS)
         return backoff + Random.nextLong(0L, JITTER_MAX_MS)
     }
 
-    private suspend fun syncNuke(convex: ConvexSyncClient) {
-        var nuke = convex.getNuke()
+    private suspend fun syncNuke(convex: ConvexSyncClient, snapshot: ConvexSyncClient.Snapshot) {
+        var nuke = if (snapshot.nukeIncluded) snapshot.nuke else convex.getNuke()
         val localActive = settings.nukeActiveFlow.first()
         val localStartedAt = settings.nukeStartedAtFlow.first()
         if (localActive && (nuke == null || !nuke.optBoolean("isActive", false)) &&
@@ -762,13 +972,24 @@ class FocusSyncManager(
      * The usage pull is wrapped in its own try so a summary hiccup can never fail the
      * group sync or the cycle; on failure the previous cache is kept deliberately.
      */
-    private suspend fun syncTargetGroups(convex: ConvexSyncClient, startedAt: Long): GroupsSyncOutcome {
+    private suspend fun syncTargetGroups(
+        convex: ConvexSyncClient,
+        startedAt: Long,
+        snapshotGroupsState: GroupsState?,
+        snapshotUsageSummary: UsageSummary?,
+        snapshotUsageSummaryIncluded: Boolean,
+    ): GroupsSyncOutcome {
         var pulled = 0
         var pushed = 0
         val localGroups = targetGroups.currentGroups()
         val localUpdatedAt = targetGroups.getUpdatedAt()
 
-        val remote = convex.groupsState()
+        // New servers include the versioned group state in getSnapshot, saving a query.
+        // Keep the old endpoint as a compatibility fallback for deployments that omit it.
+        val remote = snapshotGroupsState ?: convex.groupsState()
+        if (snapshotGroupsState == null && remote != null) {
+            cachedSnapshot = cachedSnapshot?.copy(groupsState = remote)
+        }
         if (remote == null) {
             // Blank token, network error, HTTP failure or malformed payload: the server
             // state is unknown, so never push local data over it.
@@ -789,6 +1010,10 @@ class FocusSyncManager(
                         // Re-stamp locally so the pushed clock matches the server and the
                         // next cycle does not re-push the same list.
                         targetGroups.replaceAll(localGroups, writeTime)
+                        cacheGroupsState(GroupsState(
+                            groups = localGroups.map { it.toRemote() },
+                            updatedAt = result.updatedAt.takeIf { it > 0L } ?: writeTime,
+                        ))
                         pushed++
                     } else {
                         // Rejected (the server has a newer version) or the mutation failed.
@@ -801,12 +1026,14 @@ class FocusSyncManager(
                             )
                             latest.updatedAt > localUpdatedAt -> {
                                 targetGroups.replaceAll(latest.groups.map { it.toLocal() }, latest.updatedAt)
+                                cacheGroupsState(latest)
                                 pulled++
                             }
                             latest.updatedAt == localUpdatedAt &&
                                 !groupsEquivalent(localGroups, latest.groups) -> {
                                 // Equal clocks but divergent content: server wins.
                                 targetGroups.replaceAll(latest.groups.map { it.toLocal() }, latest.updatedAt)
+                                cacheGroupsState(latest)
                                 pulled++
                             }
                             else -> android.util.Log.w(
@@ -827,8 +1054,10 @@ class FocusSyncManager(
             }
         }
 
-        try {
-            val summary = convex.getUsageSummary(fromDate = today(), toDate = today())
+        val summaryNow = System.currentTimeMillis()
+        if (summaryNow - lastUsageSummaryFetchAt >= usageSummaryIntervalMs()) try {
+            val summary = if (snapshotUsageSummaryIncluded) snapshotUsageSummary
+                else convex.getUsageSummary(fromDate = today(), toDate = today())
             if (summary != null) {
                 val byGroup = HashMap<String, Long>(summary.groups.size * 2)
                 for (group in summary.groups) {
@@ -840,12 +1069,21 @@ class FocusSyncManager(
                 }
                 _groupUsageTodaySeconds.value = byGroup
                 totalTrackedSecondsToday = summary.totalTrackedSeconds.coerceAtLeast(0L)
+                lastUsageSummaryFetchAt = summaryNow
+            } else if (snapshotUsageSummaryIncluded) {
+                // The bundled field was present but malformed/null: keep the previous
+                // enforcement cache and wait for the next scheduled refresh.
+                android.util.Log.w("FocusSyncManager", "bundled usage summary unavailable; keeping previous values")
             }
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             android.util.Log.w("FocusSyncManager", "group usage summary fetch failed", e)
         }
         return GroupsSyncOutcome(pulled, pushed)
+    }
+
+    private fun cacheGroupsState(groupsState: GroupsState) {
+        cachedSnapshot = cachedSnapshot?.copy(groupsState = groupsState)
     }
 
     /**
@@ -884,8 +1122,13 @@ class FocusSyncManager(
      * the previous catalog is kept — a failed fetch must never look like "no targets".
      * [ConvexSyncClient.listKnownTargets] already swallows non-cancellation failures.
      */
-    private suspend fun refreshKnownTargets(convex: ConvexSyncClient) {
-        val fetched = convex.listKnownTargets()
+    private suspend fun refreshKnownTargets(
+        convex: ConvexSyncClient,
+        snapshot: ConvexSyncClient.Snapshot,
+    ) {
+        val now = System.currentTimeMillis()
+        if (now - lastKnownTargetsFetchAt < KNOWN_TARGETS_INTERVAL_MS) return
+        val fetched = if (snapshot.knownTargetsIncluded) snapshot.knownTargets else convex.listKnownTargets()
         if (fetched == null) {
             android.util.Log.w("FocusSyncManager", "known-targets fetch unavailable; keeping the previous catalog")
             return
@@ -900,29 +1143,25 @@ class FocusSyncManager(
             index.putIfAbsent("$kind:$key", target)
         }
         knownTargetIndex = index
+        lastKnownTargetsFetchAt = now
     }
 
-    private suspend fun syncDeviceAndUsage(convex: ConvexSyncClient, updatedAt: Long) {
+    private suspend fun syncDeviceAndUsage(convex: ConvexSyncClient, updatedAt: Long): Int {
         val deviceId = getOrCreateDeviceId()
         val usageAccess = UsageTrackerHelper.hasUsageStatsPermission(appContext)
         val trackingStatus = if (usageAccess) "active" else "permission_required"
         val detail = if (usageAccess) null else "Android Usage Access is not granted"
         val deviceErrors = mutableListOf<String>()
-        if (!convex.heartbeatDevice(
-            deviceId = deviceId,
-            name = androidDeviceName(),
-            appVersion = appVersion(),
-            trackingStatus = trackingStatus,
-            statusDetail = detail,
-            lastSeen = updatedAt,
-        )) {
-            deviceErrors += "Could not register this device"
-            android.util.Log.w("FocusSyncManager", "heartbeat failed for $deviceId — continuing to usage upload")
-        }
+        val heartbeatKey = "heartbeat_at_${currentAccountId.orEmpty()}"
+        val lastHeartbeat = identityPrefs.getLong(heartbeatKey, 0L)
+        val heartbeatDue = updatedAt - lastHeartbeat >= HEARTBEAT_INTERVAL_MS
 
         if (!usageAccess) {
+            if (heartbeatDue && convex.heartbeatDevice(deviceId, androidDeviceName(), appVersion(), trackingStatus, detail, updatedAt)) {
+                identityPrefs.edit().putLong(heartbeatKey, updatedAt).apply()
+            } else if (heartbeatDue) deviceErrors += "Could not register this device"
             if (deviceErrors.isNotEmpty()) throw IllegalStateException(deviceErrors.joinToString("; "))
-            return
+            return 0
         }
         val usage = UsageStatsRepository.getTodaySummary(appContext, maxApps = 100)
         val buckets = usage.topApps.mapNotNull { entry ->
@@ -937,14 +1176,80 @@ class FocusSyncManager(
                 updatedAt = updatedAt,
             )
         }
-        if (buckets.isNotEmpty()) {
-            if (!convex.recordUsageBatch(deviceId, buckets)) {
+        // The counters are absolute and idempotent. Persist acknowledged values,
+        // so routine syncs and process restarts never resend unchanged app rows.
+        val usageKey = "usage_uploaded_${currentAccountId.orEmpty()}_${today()}"
+        val previous = try { JSONObject(identityPrefs.getString(usageKey, "{}") ?: "{}") }
+            catch (_: Exception) { JSONObject() }
+        val usageUploadAtKey = "usage_uploaded_at_${currentAccountId.orEmpty()}_${today()}"
+        val uploadedAtByTarget = try { JSONObject(identityPrefs.getString(usageUploadAtKey, "{}") ?: "{}") }
+            catch (_: Exception) { JSONObject() }
+        val expiredKey = "usage_expired_${currentAccountId.orEmpty()}_${today()}"
+        val expiredSkips = try { JSONObject(identityPrefs.getString(expiredKey, "{}") ?: "{}") }
+            catch (_: Exception) { JSONObject() }
+        // Keep routine app usage uploads at the old four-hour cadence. Targets that
+        // participate in an active Android block or an enabled merged daily cap need
+        // a bounded one-minute refresh while the app is visible, so cross-device
+        // enforcement does not wait four hours for those specific buckets.
+        val fastTargets = buildSet {
+            settings.getBlockedApps().filter { it.isBlocked }.forEach { add(it.packageName) }
+            targetGroups.currentGroups().filter {
+                it.limitEnabled && (it.dailyLimitMinutes ?: 0) > 0
+            }.flatMap { it.members }.filter { it.targetKind.equals("app", ignoreCase = true) }
+                .forEach { add(it.targetKey) }
+        }
+        val changed = buckets.filter { bucket ->
+            val lastUpload = uploadedAtByTarget.optLong(bucket.targetKey, 0L)
+            val cadence = if (isRapidPolicyRefreshActive() && bucket.targetKey in fastTargets) {
+                ACTIVE_TARGET_USAGE_INTERVAL_MS
+            } else BACKGROUND_TARGET_USAGE_INTERVAL_MS
+            bucket.trackedSeconds > previous.optLong(bucket.targetKey, -1L) &&
+                !expiredSkips.has(bucket.targetKey) &&
+                (lastUpload == 0L || updatedAt - lastUpload >= cadence)
+        }
+        var newlyExpired = 0
+        if (changed.isNotEmpty()) {
+            val heartbeat = if (heartbeatDue) DeviceHeartbeat(
+                androidDeviceName(), appVersion(), trackingStatus, detail, updatedAt,
+            ) else null
+            val upload = convex.recordUsageBatch(deviceId, changed, heartbeat)
+            if (!upload.success) {
                 deviceErrors += "Could not upload Android usage"
                 android.util.Log.w("FocusSyncManager", "usage batch upload failed for $deviceId")
+            } else {
+                val acceptedFrom = upload.oldestAcceptedDate ?: oldestAcceptedDate(updatedAt)
+                var expiredBuckets = if (upload.expired > 0) changed.filter { it.date < acceptedFrom } else emptyList()
+                if (upload.expired > 0 && expiredBuckets.isEmpty()) {
+                    expiredBuckets = changed.sortedBy { it.date }.take(upload.expired)
+                }
+                val expiredKeys = expiredBuckets.mapTo(HashSet()) { it.targetKey }
+                changed.filterNot { it.targetKey in expiredKeys }
+                    .forEach {
+                        previous.put(it.targetKey, it.trackedSeconds)
+                        uploadedAtByTarget.put(it.targetKey, updatedAt)
+                    }
+                for (bucket in expiredBuckets) expiredSkips.put(bucket.targetKey, true)
+                newlyExpired = expiredBuckets.size
+                val edit = identityPrefs.edit()
+                    .putString(usageKey, previous.toString())
+                    .putString(usageUploadAtKey, uploadedAtByTarget.toString())
+                    .putString(expiredKey, expiredSkips.toString())
+                if (heartbeatDue) edit.putLong(heartbeatKey, updatedAt)
+                edit.apply()
             }
+        } else if (heartbeatDue) {
+            if (convex.heartbeatDevice(deviceId, androidDeviceName(), appVersion(), trackingStatus, detail, updatedAt)) {
+                identityPrefs.edit().putLong(heartbeatKey, updatedAt).apply()
+            } else deviceErrors += "Could not register this device"
         }
         if (deviceErrors.isNotEmpty()) throw IllegalStateException(deviceErrors.joinToString("; "))
+        return newlyExpired
     }
+
+    private fun oldestAcceptedDate(nowMs: Long): String =
+        java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(
+            java.util.Date(nowMs - 31L * 24L * 60L * 60L * 1000L),
+        )
 
     private fun getOrCreateDeviceId(): String {
         val androidId = Settings.Secure.getString(appContext.contentResolver, Settings.Secure.ANDROID_ID)
@@ -1004,13 +1309,26 @@ class FocusSyncManager(
     private fun today(): String =
         java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date())
 
+    private fun usageSummaryIntervalMs(): Long =
+        if (isRapidPolicyRefreshActive()) VISIBLE_USAGE_SUMMARY_INTERVAL_MS else BACKGROUND_USAGE_SUMMARY_INTERVAL_MS
+
     companion object {
         /** Max frequency for the (heavier) getDashboard prefs fallback fetch. */
-        private const val PREFS_FETCH_INTERVAL_MS = 5 * 60 * 1000L
+        private const val PREFS_FETCH_INTERVAL_MS = 4 * 60 * 60 * 1000L
 
         /** Auto-sync loop pacing and failure backoff (audit item 7). */
-        private const val BASE_LOOP_DELAY_MS = 30_000L
-        private const val MAX_BACKOFF_DELAY_MS = 15 * 60 * 1000L
+        private const val BACKGROUND_LOOP_DELAY_MS = 4 * 60 * 60 * 1000L
+        private const val VISIBLE_LOOP_DELAY_MS = 60 * 1000L
+        private const val HEARTBEAT_INTERVAL_MS = 4 * 60 * 60 * 1000L
+        private const val VISIBLE_USAGE_SUMMARY_INTERVAL_MS = 60 * 1000L
+        private const val BACKGROUND_USAGE_SUMMARY_INTERVAL_MS = 4 * 60 * 60 * 1000L
+        private const val POLICY_SYNC_DEBOUNCE_MS = 750L
+        private const val POLICY_REFRESH_THROTTLE_MS = 60 * 1000L
+        private const val ACTIVE_POLICY_WINDOW_MS = 70 * 1000L
+        private const val ACTIVE_TARGET_USAGE_INTERVAL_MS = 60 * 1000L
+        private const val BACKGROUND_TARGET_USAGE_INTERVAL_MS = 4 * 60 * 60 * 1000L
+        private const val KNOWN_TARGETS_INTERVAL_MS = 4 * 60 * 60 * 1000L
+        private const val MAX_BACKOFF_DELAY_MS = 24 * 60 * 60 * 1000L
         private const val MAX_BACKOFF_EXPONENT = 6
         private const val JITTER_MAX_MS = 5_000L
 

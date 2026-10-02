@@ -573,6 +573,25 @@ button {
   transform: translateX(18px);
   background: var(--fl-on-primary);
 }
+/* Permanent (Permalock) rows: visually locked, no removal affordance. */
+.permanent-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  color: var(--fl-on-error-container);
+  background: var(--fl-error-container);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.switch.permanent {
+  cursor: not-allowed;
+  background: var(--fl-error-container);
+}
+.switch.permanent span {
+  background: var(--fl-on-error-container);
+}
 .settings-group {
   margin-bottom: 16px;
 }
@@ -1474,6 +1493,18 @@ input[type="range"] {
   color: var(--fl-on-surface-variant);
   font-size: 12px;
   line-height: 1.5;
+}
+.account-note p.sync-window-warning,
+.sync-window-warning {
+  margin-top: 8px;
+  color: var(--fl-warning);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.history-loading {
+  margin: 12px 0;
+  color: var(--fl-on-surface-variant);
+  font-size: 12px;
 }
 .account-features {
   display: grid;

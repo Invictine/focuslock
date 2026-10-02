@@ -22,7 +22,7 @@ import {
   type UsageSummary,
   type UserPrefs,
 } from "./sync";
-import { accountUsage, acknowledgeSync, enqueueSync, peekSync } from "./offlineQueue";
+import { accountUsage, acknowledgeSync, enqueueSync, peekSync, unacknowledgedUsage } from "./offlineQueue";
 import { accountClient, flushMutations, useDurableMutation, useMutationReplay } from "./durableSync";
 import { useFocusAuth } from "./auth";
 import FrogCard from "./FrogCard";
@@ -40,7 +40,7 @@ import "./styles.css";
 import "./loading.css";
 
 const api: any = convexApi;
-type Tab = "focus" | "boundaries" | "settings" | "account";
+type Tab = "focus" | "boundaries" | "permalock" | "settings" | "account";
 type AppItem = {
   packageName: string;
   appName: string;
@@ -128,6 +128,7 @@ function Icon({
     | "play"
     | "sync"
     | "lock"
+    | "shield"
     | "plus";
   size?: number;
 }) {
@@ -212,6 +213,12 @@ function Icon({
       <>
         <rect x="5" y="10" width="14" height="11" rx="2" />
         <path d="M8 10V7a4 4 0 0 1 8 0v3" />
+      </>
+    ),
+    shield: (
+      <>
+        <path d="M12 3l7 3v5c0 4.4-2.9 7.4-7 9-4.1-1.6-7-4.6-7-9V6Z" />
+        <path d="m9 12 2 2 4-4" />
       </>
     ),
     plus: <path d="M12 5v14M5 12h14" />,
@@ -796,12 +803,18 @@ export function evaluateBlockedTargets({
   summary,
   usage,
   frog,
+  permanentAppIds,
 }: {
   dashboard: any;
   groups: TargetGroup[] | undefined;
   summary: UsageSummary | undefined;
   usage: NativeUsage[];
   frog?: FrogLockContext;
+  // Device-local permanent blocks (Rust `permanent_targets`). At least as
+  // authoritative as the frog lock: they are re-added after every removal pass
+  // and stamped with the "permanent" reason, so the JS payload mirrors the
+  // merge Rust applies to every `set_blocked_targets` call.
+  permanentAppIds?: string[];
 }): {
   targets: { appIds: string[]; domains: string[] };
   reasons: Record<string, string>;
@@ -1003,11 +1016,25 @@ export function evaluateBlockedTargets({
     }
   }
 
-  // Reasons for the final union: "frog" for lock-injected targets, "limit" for
-  // exhausted daily limits, "blocked" otherwise. Keys mirror the target arrays.
+  // Reasons for the final union: "permanent" for device-local permanent blocks
+  // (re-added here so the frog allowlist can never remove one), "frog" for
+  // lock-injected targets, "limit" for exhausted daily limits, "blocked"
+  // otherwise. Keys mirror the target arrays.
+  const permanentApps = new Set(
+    (permanentAppIds || [])
+      .map((key) => targetKeyFor("app", key))
+      .filter(Boolean),
+  );
+  for (const key of permanentApps) appIds.add(key);
   const reasons: Record<string, string> = {};
   for (const key of appIds) {
-    reasons[key] = frogApps.has(key) ? "frog" : limitApps.has(key) ? "limit" : "blocked";
+    reasons[key] = permanentApps.has(key)
+      ? "permanent"
+      : frogApps.has(key)
+        ? "frog"
+        : limitApps.has(key)
+          ? "limit"
+          : "blocked";
   }
   for (const key of domains) {
     reasons[key] = frogDomains.has(key) ? "frog" : limitDomains.has(key) ? "limit" : "blocked";
@@ -1225,7 +1252,34 @@ function DesktopApp() {
   useMutationReplay();
   const [tab, setTab] = useState<Tab>("focus");
   const { snapshot, status, error: trackerError, refresh } = useNativeTracking();
-  const dashboard: any = useQuery(syncApi.getDashboard, {});
+  const configuration: any = useQuery(syncApi.getConfiguration, EMPTY_ARGS);
+  const nativeState: any = useQuery(syncApi.getState, EMPTY_ARGS);
+  const history: any = useQuery(syncApi.getHistory, tab === "focus" ? EMPTY_ARGS : "skip");
+  // Keep the large configuration subscription separate from frequently changing
+  // credit state. History is only watched while its Focus page is visible.
+  const dashboard: any = useMemo(() => configuration && nativeState !== undefined ? {
+    ...configuration,
+    state: nativeState?.state ?? null,
+    records: history?.records ?? [],
+    sessions: history?.sessions ?? [],
+  } : undefined, [configuration, nativeState, history]);
+  // Device-local permanent blocks (Rust `permanent_targets`). Root state so the
+  // Permalock page and the Boundaries page render the same enforcement truth:
+  // Rust unions this list back into every set_blocked_targets payload, so the
+  // UI must never present a permanent app as removable.
+  const [permanentTargets, setPermanentTargets] = useState<string[]>([]);
+  const refreshPermanentTargets = useCallback(async () => {
+    if (!tauriAvailable()) return;
+    try {
+      const ids = await invoke<string[]>("get_permanent_targets");
+      setPermanentTargets(Array.isArray(ids) ? ids : []);
+    } catch {
+      // Tracker unavailable (web preview); enforcement still lives in Rust.
+    }
+  }, []);
+  useEffect(() => {
+    void refreshPermanentTargets();
+  }, [refreshPermanentTargets]);
   const activateNuke = useMutation(api.nuke.activate);
   const strictEndsAt = Number(dashboard?.prefs?.strictEndsAt || 0);
   const strictActive = Boolean(dashboard?.prefs?.strictMode) &&
@@ -1280,7 +1334,7 @@ function DesktopApp() {
       toDate: todayKey,
     };
   }, [usageRange, todayKey]);
-  const usage: any = useQuery(syncApi.getUsageSummary, usageArgs);
+  const usage: any = useQuery(syncApi.getUsageSummary, tab === "focus" ? usageArgs : "skip");
   // Enforcement must NOT follow the range selector: limits are daily, so this
   // stays today-scoped (Convex dedupes it with the "today" range above).
   const todayUsageArgs = useMemo(
@@ -1301,11 +1355,12 @@ function DesktopApp() {
   // deployments / while signed out — the picker falls back to local sources.
   const knownTargets: KnownTarget[] | undefined = useQuery(
     syncApi.listKnownTargets,
-    EMPTY_ARGS,
+    tab === "focus" || tab === "boundaries" ? EMPTY_ARGS : "skip",
   ) as any;
-  const devices: any[] | undefined = useQuery(syncApi.listDevices, {});
-  const heartbeat = useMutation(syncApi.heartbeat);
-  const recordUsage = useMutation(syncApi.recordUsageBatch);
+  const devices: any[] | undefined = useQuery(
+    syncApi.listDevices,
+    tab === "focus" || tab === "account" ? EMPTY_ARGS : "skip",
+  );
   const accountKey = auth.user?.id || null;
   const { workRatio, taskBonus, setWorkRatio, setTaskBonus } =
     useSyncedPrefs(dashboard, accountKey);
@@ -1322,8 +1377,10 @@ function DesktopApp() {
     [frog.state.locked, frog.state.frog],
   );
   const deviceId = snapshot?.device.id || getStoredDeviceId();
-  const lastUploadRef = useRef(0);
+  const lastHeartbeatRef = useRef(0);
+  const lastUsageUploadRef = useRef(0);
   const usageJsonRef = useRef<string | null>(null);
+  const uploadOwnerRef = useRef("");
   const uploadInFlightRef = useRef(false);
   // Refs mirror the latest props for the heartbeat interval below (and avoid
   // re-subscribing the effect on every tracker sample).
@@ -1333,7 +1390,8 @@ function DesktopApp() {
   trackerErrorRef.current = trackerError;
   const [lastSyncAt, setLastSyncAt] = useState(0);
   const [syncError, setSyncError] = useState<string | null>(null);
-  const pushRef = useRef<(() => Promise<void>) | null>(null);
+  const [syncWarning, setSyncWarning] = useState<string | null>(null);
+  const pushRef = useRef<((force?: boolean) => Promise<void>) | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [boundariesLock, setBoundariesLock] = useLocalFlag(
     "focuslock.boundariesLock",
@@ -1351,13 +1409,37 @@ function DesktopApp() {
   useEffect(() => {
     if (!tauriAvailable() || !deviceId || !accountKey) return;
     let cancelled = false;
-    const push = async () => {
+    if (uploadOwnerRef.current !== `${accountKey}:${deviceId}`) {
+      uploadOwnerRef.current = `${accountKey}:${deviceId}`;
+      lastHeartbeatRef.current = 0;
+      lastUsageUploadRef.current = 0;
+      usageJsonRef.current = null;
+      setSyncWarning(null);
+    }
+    const push = async (force = false) => {
       const snap = snapshotRef.current;
       if (!snap || uploadInFlightRef.current) return;
-      const usageJson = JSON.stringify(snap.usage);
+      const now = Date.now();
+      // Device and display names can change without changing any tracked
+      // seconds. Only usage identity and counters should trigger an upload.
+      const usageJson = JSON.stringify(snap.usage.map((entry) => {
+        const { targetKind, targetKey } = usageTargetFor(entry);
+        return [entry.date, targetKind, targetKey, entry.activeSeconds];
+      }));
       const usageChanged = usageJson !== usageJsonRef.current;
-      if (!usageChanged && Date.now() - lastUploadRef.current < 25000) return;
-      const currentBuckets: UsageBucket[] = usageChanged
+      const uploadUsage = force || (usageChanged && now - lastUsageUploadRef.current >= 4 * 60 * 60_000);
+      const sendHeartbeat = force || now - lastHeartbeatRef.current >= 4 * 60 * 60_000;
+      // A failed upload remains in the durable queue and is retried on the
+      // next tick, even if no fresh heartbeat or usage is due.
+      let queued;
+      try {
+        queued = peekSync(accountKey, deviceId);
+      } catch (error) {
+        if (!cancelled) setSyncError(`Could not read the local sync queue: ${String(error)}`);
+        return;
+      }
+      if (!uploadUsage && !sendHeartbeat && !queued.heartbeat && !queued.usage.length) return;
+      const currentBuckets: UsageBucket[] = uploadUsage
         ? snap.usage.map((u) => {
             // Shared with limit enforcement (usageTargetFor) so local keys can
             // never drift from the keys Convex stores — both lowercased there.
@@ -1369,21 +1451,30 @@ function DesktopApp() {
               targetLabel: u.browserDomain || u.appName,
               category: u.browserDomain ? "Web" : "Windows",
               trackedSeconds: u.activeSeconds,
-              updatedAt: Date.now(),
+              updatedAt: now,
             };
           })
         : [];
       let pending;
       try {
-        enqueueSync(accountKey, deviceId, {
-        deviceId,
-        name: snap.device.name,
-        platform: "windows",
-        appVersion: "1.0.0",
-        trackingStatus: snap.running ? "active" : "paused",
-        statusDetail: trackerErrorRef.current || undefined,
-        lastSeen: Date.now(),
-        }, accountUsage(accountKey, deviceId, currentBuckets));
+        if (sendHeartbeat || uploadUsage) {
+          // The queue requires a heartbeat alongside usage so both writes can
+          // be acknowledged together. Usage-only uploads still carry one.
+          enqueueSync(accountKey, deviceId, {
+            deviceId,
+            name: snap.device.name,
+            platform: "windows",
+            appVersion: "1.0.0",
+            trackingStatus: snap.running ? "active" : "paused",
+            statusDetail: trackerErrorRef.current || undefined,
+            lastSeen: now,
+          }, uploadUsage
+            ? unacknowledgedUsage(
+                accountUsage(accountKey, deviceId, currentBuckets),
+                queued.acknowledged,
+              )
+            : []);
+        }
         pending = peekSync(accountKey, deviceId);
       } catch (error) {
         if (!cancelled) setSyncError(`Could not save the local sync queue: ${String(error)}`);
@@ -1395,15 +1486,36 @@ function DesktopApp() {
         const token = await auth.getSyncToken();
         if (!token) throw new Error("Sign in again to sync");
         const pinnedClient = accountClient(accountKey, token);
-        await pinnedClient.mutation(syncApi.heartbeat, pending.heartbeat);
-        for (let offset = 0; offset < pending.usage.length; offset += 500) {
-          await pinnedClient.mutation(syncApi.recordUsageBatch, { deviceId, buckets: pending.usage.slice(offset, offset + 500) });
+        let expiredUsage = 0;
+        let oldestAcceptedDate = "";
+        if (pending.usage.length) {
+          for (let offset = 0; offset < pending.usage.length; offset += 500) {
+            const { deviceId: _deviceId, ...heartbeat } = pending.heartbeat;
+            const result: any = await pinnedClient.mutation(syncApi.recordUsageBatch, {
+              deviceId,
+              buckets: pending.usage.slice(offset, offset + 500),
+              ...(offset === 0 ? { heartbeat } : {}),
+            });
+            expiredUsage += Math.max(0, Math.floor(Number(result?.expired) || 0));
+            if (typeof result?.oldestAcceptedDate === "string") oldestAcceptedDate = result.oldestAcceptedDate;
+          }
+        } else {
+          await pinnedClient.mutation(syncApi.heartbeat, pending.heartbeat);
         }
         acknowledgeSync(accountKey, deviceId, pending);
+        if (!cancelled && expiredUsage > 0) {
+          const windowLabel = oldestAcceptedDate
+            ? `history window (before ${oldestAcceptedDate})`
+            : "31-day history window";
+          setSyncWarning(`Older usage outside the ${windowLabel} stays on this device and was not uploaded.`);
+        }
         // Advance both clocks only after Convex accepts the upload. A failed
         // request must be retried with the same cumulative usage snapshot.
-        usageJsonRef.current = usageJson;
-        lastUploadRef.current = Date.now();
+        if (uploadUsage) {
+          usageJsonRef.current = usageJson;
+          lastUsageUploadRef.current = Date.now();
+        }
+        lastHeartbeatRef.current = Date.now();
         if (!cancelled) { setLastSyncAt(Date.now()); setSyncError(null); }
       } catch (err) {
         if (!cancelled) setSyncError(`Upload pending: ${String(err)}`);
@@ -1414,15 +1526,18 @@ function DesktopApp() {
     };
     pushRef.current = push;
     void push();
-    // Fallback tick so heartbeats continue while the tracker is paused and
-    // snapshots stop changing.
-    const id = window.setInterval(push, 25000);
+    // Upload cumulative usage and heartbeat at most every four hours. Initial
+    // sign-in, explicit refresh, reconnect, and durable edits still push at once.
+    const id = window.setInterval(push, 4 * 60 * 60_000);
+    const onOnline = () => { void push(); };
+    window.addEventListener("online", onOnline);
     return () => {
       cancelled = true;
       if (pushRef.current === push) pushRef.current = null;
       window.clearInterval(id);
+      window.removeEventListener("online", onOnline);
     };
-  }, [accountKey, deviceId, heartbeat, recordUsage, auth.getSyncToken]);
+  }, [accountKey, deviceId, auth.getSyncToken]);
   // Blocked-targets payload: union of dashboard blocks + exhausted daily limits
   // + (while the frog lock is on) the whole Boundaries catalog minus the frog
   // allowlist. Recomputed on dashboard/summary/snapshot/frog changes, but invoked
@@ -1469,6 +1584,7 @@ function DesktopApp() {
       summary: todayUsage,
       usage: snapshotRef.current?.usage || EMPTY_USAGE,
       frog: frogLock,
+      permanentAppIds: permanentTargets,
     });
     if (exceeded.length) {
       console.info("[focuslock] daily limit reached; blocking", exceeded);
@@ -1478,7 +1594,7 @@ function DesktopApp() {
       window.clearTimeout(blockedTimerRef.current);
     blockedTimerRef.current = window.setTimeout(flushBlockedTargets, 350);
     // Latest-wins: a re-run replaces the pending timer instead of cleaning up.
-  }, [dashboard, groups, todayUsage, snapshot, frogLock, flushBlockedTargets]);
+  }, [dashboard, groups, todayUsage, snapshot, frogLock, permanentTargets, flushBlockedTargets]);
   useEffect(
     () => () => {
       if (blockedTimerRef.current !== null) {
@@ -1511,7 +1627,6 @@ function DesktopApp() {
   // Keep the progress state until the real requests finish.
   const syncNow = useCallback(async () => {
     setSyncing(true);
-    lastUploadRef.current = 0;
     try {
       // Force mode: even if the snapshot payload is unchanged, re-apply it so
       // the upload effect re-runs with the cleared throttle.
@@ -1521,7 +1636,7 @@ function DesktopApp() {
       if (!token) throw new Error("Sign in again to sync.");
       await flushMutations(accountKey, token);
       await accountClient(accountKey, token).query(api.focus.getAccount, {});
-      await pushRef.current?.();
+      await pushRef.current?.(true);
     } catch (error) {
       setSyncError(String(error));
     } finally {
@@ -1561,6 +1676,12 @@ function DesktopApp() {
             onClick={() => setTab("boundaries")}
           />
           <NavButton
+            active={tab === "permalock"}
+            icon="shield"
+            label="Permalock"
+            onClick={() => setTab("permalock")}
+          />
+          <NavButton
             active={tab === "settings"}
             icon="settings"
             label="Settings"
@@ -1597,6 +1718,8 @@ function DesktopApp() {
             dashboard={dashboard}
             usage={usage}
             devices={devices || EMPTY_DEVICES}
+            historyLoading={history === undefined}
+            historyWarning={syncWarning}
             snapshot={snapshot}
             status={status}
             trackerError={trackerError}
@@ -1616,9 +1739,17 @@ function DesktopApp() {
             boundariesLock={boundariesLock}
             knownTargets={knownTargets}
             frog={frogLock}
+            permanentTargets={permanentTargets}
             initialDraftMembers={pendingMerge?.members || null}
             mergeSourceLabel={pendingMerge?.sourceLabel || null}
             onInitialDraftConsumed={clearPendingMerge}
+          />
+        ) : tab === "permalock" ? (
+          <PermalockPage
+            dashboard={dashboard}
+            snapshot={snapshot}
+            permanentTargets={permanentTargets}
+            refreshPermanentTargets={refreshPermanentTargets}
           />
         ) : tab === "settings" ? (
           <SettingsPage
@@ -1646,6 +1777,7 @@ function DesktopApp() {
             onSyncNow={syncNow}
             trackerError={trackerError}
             syncError={syncError}
+            syncWarning={syncWarning}
           />
         )}
       </main>
@@ -1678,6 +1810,262 @@ function NavButton({
   );
 }
 
+// Permalock: the device-local list of permanently blocked apps. There is no
+// remove control anywhere on this page, mirroring Rust (`add_permanent_targets`
+// has no inverse) and Android. Candidates reuse the Boundaries row sources
+// (synced apps union observed apps), excluding protected shell executables that
+// Rust rejects anyway (`PROTECTED_APP_IDS` + FocusLock itself).
+const PermalockPage = memo(function PermalockPage({
+  dashboard,
+  snapshot,
+  permanentTargets,
+  refreshPermanentTargets,
+}: any) {
+  const [selected, setSelected] = useState<Set<string>>(() => new Set<string>());
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const permanent = useMemo(
+    () => [...(permanentTargets || [])].sort(),
+    [permanentTargets],
+  );
+  const permanentSet = useMemo(() => new Set(permanent), [permanent]);
+
+  // Display-name lookup: synced dashboard names win, observed names fill gaps,
+  // and a permanent id with no metadata at all falls back to the raw id.
+  const nameByKey = useMemo(() => {
+    const map = new Map<string, string>();
+    (dashboard?.apps || []).forEach((app: AppItem) => {
+      const key = targetKeyFor("app", app.packageName);
+      if (key) map.set(key, app.appName);
+    });
+    (snapshot?.usage || []).forEach((entry: NativeUsage) => {
+      const key = targetKeyFor("app", entry.appId);
+      if (key && !map.has(key)) map.set(key, entry.appName);
+    });
+    return map;
+  }, [dashboard, snapshot]);
+
+  const candidates = useMemo(() => {
+    const rows = new Map<string, { key: string; name: string; detail: string }>();
+    (dashboard?.apps || []).forEach((app: AppItem) => {
+      const key = targetKeyFor("app", app.packageName);
+      if (!key || !isFrogBlockableApp(key, app.category)) return;
+      rows.set(key, { key, name: app.appName, detail: app.category || "Apps" });
+    });
+    (snapshot?.usage || []).forEach((entry: NativeUsage) => {
+      if (entry.browserDomain) return;
+      const key = targetKeyFor("app", entry.appId);
+      if (!key || !isFrogBlockableApp(key, "Windows")) return;
+      if (!rows.has(key)) {
+        rows.set(key, { key, name: entry.appName, detail: "Observed on this PC" });
+      }
+    });
+    return [...rows.values()]
+      .filter((row) => !permanentSet.has(row.key))
+      .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+  }, [dashboard, snapshot, permanentSet]);
+
+  const selectedNames = useMemo(
+    () =>
+      [...selected]
+        .map((key) => nameByKey.get(key) || key)
+        .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase())),
+    [selected, nameByKey],
+  );
+
+  function toggleCandidate(key: string) {
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  async function confirmPermanent() {
+    const ids = [...selected];
+    if (!ids.length || busy) return;
+    setBusy(true);
+    setNotice(null);
+    try {
+      const result = await invoke<{
+        added: string[];
+        rejected: { id: string; reason: string }[];
+      }>("add_permanent_targets", { appIds: ids });
+      await refreshPermanentTargets?.();
+      setSelected(new Set());
+      setConfirming(false);
+      const added = result?.added?.length || 0;
+      const rejected = result?.rejected || [];
+      if (rejected.length) {
+        const detail = rejected
+          .map(
+            (entry) =>
+              `${entry.id} (${
+                entry.reason === "protected" ? "protected system app" : entry.reason
+              })`,
+          )
+          .join(", ");
+        setNotice(
+          `${added ? `${added} app${added === 1 ? "" : "s"} blocked permanently. ` : ""}Not added: ${detail}.`,
+        );
+      } else {
+        setNotice(added === 1 ? "App blocked permanently." : `${added} apps blocked permanently.`);
+      }
+    } catch (error) {
+      setNotice(`Couldn't add permanent blocks: ${String(error)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="page">
+      <header className="page-header">
+        <div>
+          <p className="eyebrow">Permanent</p>
+          <h1>Permalock</h1>
+          <p>
+            Apps blocked here stay blocked. No timers, no credits, no emergency passes, and no
+            in-app removal.
+          </p>
+        </div>
+      </header>
+
+      {notice && <p className="boundary-notice">{notice}</p>}
+
+      <section className="settings-group group-section">
+        <div className="section-heading">
+          <div>
+            <p className="section-label">On this device</p>
+            <h2>Permanently blocked</h2>
+          </div>
+          <span className="permanent-badge">{permanent.length} permanent</span>
+        </div>
+        {permanent.length ? (
+          <div className="boundary-list">
+            {permanent.map((id) => {
+              const name = nameByKey.get(id) || id;
+              return (
+                <article className="boundary-row" key={id}>
+                  <span className="letter-icon">{name.charAt(0).toUpperCase()}</span>
+                  <div>
+                    <strong>{name}</strong>
+                    <p>
+                      <span className="category-label">{id}</span> · Device-local · No expiry
+                    </p>
+                  </div>
+                  <span className="permanent-badge">Permanent</span>
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          <EmptyState
+            title="Nothing is permanent yet"
+            body="Choose apps below to block them permanently. Permanent blocks cannot be removed in FocusLock."
+          />
+        )}
+      </section>
+
+      <section className="settings-group">
+        <div className="section-heading">
+          <div>
+            <p className="section-label">Add permanently</p>
+            <h2>Choose apps</h2>
+          </div>
+          <button
+            type="button"
+            className="primary-button"
+            disabled={!selected.size || busy}
+            onClick={() => setConfirming(true)}
+          >
+            Block permanently
+          </button>
+        </div>
+        <p className="group-hint">
+          Permanently blocked apps stay blocked indefinitely. FocusLock will not offer credits,
+          emergency passes, grace time, or an in-app removal control for them.
+        </p>
+        {candidates.length ? (
+          <div className="boundary-list">
+            {candidates.map((row) => {
+              const picked = selected.has(row.key);
+              return (
+                <article className="boundary-row selecting" key={row.key}>
+                  <button
+                    type="button"
+                    className={`pick-box ${picked ? "selected" : ""}`}
+                    aria-pressed={picked}
+                    aria-label={`Select ${row.name} for permanent blocking`}
+                    onClick={() => toggleCandidate(row.key)}
+                  >
+                    <Icon name="check" size={14} />
+                  </button>
+                  <span className="letter-icon">{row.name.charAt(0).toUpperCase()}</span>
+                  <div>
+                    <strong>{row.name}</strong>
+                    <p>
+                      <span className="category-label">{row.detail}</span> · {row.key}
+                    </p>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          <EmptyState
+            title="No apps to choose"
+            body="Every eligible app is already permanent, or only protected system apps have been observed."
+          />
+        )}
+      </section>
+
+      {confirming && (
+        <div
+          className="boundary-dialog-backdrop"
+          role="presentation"
+          onClick={() => !busy && setConfirming(false)}
+        >
+          <div
+            className="boundary-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Confirm permanent block"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <h2>Permanently block {selectedNames.join(", ")}</h2>
+            <p>
+              This app will stay blocked indefinitely. FocusLock will not offer credits, emergency
+              passes, grace time, or an in-app removal control for it.
+            </p>
+            <div className="dialog-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={busy}
+                onClick={() => setConfirming(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="danger-button"
+                disabled={busy}
+                onClick={() => void confirmPermanent()}
+              >
+                {busy ? "Blocking…" : "Block permanently"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+});
+
 // Memoized: all props are stable between tracker polls (snapshot/status are
 // change-detected upstream, devices uses a stable EMPTY fallback), so
 // unrelated DesktopApp state updates skip re-rendering the whole page.
@@ -1685,6 +2073,8 @@ const FocusPage = memo(function FocusPage({
   dashboard,
   usage,
   devices,
+  historyLoading,
+  historyWarning,
   snapshot,
   status,
   trackerError,
@@ -1977,7 +2367,10 @@ const FocusPage = memo(function FocusPage({
           </div>
           {records.length > 0 && <p>{records.length} total</p>}
         </div>
-        {records.length ? (
+        {historyWarning && <p className="sync-window-warning">{historyWarning}</p>}
+        {historyLoading ? (
+          <p className="history-loading">Loading synced work history…</p>
+        ) : records.length ? (
           <div className="activity-list">
             {visibleRecords.map((r, i) => (
               <div className="activity-row" key={r.recordId || i}>
@@ -2732,6 +3125,9 @@ type BoundaryAppRow = {
   // the Windows tracker with no tracked time today; it is hidden unless the
   // System toggle is on or the app is blocked, mirroring Android's system filter.
   system: boolean;
+  // Device-local permanent block (Rust `permanent_targets`): always blocked and
+  // never removable from this page.
+  permanent: boolean;
 };
 
 const BOUNDARY_DOMAIN_REGEX =
@@ -2919,6 +3315,7 @@ function BoundariesPage({
   boundariesLock = false,
   knownTargets,
   frog,
+  permanentTargets = [],
   initialDraftMembers,
   mergeSourceLabel,
   onInitialDraftConsumed,
@@ -3165,6 +3562,16 @@ function BoundariesPage({
   // stay stable while tracking is idle.
   const nativeUsage: NativeUsage[] = snapshot?.usage || EMPTY_USAGE;
 
+  const permanentSet = useMemo(
+    () =>
+      new Set(
+        (permanentTargets || [])
+          .map((id: string) => targetKeyFor("app", id))
+          .filter(Boolean),
+      ),
+    [permanentTargets],
+  );
+
   const appRows: BoundaryAppRow[] = useMemo(() => {
     const today = localDate();
     const minutes = new Map<string, number>();
@@ -3188,6 +3595,7 @@ function BoundariesPage({
           source: "windows",
           native: true,
           system: false,
+          permanent: false,
         });
       });
     // 2. Synced selections from Android/Convex override observation metadata.
@@ -3202,6 +3610,7 @@ function BoundariesPage({
         source: existing ? "windows" : "android",
         native: Boolean(existing),
         system: false,
+        permanent: false,
       });
     });
     // Anything seen only once on Windows with no time today is system/idle noise.
@@ -3209,10 +3618,18 @@ function BoundariesPage({
     byKey.forEach((row) => {
       if (!known.has(row.key) && row.minutes === 0) row.system = true;
     });
-    return [...byKey.values()].sort((a, b) =>
+    const rows = [...byKey.values()];
+    rows.forEach((row) => {
+      if (!permanentSet.has(row.key)) return;
+      // Rust unions permanent ids back into every payload, so the row must
+      // never render as removable: that would contradict enforcement.
+      row.isBlocked = true;
+      row.permanent = true;
+    });
+    return rows.sort((a, b) =>
       a.name.toLowerCase().localeCompare(b.name.toLowerCase()),
     );
-  }, [apps, nativeUsage]);
+  }, [apps, nativeUsage, permanentSet]);
 
   const siteMinutes = useMemo(() => {
     const today = localDate();
@@ -3337,6 +3754,7 @@ function BoundariesPage({
       summary: todayUsage,
       usage: snapshot?.usage || EMPTY_USAGE,
       frog,
+      permanentAppIds: permanentTargets,
     });
     await invoke("set_blocked_targets", { targets, reasons }).catch(() => undefined);
   }
@@ -3382,6 +3800,12 @@ function BoundariesPage({
   }
 
   async function toggleApp(row: BoundaryAppRow) {
+    if (row.permanent) {
+      // Rust would union the id straight back in; never pretend it can be
+      // removed. Mirrors Android's removal feedback.
+      setNotice("Permanent blocks cannot be removed in FocusLock.");
+      return;
+    }
     if (row.isBlocked && !guardUnlock(true)) return;
     const toggled = { ...row, isBlocked: !row.isBlocked };
     const nextApps = appRows.map((item) => (item.key === row.key ? toggled : item));
@@ -3435,9 +3859,15 @@ function BoundariesPage({
 
   async function unblockAllApps() {
     if (!guardUnlock(true)) return;
-    const targets = appRows.filter((row) => row.isBlocked);
+    // Permanent rows stay blocked: the envelope save would otherwise flip
+    // `isBlocked` locally until Rust re-merged the id on the next flush.
+    const targets = appRows.filter((row) => row.isBlocked && !row.permanent);
     if (!targets.length) {
-      setNotice("No blocked apps to unblock.");
+      setNotice(
+        appRows.some((row) => row.permanent)
+          ? "Permanent blocks cannot be removed in FocusLock."
+          : "No blocked apps to unblock.",
+      );
       return;
     }
     const toggled = targets.map((row) => ({ ...row, isBlocked: false }));
@@ -3868,11 +4298,22 @@ function BoundariesPage({
                       : "Synced from Android"}
                   </p>
                 </div>
+                {row.permanent && <span className="permanent-badge">Permanent</span>}
                 <button
-                  className={`switch ${row.isBlocked ? "on" : ""}`}
+                  className={`switch ${row.isBlocked ? "on" : ""} ${row.permanent ? "permanent" : ""}`}
                   disabled={busy}
+                  aria-disabled={row.permanent || undefined}
+                  title={
+                    row.permanent
+                      ? "Permanent blocks cannot be removed in FocusLock."
+                      : undefined
+                  }
                   onClick={() => toggleApp(row)}
-                  aria-label={`${row.isBlocked ? "Allow" : "Block"} ${row.name}`}
+                  aria-label={
+                    row.permanent
+                      ? `${row.name} is permanently blocked`
+                      : `${row.isBlocked ? "Allow" : "Block"} ${row.name}`
+                  }
                 >
                   <span />
                 </button>
@@ -4262,6 +4703,7 @@ function SettingsPage({
   onSyncNow,
 }: any) {
   const [busy, setBusy] = useState(false);
+  const [trackerNotice, setTrackerNotice] = useState<string | null>(null);
   const auth = useFocusAuth();
   const running = Boolean(snapshot?.running);
   const enforcementActive = Boolean(
@@ -4273,7 +4715,7 @@ function SettingsPage({
   );
   const idleSeconds = snapshot?.config?.idleThresholdSeconds || 60;
   const syncAgeMs = lastSyncAt ? Date.now() - lastSyncAt : null;
-  const syncFresh = syncAgeMs !== null && syncAgeMs < 90_000;
+  const syncFresh = syncAgeMs !== null && syncAgeMs < 4 * 60 * 60_000 + 5 * 60_000;
   const syncStatusText = !auth.user
     ? "Signed out — sign in to upload usage"
     : syncing
@@ -4281,15 +4723,25 @@ function SettingsPage({
       : syncAgeMs === null
         ? "Waiting for first upload"
         : syncFresh
-          ? "Synced just now"
+          ? "Up to date"
           : `Last upload ${Math.round(syncAgeMs / 1000)}s ago`;
   const trackerIssue = status?.lastError || trackerError || null;
   async function toggle() {
     if (!tauriAvailable()) return;
     setBusy(true);
+    setTrackerNotice(null);
     try {
       await invoke(running ? "stop_tracking" : "start_tracking");
       await refresh();
+    } catch (error) {
+      // Rust refuses to pause while permanent blocks exist. `running` comes
+      // from the next snapshot, so nothing flips optimistically; surface the
+      // rejection so the on switch visibly cannot be turned off.
+      setTrackerNotice(
+        typeof error === "string" && error
+          ? error
+          : "Could not change the tracker state. Try again.",
+      );
     } finally {
       setBusy(false);
     }
@@ -4385,6 +4837,11 @@ function SettingsPage({
             <span />
           </button>
         </SettingRow>
+        {trackerNotice && (
+          <p className="boundary-notice" role="alert">
+            {trackerNotice}
+          </p>
+        )}
         <div className="setting-row">
           <span className="setting-icon"><Icon name="clock" /></span>
           <div>
@@ -4610,7 +5067,7 @@ function SettingsPage({
         <SettingRow
           icon="sync"
           title="Background auto-sync"
-          detail="Uploads screen time and device status roughly every 25 seconds while signed in. Android uses notification sync; Windows has no notification listener."
+              detail="Uploads screen time and device status every four hours while signed in, with immediate checks on sign-in, edits, and reconnect. Use Sync Now for an immediate refresh."
         >
           <div className="setting-inline">
             <span className="setting-value">{syncStatusText}</span>
@@ -4718,6 +5175,7 @@ function AccountPage({
   onSyncNow,
   trackerError,
   syncError,
+  syncWarning,
 }: {
   devices: any[];
   lastSyncAt?: number;
@@ -4725,12 +5183,13 @@ function AccountPage({
   onSyncNow?: () => void;
   trackerError?: string | null;
   syncError?: string | null;
+  syncWarning?: string | null;
 }) {
   const auth = useFocusAuth();
   const user = auth.user;
   const isSignedIn = Boolean(user);
   const syncAgeMs = lastSyncAt ? Date.now() - lastSyncAt : null;
-  const syncFresh = syncAgeMs !== null && syncAgeMs < 90_000;
+  const syncFresh = syncAgeMs !== null && syncAgeMs < 4 * 60 * 60_000 + 5 * 60_000;
   const syncStatus = syncing
     ? "Syncing now…"
     : syncError
@@ -4740,7 +5199,7 @@ function AccountPage({
       : syncAgeMs === null
         ? "Waiting for first upload"
         : syncFresh
-          ? "Synced just now"
+          ? "Up to date"
           : `Last upload ${Math.round(syncAgeMs / 1000)}s ago`;
 
   return (
@@ -4798,6 +5257,7 @@ function AccountPage({
               Use the same account on every device. Saved changes retry when
               connected; devices need to be online to receive new boundaries.
             </p>
+            {syncWarning && <p className="sync-window-warning">{syncWarning}</p>}
           </section>
           <section className="settings-group">
             <div className="section-heading">
@@ -4818,10 +5278,10 @@ function AccountPage({
                   </p>
                 </div>
                 <span
-                  className={`status-badge ${Date.now() - d.lastSeen < 120000 ? "ok" : ""}`}
+                  className={`status-badge ${Date.now() - d.lastSeen < 20 * 60_000 ? "ok" : ""}`}
                 >
                   <span />
-                  {Date.now() - d.lastSeen < 120000 ? "Online" : "Last seen"}
+                  {Date.now() - d.lastSeen < 20 * 60_000 ? "Recently active" : "Last seen"}
                 </span>
               </div>
             ))}

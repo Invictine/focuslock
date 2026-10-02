@@ -1,5 +1,5 @@
 import { build } from 'esbuild';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, cp } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -53,18 +53,25 @@ if (!clerkSignInUrl) {
     clerkSignInUrl = portal.href;
   }
 }
-if (!clerkSignInUrl || new URL(clerkSignInUrl).protocol !== 'https:') {
+if (!clerkSignInUrl || new URL(clerkSignInUrl).protocol !== 'https:' || new URL(clerkSignInUrl).username || new URL(clerkSignInUrl).password) {
   throw new Error('CLERK_SIGN_IN_URL must be an HTTPS sign-in page.');
 }
 // Development browser cookies live on the web app; production client cookies
 // live on the Clerk Frontend API domain (per Clerk Sync Host configuration).
 const clerkSyncHost = process.env.CLERK_SYNC_HOST || local.CLERK_SYNC_HOST
   || (clerkKey.startsWith('pk_test_') ? new URL(clerkSignInUrl).origin : `https://${clerkFrontendApi}`);
+for (const [name, value] of Object.entries({ CONVEX_URL: convexUrl, CLERK_SYNC_HOST: clerkSyncHost })) {
+  const url = new URL(value);
+  if (url.protocol !== 'https:' || url.username || url.password) {
+    throw new Error(`${name} must be an HTTPS URL without credentials.`);
+  }
+}
 
 const common = {
   bundle: true,
   minify: true,
   sourcemap: false,
+  metafile: true,
   target: ['chrome109'],
   define: {
     'process.env.CLERK_PUBLISHABLE_KEY': JSON.stringify(clerkKey),
@@ -74,10 +81,22 @@ const common = {
   },
 };
 
-await Promise.all([
+const bundles = await Promise.all([
   build({ ...common, entryPoints: [path.join(root, 'popup', 'popup.js')], outfile: path.join(root, 'dist', 'popup.js'), format: 'iife' }),
   build({ ...common, entryPoints: [path.join(root, 'options', 'options-auth.js')], outfile: path.join(root, 'dist', 'options-auth.js'), format: 'iife' }),
   build({ ...common, entryPoints: [path.join(root, 'src', 'cloud-sync.js')], outfile: path.join(root, 'dist', 'cloud-sync.js'), format: 'iife' }),
 ]);
 
-console.log('Built FocusLock extension scripts in extension/dist.');
+// Copy only runtime assets. Never distribute .env, private keys, tests, or dependencies.
+const unpacked = path.join(root, '..', 'build', 'extension-unpacked');
+await mkdir(unpacked, { recursive: true });
+await writeFile(path.join(root, '..', 'build', 'extension-bundle-inputs.json'),
+  JSON.stringify([...new Set(bundles.flatMap(result => Object.keys(result.metafile.inputs)))], null, 2));
+for (const entry of ['manifest.json', 'background', 'content', 'blocked', 'popup', 'options', 'shared', 'icons', 'dist']) {
+  await cp(path.join(root, entry), path.join(unpacked, entry), { recursive: true });
+}
+await mkdir(path.join(unpacked, 'src'), { recursive: true });
+for (const entry of ['matcher.js', 'store.js', 'policy.js']) {
+  await cp(path.join(root, 'src', entry), path.join(unpacked, 'src', entry));
+}
+console.log('Built scripts in extension/dist and loadable extension in build/extension-unpacked.');

@@ -32,6 +32,21 @@ data class UsageBucket(
     val updatedAt: Long,
 )
 
+/** Device presence fields optionally attached to a usage upload mutation. */
+data class DeviceHeartbeat(
+    val name: String,
+    val appVersion: String,
+    val trackingStatus: String,
+    val statusDetail: String?,
+    val lastSeen: Long,
+)
+
+data class UsageUploadResult(
+    val success: Boolean,
+    val expired: Int = 0,
+    val oldestAcceptedDate: String? = null,
+)
+
 /** Per-device slice of `usage:getUsageSummary` (seconds are already aggregated server-side). */
 data class UsageDeviceSummary(
     val deviceId: String,
@@ -207,9 +222,35 @@ class ConvexSyncClient(
         }
     }
 
-    suspend fun getSnapshot(): Snapshot? {
-        val raw = post("/api/query", "focus:getSnapshot", JSONObject()) ?: return null
-        return try { parseSnapshot(raw) } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; null }
+    suspend fun getSnapshot(
+        cached: Snapshot? = null,
+        usageDate: String? = null,
+        includeKnownTargets: Boolean = false,
+    ): Snapshot? {
+        val args = JSONObject()
+        cached?.version?.takeIf { it.isNotBlank() }?.let { args.put("knownVersion", it) }
+        args.put("knownGroupsUpdatedAt", cached?.groupsState?.updatedAt ?: -1L)
+        usageDate?.let { args.put("usageDate", it) }
+        if (includeKnownTargets) args.put("includeKnownTargets", true)
+        val raw = post("/api/query", "focus:getSnapshot", args) ?: return null
+        if (raw.optBoolean("unchanged", false)) {
+            val previous = cached?.takeIf { it.version == raw.optString("version") } ?: return null
+            val groupsState = raw.optJSONObject("groupsState")?.let(::parseGroupsState)
+            return previous.copy(
+                groupsState = groupsState ?: previous.groupsState,
+                usageSummary = raw.optJSONObject("usageSummary")?.let(::parseUsageSummary),
+                usageSummaryIncluded = raw.has("usageSummary"),
+                knownTargets = raw.optJSONArray("knownTargets")?.let(::parseKnownTargets),
+                knownTargetsIncluded = raw.has("knownTargets"),
+                nuke = if (raw.has("nuke")) raw.optJSONObject("nuke") else previous.nuke,
+                nukeIncluded = raw.has("nuke") || previous.nukeIncluded,
+                prefs = if (raw.has("prefs")) raw.optJSONObject("prefs")?.let(::parsePrefs) else previous.prefs,
+                prefsIncluded = raw.has("prefs") || previous.prefsIncluded,
+            )
+        }
+        if (raw.optBoolean("partial", false) && cached == null) return null
+        return try { parseSnapshot(raw, if (raw.optBoolean("partial", false)) cached else null) }
+            catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; null }
     }
 
     suspend fun getStrictGuardian(): JSONObject? =
@@ -225,7 +266,17 @@ class ConvexSyncClient(
         post("/api/action", "strictApproval:requestApprovalEmail", JSONObject()
             .put("strictSessionId", sessionId).put("strictEndsAt", endsAt))
 
-    suspend fun saveState(balanceSec: Long, workSec: Long, scrollSec: Long, tasks: Int, date: String, updatedAt: Long): Boolean {
+    suspend fun saveState(
+        balanceSec: Long,
+        workSec: Long,
+        scrollSec: Long,
+        tasks: Int,
+        date: String,
+        updatedAt: Long,
+        expectedUpdatedAt: Long,
+        acknowledgedExternalEarnedSeconds: Long,
+        acknowledgedExternalSpentSeconds: Long,
+    ): Boolean {
         val args = JSONObject()
             .put("creditBalanceSeconds", balanceSec)
             .put("totalWorkSecondsToday", workSec)
@@ -233,6 +284,9 @@ class ConvexSyncClient(
             .put("tasksCompletedToday", tasks)
             .put("lastResetDate", date)
             .put("updatedAt", updatedAt)
+            .put("expectedUpdatedAt", expectedUpdatedAt)
+            .put("acknowledgedExternalEarnedSeconds", acknowledgedExternalEarnedSeconds.coerceAtLeast(0L))
+            .put("acknowledgedExternalSpentSeconds", acknowledgedExternalSpentSeconds.coerceAtLeast(0L))
         return post("/api/mutation", "focus:saveState", args)?.optBoolean("applied", false) == true
     }
 
@@ -411,7 +465,11 @@ class ConvexSyncClient(
         return post("/api/mutation", "devices:heartbeat", args) != null
     }
 
-    suspend fun recordUsageBatch(deviceId: String, buckets: List<UsageBucket>): Boolean {
+    suspend fun recordUsageBatch(
+        deviceId: String,
+        buckets: List<UsageBucket>,
+        heartbeat: DeviceHeartbeat? = null,
+    ): UsageUploadResult {
         val arr = JSONArray()
         buckets.forEach { b ->
             arr.put(JSONObject()
@@ -419,8 +477,24 @@ class ConvexSyncClient(
                 .put("targetKey", b.targetKey).put("targetLabel", b.targetLabel)
                 .put("trackedSeconds", b.trackedSeconds).put("updatedAt", b.updatedAt))
         }
-        return post("/api/mutation", "usage:recordUsageBatch",
-            JSONObject().put("deviceId", deviceId).put("buckets", arr)) != null
+        val args = JSONObject().put("deviceId", deviceId).put("buckets", arr)
+        heartbeat?.let { presence ->
+            val payload = JSONObject()
+                .put("name", presence.name)
+                .put("appVersion", presence.appVersion)
+                .put("platform", "android")
+                .put("trackingStatus", presence.trackingStatus)
+                .put("lastSeen", presence.lastSeen)
+            if (presence.statusDetail != null) payload.put("statusDetail", presence.statusDetail)
+            args.put("heartbeat", payload)
+        }
+        val result = post("/api/mutation", "usage:recordUsageBatch", args)
+            ?: return UsageUploadResult(success = false)
+        return UsageUploadResult(
+            success = true,
+            expired = result.optInt("expired", 0).coerceAtLeast(0),
+            oldestAcceptedDate = result.optString("oldestAcceptedDate").trim().ifEmpty { null },
+        )
     }
 
     /**
@@ -573,10 +647,19 @@ class ConvexSyncClient(
         val stateUpdatedAt: Long = 0L,
         val appsUpdatedAt: Long = 0L,
         val sitesUpdatedAt: Long = 0L,
+        val version: String = "",
+        val groupsState: GroupsState? = null,
+        val usageSummary: UsageSummary? = null,
+        val usageSummaryIncluded: Boolean = false,
+        val knownTargets: List<KnownTarget>? = null,
+        val knownTargetsIncluded: Boolean = false,
+        val nuke: JSONObject? = null,
+        val nukeIncluded: Boolean = false,
+        val prefsIncluded: Boolean = false,
     )
 
-    private fun parseSnapshot(root: JSONObject): Snapshot {
-        val state = root.optJSONObject("state")
+    private fun parseSnapshot(root: JSONObject, cached: Snapshot? = null): Snapshot {
+        val state = if (root.has("state")) root.optJSONObject("state") else cached?.state
         val stateUpdatedAt = root.optLong("stateUpdatedAt", 0L)
         val appsUpdatedAt = root.optLong("appsUpdatedAt", 0L)
         val sitesUpdatedAt = root.optLong("sitesUpdatedAt", 0L)
@@ -591,6 +674,7 @@ class ConvexSyncClient(
                 apps += RemoteApp(obj(o,"packageName"), obj(o,"appName"), bool(o,"isBlocked"), obj(o,"category","Social Media"), o.optBoolean("specificShortsOnly", false))
             }
         }
+        if (!root.has("apps")) apps += cached?.apps.orEmpty()
         val sites = mutableListOf<RemoteSite>()
         root.optJSONArray("sites")?.let { arr ->
             for (i in 0 until arr.length()) {
@@ -598,6 +682,7 @@ class ConvexSyncClient(
                 sites += RemoteSite(obj(o,"domain"), obj(o,"displayName"), bool(o,"isBlocked"), obj(o,"category","Social Media"), o.optBoolean("isCustom", false))
             }
         }
+        if (!root.has("sites")) sites += cached?.sites.orEmpty()
         val records = mutableListOf<RemoteRecord>()
         root.optJSONArray("records")?.let { arr ->
             for (i in 0 until arr.length()) {
@@ -605,8 +690,23 @@ class ConvexSyncClient(
                 records += RemoteRecord(obj(o,"recordId"), obj(o,"title"), o.optInt("durationMinutes", 0), o.optLong("timestamp", 0L), obj(o,"source","MANUAL_ENTRY"), o.optInt("earnedMinutesCredited", 0), o.optString("projectName").ifBlank { null })
             }
         }
-        val prefs = root.optJSONObject("prefs")?.let { parsePrefs(it) }
-        return Snapshot(state, apps, sites, records, prefs, stateUpdatedAt, appsUpdatedAt, sitesUpdatedAt)
+        if (!root.has("records")) records += cached?.records.orEmpty()
+        val prefsIncluded = root.has("prefs") || cached?.prefsIncluded == true
+        val prefs = if (root.has("prefs")) root.optJSONObject("prefs")?.let { parsePrefs(it) } else cached?.prefs
+        val nukeIncluded = root.has("nuke") || cached?.nukeIncluded == true
+        val nuke = if (root.has("nuke")) root.optJSONObject("nuke") else cached?.nuke
+        val groupsState = root.optJSONObject("groupsState")?.let(::parseGroupsState) ?: cached?.groupsState
+        val usageSummary = root.optJSONObject("usageSummary")?.let(::parseUsageSummary)
+        val knownTargets = root.optJSONArray("knownTargets")?.let(::parseKnownTargets)
+        return Snapshot(state, apps, sites, records, prefs, stateUpdatedAt, appsUpdatedAt, sitesUpdatedAt,
+            root.optString("version", ""), groupsState,
+            usageSummary, root.has("usageSummary"), knownTargets, root.has("knownTargets"),
+            nuke, nukeIncluded, prefsIncluded)
+    }
+
+    private fun parseGroupsState(obj: JSONObject): GroupsState? {
+        val groups = obj.optJSONArray("groups") ?: return null
+        return GroupsState(parseGroups(groups), obj.optLong("updatedAt", 0L).coerceAtLeast(0L))
     }
 
     /**

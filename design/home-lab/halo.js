@@ -1,0 +1,4 @@
+export function renderHalo(s,h){
+  const ready=s.scenario!=='loading'; const percent=ready?Math.min(100,s.focus/s.goal*100):0;
+  return `${h.head(s)}${h.setup(s)}<section class="halo-hero" aria-label="Daily focus progress"><div class="halo-dial" style="--progress:${percent}%" role="img" aria-label="${ready?`${Math.round(percent)} percent of focus goal`:'Focus data loading'}"><div class="halo-center"><span>Focused today</span><strong>${ready?h.duration(s.focus):'Loading…'}</strong><small>of ${h.duration(s.goal)} goal</small></div></div><p class="halo-remaining">${ready?`${Math.max(0,s.goal-s.focus)}m to your daily goal`:'Your day is loading'}</p>${h.actions()}</section><div class="halo-balance">${h.metrics(s)}${h.ratio(s)}</div>${h.task(s)}${h.frog(s)}<div class="halo-grid">${h.tasks(s)}</div>${h.chart(s)}${h.usage(s)}${h.history(s)}${h.bank(s)}`;
+}

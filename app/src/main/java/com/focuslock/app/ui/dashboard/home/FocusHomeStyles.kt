@@ -69,23 +69,20 @@ import com.focuslock.app.ui.components.pressScaleModifier
 import com.focuslock.app.ui.components.rememberDecorativePulse
 import com.focuslock.app.ui.dashboard.PixelWorkRecordItem
 
-/**
- * The five live-testable Focus-tab front pages. Persisted as [key] in
- * SettingsRepository ("focus_home_style"); unknown keys fall back to [RINGS].
- */
+/** Three function-first Focus homes. Legacy selections migrate to the closest layout. */
 enum class FocusHomeStyle(val key: String, val title: String, val blurb: String) {
-    RINGS("rings", "Rings", "Activity-style progress rings"),
-    SCREEN_TIME("screen_time", "Screen Time", "iOS-style usage day"),
-    MINIMAL("minimal", "Minimal", "Big number, one action"),
-    CARDS("cards", "Cards", "Today at a glance"),
-    IMMERSIVE("immersive", "Immersive", "Timer-first focus");
+    BALANCE("balance", "Balance", "Focus, leisure and your ratio at a glance"),
+    MOMENTUM("momentum", "Momentum", "Clear progress and a next step"),
+    TODAY("today", "Today", "A quiet overview with an agenda");
 
     companion object {
-        fun fromKey(key: String?): FocusHomeStyle =
-            entries.firstOrNull { it.key == key } ?: RINGS
+        fun fromKey(key: String?): FocusHomeStyle = when (key) {
+            "momentum", "immersive", "rings" -> MOMENTUM
+            "today", "minimal" -> TODAY
+            else -> BALANCE
+        }
     }
 }
-
 /** TickTick tasks load state, mirrored from the dashboard's fetch state. */
 enum class FocusHomeTasksState { Loading, NoAccount, Loaded, Error }
 
@@ -118,6 +115,10 @@ data class FocusHomeState(
     val crossDeviceGroups: List<TargetGroup> = emptyList(),
     val groupUsageTodaySeconds: Map<String, Long> = emptyMap(),
     val totalCrossDeviceSecondsToday: Long = 0L,
+    val leisureSeconds: Long? = null,
+    val targetFocusPerLeisure: Double = 2.0,
+    val nextTaskTitle: String? = null,
+    val nextTaskDetail: String? = null,
 ) {
     /** Read only from balance captions so a ticking balance does not rebuild the home tree. */
     val liveBalanceSeconds: Long get() = liveBalanceState.value
@@ -167,11 +168,9 @@ fun LazyListScope.FocusHome(
     callbacks: FocusHomeCallbacks,
 ) {
     when (style) {
-        FocusHomeStyle.RINGS -> HomeRingsContent(state, callbacks)
-        FocusHomeStyle.SCREEN_TIME -> HomeScreenTimeContent(state, callbacks)
-        FocusHomeStyle.MINIMAL -> HomeMinimalContent(state, callbacks)
-        FocusHomeStyle.CARDS -> HomeCardsContent(state, callbacks)
-        FocusHomeStyle.IMMERSIVE -> HomeImmersiveContent(state, callbacks)
+        FocusHomeStyle.BALANCE -> HomeBalanceContent(state, callbacks)
+        FocusHomeStyle.MOMENTUM -> HomeMomentumContent(state, callbacks)
+        FocusHomeStyle.TODAY -> HomeTodayContent(state, callbacks)
     }
 }
 
@@ -206,12 +205,12 @@ fun FocusHomeHeader(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column {
+        Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = state.todayFormatted,
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
@@ -221,7 +220,7 @@ fun FocusHomeHeader(
                     letterSpacing = (-0.4).sp,
                 ),
                 color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
+                maxLines = 2,
             )
         }
 

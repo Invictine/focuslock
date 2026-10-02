@@ -4,6 +4,68 @@
   const M = self.FocusLockMatcher;
   const $ = (id) => document.getElementById(id);
   const toast = (t) => { const el = $('toast'); el.textContent = t; el.style.display = 'block'; clearTimeout(el._h); el._h = setTimeout(() => el.style.display = 'none', 2600); };
+
+  // Check writes against the latest state, so stale controls cannot bypass a
+  // frozen list or Strict Mode. This protects every local dashboard mutation.
+  const storeLoad = S.load.bind(S);
+  const storeUpdate = S.update.bind(S);
+  const storeSave = S.save.bind(S);
+  const strictActive = (candidate) => candidate?.strictMode === true
+    && (!Number(candidate.strictEndsAt) || Number(candidate.strictEndsAt) > Date.now());
+  function assertEditableState(before, after) {
+    if (strictActive(before)) throw new Error('Strict Mode is active. Settings are locked until it ends.');
+    for (const locked of before.lists || []) {
+      if (!(Number(locked.lockedUntil) > Date.now())) continue;
+      const updated = (after.lists || []).find((item) => item.id === locked.id);
+      if (!updated || JSON.stringify(updated) !== JSON.stringify(locked)) {
+        throw new Error(`“${locked.name || 'This'}” is frozen and cannot be changed until its timer ends.`);
+      }
+    }
+  }
+  const permanentSitesOf = (candidate) => S.normalizePermanentSites(candidate?.permanentSites);
+  // Permalock is append-only: every write path must keep each existing domain.
+  function assertPermanentPreserved(before, after) {
+    const kept = new Set(permanentSitesOf(after));
+    if (permanentSitesOf(before).some((domain) => !kept.has(domain))) {
+      throw new Error('Permanent blocks cannot be removed.');
+    }
+  }
+  // Adding a permanent block is a commitment, not a settings edit, so it is
+  // allowed even while Strict Mode or Nuclear is active. The only difference
+  // this exemption accepts is growth of permanentSites; everything else must
+  // stay byte-identical.
+  function isPermalockAppend(before, after) {
+    const oldSites = permanentSitesOf(before);
+    const newSites = permanentSitesOf(after);
+    if (newSites.length < oldSites.length || oldSites.some((domain) => !newSites.includes(domain))) return false;
+    const rest = (candidate) => {
+      const copy = JSON.parse(JSON.stringify(candidate || {}));
+      delete copy.permanentSites;
+      return JSON.stringify(copy);
+    };
+    return rest(before) === rest(after);
+  }
+  S.update = (mutator) => storeUpdate(async (before) => {
+    const snapshot = JSON.parse(JSON.stringify(before));
+    const after = (await mutator(before)) || before;
+    if (!isPermalockAppend(snapshot, after)) assertEditableState(snapshot, after);
+    assertPermanentPreserved(snapshot, after);
+    return after;
+  });
+  S.save = async (after) => {
+    const before = await storeLoad();
+    assertEditableState(before, after);
+    assertPermanentPreserved(before, after);
+    if (before.nuclear?.active && before.nuclear.until > Date.now()
+      && JSON.stringify(before.nuclear) !== JSON.stringify(after.nuclear)) {
+      throw new Error('Stop the active Nuclear block before importing or resetting settings.');
+    }
+    return storeSave(after);
+  };
+  window.addEventListener('unhandledrejection', (event) => {
+    event.preventDefault();
+    toast(event.reason?.message || 'FocusLock could not save that change.');
+  });
   const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
   let state = null;
@@ -28,18 +90,23 @@
   let siteSearch = '';
   let siteCategory = 'all';
   let searchHandle = null;
+  let createGroupBaseVersion = 0;
 
   async function refresh() {
-    state = await S.load();
-    focusPrefs = await loadFocusPrefs();
-    renderLists(); renderSched(); renderStats(); renderSettings(); renderBoundaries();
-    void refreshProtection();
-    await chrome.runtime.sendMessage({ type: 'refresh' }).catch(() => {});
+    try {
+      state = await S.load();
+      focusPrefs = await loadFocusPrefs();
+      renderLists(); renderSched(); renderStats(); renderSettings(); renderBoundaries(); renderPermalock();
+      void refreshProtection();
+      await chrome.runtime.sendMessage({ type: 'refresh' }).catch(() => {});
+    } catch (error) {
+      toast(error?.message ? `FocusLock could not load your settings: ${error.message}` : 'FocusLock could not load your settings. Reload this page to try again.');
+    }
   }
 
   // ---- tabs ----
   function selectTab(tab) {
-    const titles = { stats: 'Focus', sched: 'Focus', blocks: 'Boundaries', settings: 'Settings', account: 'Account' };
+    const titles = { stats: 'Focus', sched: 'Focus', blocks: 'Boundaries', permalock: 'Permalock', settings: 'Settings', account: 'Account' };
     if (!titles[tab]) tab = 'stats';
     document.querySelectorAll('section.tab').forEach(section => section.classList.toggle('on', section.id === 'tab-' + tab));
     document.querySelectorAll('button[data-tab]').forEach(button => {
@@ -56,6 +123,7 @@
   document.querySelectorAll('button[data-tab]').forEach(button => {
     button.onclick = () => selectTab(button.dataset.tab);
   });
+  $('focusConnect')?.addEventListener('click', () => selectTab('account'));
   const query = new URLSearchParams(location.search);
   selectTab(query.has('account') ? 'account' : query.get('tab') || 'stats');
 
@@ -72,9 +140,11 @@
     const box = $('lists');
     box.innerHTML = '';
     for (const l of state.lists) {
-      const locked = l.lockedUntil > Date.now();
+      const strict = strictActive(state);
+      const locked = l.lockedUntil > Date.now() || strict;
       const div = document.createElement('div');
       div.className = 'card';
+      div.dataset.listId = l.id;
       div.innerHTML = `
         <details class="list-editor">
         <summary class="listhead">
@@ -82,7 +152,7 @@
           <span class="badge ${l.enabled ? 'on' : ''}">${l.enabled ? '● active' : '○ off'}</span>
           <span class="badge">${esc(l.mode)}</span>${lockInfo(l)}
           <span style="flex:1"></span>
-          <button data-a="toggle">${l.enabled ? 'Disable' : 'Enable'}</button>
+          <button data-a="toggle" ${locked ? 'disabled' : ''}>${l.enabled ? 'Disable' : 'Enable'}</button>
           <button data-a="del" class="red" ${locked ? 'disabled' : ''}>Delete</button>
         </summary>
         <div class="list-editor-body">
@@ -101,7 +171,9 @@
         <div class="btnrow"><button data-a="save" class="go" ${locked ? 'disabled' : ''}>Save list</button></div>
         </div></details>`;
       div.querySelector('[data-a="toggle"]').onclick = async () => {
-        if (locked) return toast('Frozen — cannot disable until timer ends.');
+        const latest = await storeLoad();
+        if (strictActive(latest)) return toast('Strict Mode is active. Settings are locked until it ends.');
+        if (Number(latest.lists.find(item => item.id === l.id)?.lockedUntil) > Date.now()) return toast('Frozen — cannot disable until timer ends.');
         if (l.enabled && state.security.hash) {
           const pw = prompt('Password to disable protection:');
           if (!await S.verifyPassword(state, pw || '')) return toast('Wrong password.');
@@ -111,6 +183,15 @@
       };
       div.querySelector('[data-a="del"]').onclick = async () => {
         if (!confirm('Delete "' + l.name + '"?')) return;
+        const latest = await S.load();
+        if (strictActive(latest)) return toast('Strict Mode is active. Settings are locked until it ends.');
+        const current = latest.lists.find((item) => item.id === l.id);
+        if (!current) return toast('This list no longer exists. Refresh the page and try again.');
+        if (current.lockedUntil > Date.now()) return toast('This list is frozen and cannot be changed until its timer ends.');
+        if (current.enabled && latest.security?.hash) {
+          const pw = prompt('Password to delete this active boundary:');
+          if (!(await S.verifyPassword(latest, pw || ''))) return toast('Wrong password.');
+        }
         await S.update(async (st) => { st.lists = st.lists.filter(x => x.id !== l.id); st.schedules = st.schedules.filter(s => s.listId !== l.id); return st; });
         await refresh();
       };
@@ -161,9 +242,17 @@
     try {
       const data = JSON.parse(await f.text());
       if (!data.lists) throw new Error('bad file');
-      await S.save(Object.assign(S.defaultState(), data));
+      const fresh = Object.assign(S.defaultState(), data);
+      // Import may add permanent blocks but can never drop one: union the
+      // imported list with whatever this device already enforces.
+      const current = await storeLoad();
+      fresh.permanentSites = S.normalizePermanentSites([
+        ...(current.permanentSites || []),
+        ...(Array.isArray(fresh.permanentSites) ? fresh.permanentSites : []),
+      ]);
+      await S.save(fresh);
       await refresh(); toast('Imported.');
-    } catch (err) { toast('Import failed.'); }
+    } catch (err) { toast(err?.message || 'Import failed.'); }
   };
 
   // ---- schedules ----
@@ -327,8 +416,13 @@
     await refresh(); toast('Saved.');
   };
   $('resetAll').onclick = async () => {
-    if (!confirm('Reset ALL FocusLock data?')) return;
-    await S.save(S.defaultState());
+    if (!confirm('Reset ALL FocusLock data? Permanent blocks stay.')) return;
+    const current = await storeLoad();
+    const fresh = S.defaultState();
+    // Reset clears everything except Permalock: permanence has no removal path,
+    // not even a full reset.
+    fresh.permanentSites = S.normalizePermanentSites(current.permanentSites || []);
+    await S.save(fresh);
     await refresh();
   };
 
@@ -354,11 +448,16 @@
     const badge = $('lockdownBadge'); if (!badge) return;
     if (!state) { badge.textContent = '…'; return; }
     const t = Date.now();
+    const strict = strictActive(state);
     const frozen = state.lists.filter(l => l.lockedUntil > t);
     const nuclear = state.nuclear && state.nuclear.active && state.nuclear.until > t;
     const enabled = state.lists.filter(l => l.enabled).length;
-    badge.classList.toggle('lock', Boolean(frozen.length || nuclear));
-    if (frozen.length) {
+    badge.classList.toggle('lock', Boolean(frozen.length || nuclear || strict));
+    if (strict) {
+      badge.textContent = 'Strict Mode';
+      $('lockdownRemaining').textContent = 'Strict Mode · ' + (state.strictEndsAt ? fmtCountdown(Number(state.strictEndsAt) - t) : 'active');
+      $('lockdownDetail').textContent = 'Boundaries are locked until Strict Mode ends.';
+    } else if (frozen.length) {
       const until = Math.max.apply(null, frozen.map(l => l.lockedUntil));
       badge.textContent = 'Frozen';
       $('lockdownRemaining').textContent = 'Frozen · ' + fmtCountdown(until - t);
@@ -373,14 +472,15 @@
       $('lockdownDetail').textContent = enabled ? enabled + ' of ' + state.lists.length + ' lists enabled.' : 'Every list is editable.';
     }
     $('lockdownLists').innerHTML = state.lists.map(l => {
-      const locked = l.lockedUntil > t;
-      const status = locked ? '❄ ' + fmtCountdown(l.lockedUntil - t) : (l.enabled ? '● active' : '○ off');
+      const locked = l.lockedUntil > t || strict;
+      const status = strict ? '🔒 Strict Mode' : locked ? '❄ ' + fmtCountdown(l.lockedUntil - t) : (l.enabled ? '● active' : '○ off');
       return '<span class="badge ' + (l.enabled ? 'on' : '') + (locked ? ' lock' : '') + '">' + esc(l.name) + ' · ' + esc(status) + '</span>';
     }).join('');
   }
 
   $('lockdownStart').onclick = async () => {
     if (!state) return;
+    if (strictActive(await storeLoad())) return toast('Strict Mode is active. Settings are locked until it ends.');
     const mins = Math.max(1, Math.min(1440, Number($('lockdownMin').value) || 30));
     if (!confirm('Lock every list for ' + mins + ' minutes? Frozen locks cannot be undone early.')) return;
     await S.update(async (st) => {
@@ -423,7 +523,7 @@
     const signedIn = Boolean(p && p.signedIn);
     const rows = [
       { label: 'Account', value: signedIn ? 'Signed in' : 'Signed out', ok: signedIn },
-      { label: 'Auto-sync', value: signedIn ? 'Every minute in background' : 'Off until signed in', ok: signedIn },
+      { label: 'Auto-sync', value: signedIn ? 'Every four hours; edits and reconnect sync promptly' : 'Off until signed in', ok: signedIn },
       { label: 'Last sync', value: (p && p.lastSyncAt) ? relTime(p.lastSyncAt) : 'Not yet', ok: Boolean(p && p.lastSyncAt) },
       { label: 'Notifications', value: notifyLevel === 'granted' ? 'Enabled' : String(notifyLevel || 'unknown'), ok: notifyLevel === 'granted' },
     ];
@@ -446,13 +546,20 @@
   // Only tick the visible countdown. Rebuilding badges every second while the
   // dashboard is idle or hidden causes avoidable DOM work.
   let wasCountdownActive = false;
+  let wasStrictActive = false;
   setInterval(() => {
     if (document.hidden || !state) return;
     const now = Date.now();
     const activeNuclear = state.nuclear?.active && state.nuclear.until > now;
     const frozenList = state.lists.some(list => list.lockedUntil > now);
-    const countdownActive = Boolean(activeNuclear || frozenList);
+    const strict = strictActive(state);
+    const countdownActive = Boolean(activeNuclear || frozenList || strict);
     if (countdownActive || wasCountdownActive) renderLockdown();
+    if (strict !== wasStrictActive) {
+      applyStrictUiLock();
+      if (!strict) updateCreateGroupButton();
+      wasStrictActive = strict;
+    }
     wasCountdownActive = countdownActive;
   }, 1000);
   setInterval(() => { if (!document.hidden) void refreshProtection(); }, 30000);
@@ -635,6 +742,11 @@
     const scrollSec = st ? Number(st.totalScrollSecondsToday || 0) : 0;
     const focusPct = (workMin / 120) * 100;
     const taskPct = (taskCount / 7) * 100;
+    const signedOut = focusError === 'signed-out';
+    for (const id of ['cloudWorkCard', 'cloudTimerCard', 'cloudBalanceCard', 'cloudGraphCard', 'cloudBankCard', 'cloudRecentCard']) {
+      const card = $(id); if (card) card.hidden = signedOut;
+    }
+    $('focusConnectNotice').hidden = !signedOut;
 
     $('focusRatioBadge').textContent = 'Work : scroll 1:' + ratio;
     setRing('focusRing', focusPct);
@@ -679,6 +791,10 @@
       hours[h] += Math.max(0, Number(s.durationMinutes) || 0);
     }
     const max = Math.max.apply(null, hours.concat([1]));
+    const hasSessions = hours.some((minutes) => minutes > 0);
+    $('hourEmpty').hidden = hasSessions;
+    $('hourGraph').hidden = !hasSessions;
+    $('hourAxis').hidden = !hasSessions;
     $('hourGraph').innerHTML = hours.map((m, h) => {
       const pct = m ? Math.max(3, m / max * 100) : 0;
       return '<div class="hour-col" title="' + String(h).padStart(2, '0') + ':00 — ' + Math.round(m) + ' min"><i style="height:' + pct.toFixed(1) + '%"></i></div>';
@@ -723,7 +839,7 @@
     try {
       const res = await chrome.runtime.sendMessage({
         type: 'addWorkRecord',
-        record: { title, durationMinutes: minutes, timestamp: Date.now(), source: 'chrome-extension', earnedMinutesCredited: earned },
+        record: { title, durationMinutes: minutes, timestamp: Date.now(), source: 'manual-task', earnedMinutesCredited: earned },
       });
       if (res && res.ok) {
         $('workTitle').value = '';
@@ -797,9 +913,10 @@
   // ---- Boundaries: applications (synced, read-only) + editable websites ----
   function syncedApps() { return dashboard && Array.isArray(dashboard.apps) ? dashboard.apps : []; }
   function syncedSites() { return dashboard && Array.isArray(dashboard.sites) ? dashboard.sites : []; }
+  function syncedGroups() { return dashboard && Array.isArray(dashboard.groups) ? dashboard.groups : []; }
 
   function setSurface(surface) {
-    boundarySurface = surface === 'apps' ? 'apps' : 'sites';
+    boundarySurface = ['apps', 'groups'].includes(surface) ? surface : 'sites';
     document.querySelectorAll('#boundaryTabs button').forEach(b => {
       const on = b.dataset.surface === boundarySurface;
       b.classList.toggle('on', on);
@@ -807,6 +924,7 @@
     });
     if ($('surface-apps')) $('surface-apps').hidden = boundarySurface !== 'apps';
     if ($('surface-sites')) $('surface-sites').hidden = boundarySurface !== 'sites';
+    if ($('surface-groups')) $('surface-groups').hidden = boundarySurface !== 'groups';
   }
 
   function categoryFor(site, list) {
@@ -842,13 +960,37 @@
     if (!$('appCount')) return;
     const apps = syncedApps();
     const rows = allSiteRows();
+    const groups = syncedGroups();
+    const strict = strictActive(state || {});
+    for (const id of ['newList', 'addPreset', 'presetSocial', 'presetVideo', 'presetUnblock', 'addSite', 'createGroup']) {
+      const control = $(id); if (control) control.disabled = strict;
+    }
     $('appCount').textContent = String(apps.filter(a => a.isBlocked).length);
     $('siteCount').textContent = String(rows.length);
+    $('groupCount').textContent = String(groups.length);
     renderApps(apps);
+    renderGroups(groups);
     renderSiteChips(rows);
     renderSiteRows(rows);
     const listSelect = $('addSiteList');
     if (listSelect && state) listSelect.innerHTML = state.lists.map(l => '<option value="' + esc(l.id) + '">' + esc(l.name) + '</option>').join('');
+    applyStrictUiLock();
+  }
+
+  function applyStrictUiLock() {
+    const locked = strictActive(state || {});
+    for (const id of ['newList', 'addPreset', 'presetSocial', 'presetVideo', 'presetUnblock', 'addSite', 'createGroup']) {
+      const control = $(id); if (control) control.disabled = locked;
+    }
+    document.querySelectorAll('#lists [data-a], #lists [data-f], #siteRows [data-del], #groupList [data-group-save], #groupList [data-group-remove], #groupList [data-group-limit-enabled], #groupList [data-group-limit-min]').forEach((control) => {
+      const list = control.closest('#lists [data-list-id]');
+      const frozen = Boolean(list && Number(state?.lists?.find((item) => item.id === list.dataset.listId)?.lockedUntil) > Date.now());
+      const groupLimit = control.matches('[data-group-limit-min]') && !control.closest('[data-group-id]')?.querySelector('[data-group-limit-enabled]')?.checked;
+      control.disabled = locked || frozen || groupLimit;
+    });
+    const createSave = $('createGroupSave'); if (createSave) createSave.disabled = locked || $('groupTargetOptions')?.querySelectorAll('[data-group-member]:checked').length < 2 || !$('groupName')?.value.trim();
+    const lockdownStart = $('lockdownStart'); if (lockdownStart) lockdownStart.disabled = locked;
+    const lockdownMin = $('lockdownMin'); if (lockdownMin) lockdownMin.disabled = locked;
   }
 
   function renderApps(apps) {
@@ -862,6 +1004,201 @@
         + '<span class="badge ' + (on ? 'on' : '') + '">' + (on ? '● blocked' : '○ allowed') + '</span></div>';
     }).join('');
   }
+
+  function renderGroups(groups) {
+    const box = $('groupList'); if (!box) return;
+    if (!dashboard) { box.innerHTML = '<div class="card"><p class="mut">Sign in and sync to see shared target groups.</p></div>'; return; }
+    if (!groups.length) { box.innerHTML = '<div class="card"><p class="mut">No target groups yet. Create a group in the Android app to combine app and website limits.</p></div>'; return; }
+    box.innerHTML = groups.map((group) => {
+      const id = esc(group.groupId);
+      const members = Array.isArray(group.members) ? group.members : [];
+      const enabled = group.limitEnabled !== false && Number(group.dailyLimitMinutes) > 0;
+      const memberMarkup = members.map((member) => {
+        const kind = member.targetKind === 'website' ? 'Website' : 'App';
+        return '<span class="badge">' + esc(kind) + ' · ' + esc(member.targetLabel || member.targetKey) + '</span>';
+      }).join('');
+      return '<div class="card group-card" data-group-id="' + id + '">'
+        + '<div class="listhead"><div><h2>' + esc(group.name || 'Target group') + '</h2><p class="d">' + esc(group.category || 'Shared usage group') + ' · ' + members.length + ' member' + (members.length === 1 ? '' : 's') + '</p></div></div>'
+        + '<div class="chips" aria-label="Group members">' + (memberMarkup || '<span class="mut">No members</span>') + '</div>'
+        + '<div class="grid2 group-limit-controls"><label><input type="checkbox" data-group-limit-enabled ' + (enabled ? 'checked' : '') + ' /> Daily limit enabled</label>'
+        + '<label>Minutes per day<input type="number" min="1" max="1440" step="1" data-group-limit-min value="' + (Number(group.dailyLimitMinutes) > 0 ? esc(group.dailyLimitMinutes) : '') + '" placeholder="No limit" ' + (enabled ? '' : 'disabled') + ' /></label></div>'
+        + '<div class="btnrow"><button type="button" class="go" data-group-save ' + (strictActive(state || {}) ? 'disabled' : '') + '>Save limit</button><button type="button" class="ghost" data-group-remove ' + (strictActive(state || {}) ? 'disabled' : '') + '>Remove group</button></div>'
+        + '</div>';
+    }).join('');
+  }
+
+  function groupMemberIdentity(kind, key) {
+    const normalized = String(key || '').trim().toLowerCase();
+    return kind === 'website' ? normalized.replace(/^www\./, '') : normalized;
+  }
+
+  function groupCandidates() {
+    if (!dashboard) return [];
+    const candidates = [];
+    for (const app of syncedApps()) {
+      const key = String(app.packageName || '').trim();
+      if (key) candidates.push({ targetKind: 'app', targetKey: key, targetLabel: app.appName || key });
+    }
+    for (const site of syncedSites()) {
+      const key = String(site.domain || '').trim();
+      if (key) candidates.push({ targetKind: 'website', targetKey: key, targetLabel: key });
+    }
+    const seen = new Set();
+    return candidates.filter((member) => {
+      const id = member.targetKind + ':' + groupMemberIdentity(member.targetKind, member.targetKey);
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    });
+  }
+
+  function currentGroupOwners() {
+    const owners = new Map();
+    for (const group of syncedGroups()) {
+      for (const member of Array.isArray(group.members) ? group.members : []) {
+        const id = member.targetKind + ':' + groupMemberIdentity(member.targetKind, member.targetKey);
+        if (!owners.has(id)) owners.set(id, group.name || 'another group');
+      }
+    }
+    return owners;
+  }
+
+  function groupUpdateVersion() {
+    return Math.max(Date.now(), Number(dashboard?.groupsUpdatedAt || 0) + 1);
+  }
+
+  async function fetchLatestGroups() {
+    const response = await chrome.runtime.sendMessage({ type: 'getDashboard' });
+    if (!response?.signedIn || !response.dashboard) throw new Error('Sign in and sync before changing target groups.');
+    dashboard = response.dashboard;
+    return dashboard;
+  }
+
+  function renderGroupCandidates() {
+    const box = $('groupTargetOptions');
+    const owners = currentGroupOwners();
+    const candidates = groupCandidates();
+    if (!candidates.length) {
+      box.innerHTML = '<p class="mut">Sync at least two apps or websites before making a group.</p>';
+      $('createGroupSave').disabled = true;
+      return;
+    }
+    box.innerHTML = candidates.map((member, index) => {
+      const identity = member.targetKind + ':' + groupMemberIdentity(member.targetKind, member.targetKey);
+      const owner = owners.get(identity);
+      const id = 'group-member-' + index;
+      return '<label class="merge-target-option" for="' + id + '">'
+        + '<input id="' + id + '" type="checkbox" data-group-member data-kind="' + esc(member.targetKind) + '" data-key="' + esc(member.targetKey) + '" data-label="' + esc(member.targetLabel) + '" ' + (owner ? 'disabled' : '') + ' />'
+        + '<span><strong>' + esc(member.targetLabel) + '</strong><br><span class="mut">' + esc(member.targetKind === 'website' ? 'Website' : 'App') + (owner ? ' · Already in ' + esc(owner) : '') + '</span></span></label>';
+    }).join('');
+    updateCreateGroupButton();
+  }
+
+  function updateCreateGroupButton() {
+    const selected = $('groupTargetOptions').querySelectorAll('[data-group-member]:checked').length;
+    $('createGroupSave').disabled = strictActive(state || {}) || selected < 2 || !$('groupName').value.trim();
+  }
+
+  async function openCreateGroup() {
+    if (focusError === 'signed-out' || !dashboard) {
+      toast('Sign in and sync your targets before making a group.');
+      return;
+    }
+    $('createGroupError').hidden = true;
+    $('groupName').value = '';
+    $('groupLimitEnabled').checked = false;
+    $('groupLimitMinutes').value = '';
+    $('groupLimitMinutes').disabled = true;
+    $('createGroupSave').disabled = true;
+    $('createGroupModal').hidden = false;
+    $('groupTargetOptions').innerHTML = '<p class="mut">Refreshing synced targets…</p>';
+    try {
+      await refreshFocus();
+      if (!dashboard) throw new Error('Target groups are unavailable. Check your connection and try again.');
+      createGroupBaseVersion = Number(dashboard.groupsUpdatedAt || 0);
+      renderGroupCandidates();
+      $('groupName').focus();
+    } catch (error) {
+      $('groupTargetOptions').innerHTML = '';
+      $('createGroupError').textContent = error?.message || 'Could not load targets.';
+      $('createGroupError').hidden = false;
+    }
+  }
+
+  function closeCreateGroup() { $('createGroupModal').hidden = true; }
+
+  $('createGroup').addEventListener('click', openCreateGroup);
+  $('createGroupCancel').addEventListener('click', closeCreateGroup);
+  $('createGroupModal').addEventListener('click', (event) => {
+    if (event.target === $('createGroupModal')) closeCreateGroup();
+  });
+  $('groupName').addEventListener('input', updateCreateGroupButton);
+  $('groupTargetOptions').addEventListener('change', updateCreateGroupButton);
+  $('groupLimitEnabled').addEventListener('change', (event) => {
+    $('groupLimitMinutes').disabled = !event.target.checked;
+  });
+  $('createGroupSave').addEventListener('click', async () => {
+    if (strictActive(await storeLoad())) return toast('Strict Mode is active. Settings are locked until it ends.');
+    const name = $('groupName').value.trim();
+    const errorBox = $('createGroupError');
+    errorBox.hidden = true;
+    if (!name) { errorBox.textContent = 'Give this group a name.'; errorBox.hidden = false; return; }
+    const selected = [...$('groupTargetOptions').querySelectorAll('[data-group-member]:checked')].map((input) => ({
+      targetKind: input.dataset.kind, targetKey: input.dataset.key, targetLabel: input.dataset.label,
+    }));
+    if (selected.length < 2) { errorBox.textContent = 'Choose at least two ungrouped targets.'; errorBox.hidden = false; return; }
+    const limitEnabled = $('groupLimitEnabled').checked;
+    const rawLimit = $('groupLimitMinutes').value.trim();
+    const limit = rawLimit === '' ? null : Number(rawLimit);
+    if (limitEnabled && (!Number.isInteger(limit) || limit < 1 || limit > 1440)) {
+      errorBox.textContent = 'Enter a daily limit from 1 to 1440 minutes.'; errorBox.hidden = false; return;
+    }
+    const save = $('createGroupSave');
+    save.disabled = true;
+    save.textContent = 'Saving…';
+    try {
+      await fetchLatestGroups();
+      if (Number(dashboard.groupsUpdatedAt || 0) !== createGroupBaseVersion) {
+        renderGroupCandidates();
+        throw new Error('Groups changed while this form was open. Review the latest groups and select targets again.');
+      }
+      const latestGroups = syncedGroups();
+      const owners = currentGroupOwners();
+      const latestCandidates = new Set(groupCandidates().map((member) => member.targetKind + ':' + groupMemberIdentity(member.targetKind, member.targetKey)));
+      const claimed = selected.find((member) => {
+        const id = member.targetKind + ':' + groupMemberIdentity(member.targetKind, member.targetKey);
+        return owners.has(id) || !latestCandidates.has(id);
+      });
+      if (claimed) {
+        renderGroupCandidates();
+        throw new Error('A selected target changed groups or disappeared. Review the latest groups and select targets again.');
+      }
+      const version = groupUpdateVersion();
+      const nextGroups = [...latestGroups, {
+        groupId: S.uid('group'),
+        name: name.slice(0, 80),
+        members: selected,
+        ...(limitEnabled ? { dailyLimitMinutes: limit } : {}),
+        limitEnabled,
+      }].map((group) => {
+        const { _id, updatedAt: _groupUpdatedAt, ...safe } = group;
+        return safe;
+      });
+      const result = await chrome.runtime.sendMessage({ type: 'focusGroupsSave', groups: nextGroups, updatedAt: version });
+      if (!result?.ok) throw new Error(result?.error || 'Could not save the new group.');
+      dashboard.groupsUpdatedAt = version;
+      await refreshFocus();
+      closeCreateGroup();
+      $('groupSyncState').textContent = 'Groups synced across devices.';
+      toast('Group created.');
+    } catch (error) {
+      errorBox.textContent = error?.message || 'Could not save the new group.';
+      errorBox.hidden = false;
+    } finally {
+      save.textContent = 'Create group';
+      updateCreateGroupButton();
+    }
+  });
 
   function renderSiteChips(rows) {
     const box = $('siteChips'); if (!box) return;
@@ -892,7 +1229,7 @@
       return '<div class="site-row"><div><strong>' + esc(r.site) + '</strong><span class="mut">'
         + esc(r.listName) + ' · ' + esc(r.category) + (custom ? ' · custom' : '') + '</span></div>'
         + '<span class="badge ' + (r.enabled ? 'on' : '') + '">' + (r.enabled ? '● blocked' : '○ off') + '</span>'
-        + '<div class="btnrow" style="margin:0"><button type="button" class="red" data-del="' + esc(r.listId) + '|' + esc(r.site) + '">' + (r.listId === '__shared' ? (r.enabled ? 'Unblock' : 'Block') : 'Delete') + '</button></div></div>';
+        + '<div class="btnrow" style="margin:0"><button type="button" class="red" data-del="' + esc(r.listId) + '|' + esc(r.site) + '"' + (strictActive(state || {}) ? ' disabled' : '') + '>' + (r.listId === '__shared' ? (r.enabled ? 'Unblock' : 'Block') : 'Delete') + '</button></div></div>';
     }).join('');
   }
 
@@ -916,6 +1253,7 @@
     const btn = e.target.closest('[data-del]'); if (!btn) return;
     const parts = btn.dataset.del.split('|');
     const listId = parts[0], site = parts.slice(1).join('|');
+    if (strictActive(await storeLoad())) return toast('Strict Mode is active. Settings are locked until it ends.');
     if (listId === '__shared') {
       const current = syncedSites().find(s => s.domain === site);
       const result = await chrome.runtime.sendMessage({ type: 'setSharedSite', domain: site, isBlocked: !current?.isBlocked });
@@ -929,6 +1267,61 @@
     toast('Website removed.');
   });
 
+  $('groupList').addEventListener('change', (e) => {
+    if (!e.target.matches('[data-group-limit-enabled]')) return;
+    const card = e.target.closest('[data-group-id]');
+    const input = card?.querySelector('[data-group-limit-min]');
+    if (input) input.disabled = !e.target.checked;
+  });
+  $('groupList').addEventListener('click', async (e) => {
+    const button = e.target.closest('[data-group-save], [data-group-remove]');
+    if (!button) return;
+    if (strictActive(await storeLoad())) return toast('Strict Mode is active. Settings are locked until it ends.');
+    const card = button.closest('[data-group-id]');
+    const groupId = card?.dataset.groupId;
+    const baseVersion = Number(dashboard?.groupsUpdatedAt || 0);
+    const group = syncedGroups().find((item) => item.groupId === groupId);
+    if (!group) return toast('This group changed. Sync and try again.');
+    const removing = button.hasAttribute('data-group-remove');
+    if (removing && !confirm('Remove "' + (group.name || 'this group') + '" and its combined limit?')) return;
+    const enabled = !removing && card.querySelector('[data-group-limit-enabled]').checked;
+    const rawMinutes = removing ? '' : card.querySelector('[data-group-limit-min]').value.trim();
+    const minutes = rawMinutes === '' ? null : Number(rawMinutes);
+    if (!removing && enabled && (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440)) {
+      return toast('Enter a daily limit from 1 to 1440 minutes.');
+    }
+    button.disabled = true;
+    $('groupSyncState').textContent = 'Saving shared groups…';
+    try {
+      await fetchLatestGroups();
+      if (Number(dashboard.groupsUpdatedAt || 0) !== baseVersion) {
+        renderBoundaries();
+        throw new Error('Groups changed elsewhere. Review the latest groups and retry.');
+      }
+      const groups = syncedGroups();
+      if (!groups.some((item) => item.groupId === groupId)) throw new Error('This group was removed elsewhere.');
+      let nextGroups = removing ? groups.filter((item) => item.groupId !== groupId) : groups.map((item) => item.groupId === groupId ? {
+        ...item,
+        dailyLimitMinutes: enabled ? minutes : (minutes && Number.isInteger(minutes) && minutes > 0 ? minutes : item.dailyLimitMinutes),
+        limitEnabled: enabled,
+      } : item);
+      nextGroups = nextGroups.map((item) => {
+        const { _id, updatedAt: _groupUpdatedAt, ...safe } = item;
+        return safe;
+      });
+      const version = groupUpdateVersion();
+      const result = await chrome.runtime.sendMessage({ type: 'focusGroupsSave', groups: nextGroups, updatedAt: version });
+      if (!result?.ok) throw new Error(result?.error || 'Could not save target groups.');
+      if (dashboard) dashboard.groupsUpdatedAt = version;
+      $('groupSyncState').textContent = 'Groups synced across devices.';
+      await refreshFocus();
+      toast(removing ? 'Group removed.' : 'Group limit saved.');
+    } catch (error) {
+      $('groupSyncState').textContent = error?.message || 'Could not save shared groups.';
+      toast($('groupSyncState').textContent);
+    } finally { button.disabled = false; }
+  });
+
   // Add Website dialog
   function openAddSite() {
     if (!state || !state.lists.length) return toast('Create a block list first.');
@@ -939,22 +1332,15 @@
   }
   function closeAddSite() { $('addSiteModal').hidden = true; }
   function validateSite(raw) {
-    let v = String(raw || '').trim().toLowerCase();
-    if (!v) return { error: 'Enter a website.' };
-    if (/^(chrome|chrome-extension|edge|about|javascript|data|file):/i.test(v)) return { error: 'That address cannot be blocked.' };
-    v = v.replace(/^https?:\/\//, '').replace(/^www\./, '');
-    const host = v.split('/')[0].split('?')[0].replace(/:\d+$/, '');
-    if (!host) return { error: 'Enter a valid domain.' };
-    if (!/^(\*\.)?[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)+$/.test(host)) {
-      return { error: 'Use a domain like example.com — wildcards like *.example.com are allowed.' };
-    }
-    return { value: host };
+    // Shared with the Permalock panel so both add flows parse domains identically.
+    return M.parseDomainInput(raw);
   }
   $('addSite').onclick = openAddSite;
   $('addSiteCancel').onclick = closeAddSite;
   $('addSiteModal').addEventListener('click', (e) => { if (e.target === $('addSiteModal')) closeAddSite(); });
   $('addSiteInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('addSiteConfirm').click(); } });
   $('addSiteConfirm').onclick = async () => {
+    if (strictActive(await storeLoad())) return toast('Strict Mode is active. Settings are locked until it ends.');
     const err = $('addSiteError');
     const parsed = validateSite($('addSiteInput').value);
     if (parsed.error) { err.textContent = parsed.error; err.hidden = false; return; }
@@ -979,6 +1365,52 @@
     closeAddSite();
     toast(outcome === 'duplicate' ? 'Website already blocked.' : 'Added ' + parsed.value + '.');
   };
+
+  // ---- Permalock: permanent, device-local blocks with no removal path ----
+  function renderPermalock() {
+    const box = $('permaRows'); if (!box) return;
+    if (!state) { box.innerHTML = '<p class="mut">Loading permanent blocks…</p>'; return; }
+    const sites = S.normalizePermanentSites(state.permanentSites || []);
+    state.permanentSites = sites;
+    if (!sites.length) {
+      box.innerHTML = '<p class="mut">No permanent blocks yet. Anything added here is enforced on this device until the extension itself is removed — there is no unblock control.</p>';
+      return;
+    }
+    box.innerHTML = sites.map((domain) =>
+      '<div class="site-row"><div><strong>' + esc(domain) + '</strong>'
+      + '<span class="mut">Permanently blocked · no snooze, exception, expiry, or removal</span></div>'
+      + '<span class="badge lock">Permanent</span></div>').join('');
+  }
+
+  $('permaAdd').onclick = async () => {
+    const err = $('permaError');
+    const parsed = validateSite($('permaInput').value);
+    if (parsed.error) {
+      err.textContent = parsed.error; err.hidden = false; toast(parsed.error);
+      return;
+    }
+    err.hidden = true;
+    const domain = S.normalizePermanentSites([parsed.value])[0];
+    if (!domain) {
+      err.textContent = 'Enter a valid domain.'; err.hidden = false; toast('Enter a valid domain.');
+      return;
+    }
+    if (S.normalizePermanentSites(state?.permanentSites || []).includes(domain)) {
+      toast(domain + ' is already permanently blocked.');
+      return;
+    }
+    let outcome = 'added';
+    await S.update((st) => {
+      st.permanentSites = Array.isArray(st.permanentSites) ? st.permanentSites : [];
+      if (st.permanentSites.includes(domain)) { outcome = 'duplicate'; return st; }
+      st.permanentSites.push(domain);
+      return st;
+    });
+    $('permaInput').value = '';
+    await refresh();
+    toast(outcome === 'duplicate' ? domain + ' is already permanently blocked.' : 'Permanently blocked ' + domain + '.');
+  };
+  $('permaInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('permaAdd').click(); } });
 
   // Presets mapped onto the existing list/preset model.
   async function applyPreset(kind) {
@@ -1027,6 +1459,38 @@
   $('presetVideo').onclick = () => applyPreset('video');
   $('presetUnblock').onclick = () => applyPreset('unblock');
 
-  refresh();
+  // Mobile and other extension surfaces can update the local state while this
+  // dashboard is open. Re-render from storage without refreshing cloud data or
+  // replacing unrelated form input.
+  chrome.storage?.onChanged?.addListener((changes, areaName) => {
+    if (areaName !== 'local' || !changes['focuslock.v1']) return;
+    void storeLoad().then((latest) => {
+      const relevant = (candidate) => JSON.stringify({
+        strictMode: candidate?.strictMode,
+        strictEndsAt: candidate?.strictEndsAt,
+        lists: candidate?.lists,
+        schedules: candidate?.schedules,
+        nuclear: candidate?.nuclear,
+        permanentSites: candidate?.permanentSites,
+        cloudSites: candidate?.cloudSites,
+        cloudPolicy: candidate?.cloudPolicy,
+        account: candidate?.account,
+      });
+      const previous = state;
+      state = latest;
+      if (previous && relevant(previous) === relevant(latest)) return;
+      const strictChanged = strictActive(previous || {}) !== strictActive(state);
+      if (strictChanged) {
+        renderLockdown();
+        applyStrictUiLock();
+        if (!strictActive(state)) updateCreateGroupButton();
+        wasStrictActive = strictActive(state);
+      } else {
+        renderLists(); renderSched(); renderBoundaries(); renderPermalock();
+      }
+    }).catch(() => {});
+  });
+
+  void refresh();
   refreshFocus();
 })();

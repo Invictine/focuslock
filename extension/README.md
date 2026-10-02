@@ -1,99 +1,51 @@
 # FocusLock for Chrome
 
-Manifest V3 extension for per-site usage tracking, FocusLock blocking, and
-account-scoped sync with the Android and Windows apps.
+Manifest V3 extension for website boundaries, local usage tracking, and account sync with Android and Windows.
 
-The popup mirrors the main FocusLock dashboard: today's cross-device screen
-time, the current website, and explicit Chrome/Android connection health.
+## Build and load
 
-## Cold Turkey parity
+1. Set public `CLERK_PUBLISHABLE_KEY` and `CONVEX_URL` in `extension/.env`, or use the corresponding `VITE_` settings from `desktop/.env`. Never put a secret key in browser configuration.
+2. Run `npm ci` and `npm run build` in `extension/`.
+3. In `chrome://extensions`, enable Developer mode and load the complete `build/extension-unpacked/` folder from the repository root. If FocusLock is already loaded from that exact folder, use **Reload** after each build. If replacing a different development install, export any device-local lists and usage first; Chrome may remove extension-local data when an extension is uninstalled.
+4. Open Account and sign in with the same account used on Android. Hosted sign-in uses HTTPS; the background tracker must confirm the session before the UI reports success.
 
-| Cold Turkey | FocusLock |
-|---|---|
-| Block lists (sites + apps) | ✅ Multiple named lists (sites; apps need a native helper — out of scope for pure Chrome) |
-| Exceptions / allow-list | ✅ Per-list exceptions + global Nuclear allow-list |
-| Blacklist vs allow-only | ✅ `blacklist` and `whitelist` (Forest) modes per list |
-| Schedules / timers | ✅ Recurring weekly + one-shot timers |
-| Pomodoro | ✅ Focus/break/rounds timer |
-| Frozen Turkey ❄ | ✅ Locked list + locked schedule, no edit/disable/delete until expiry |
-| Password lock | ✅ SHA-256 + salt, required to disable protection / stop Nuclear early |
-| Daily time limits | ✅ Per-list minutes/day budget |
-| Nuclear option ☢ | ✅ Block everything except allow-list |
-| Keyword / wildcard blocking | ✅ `youtube.com`, `*.youtube.com`, `reddit.com/r/*`, `*keyword*`, `/regex/` |
-| Statistics | ✅ Per-domain seconds/day (60-day retention), blocked-attempt log, lifetime counter |
-| Motivational block page | ✅ Quote + time context + delayed emergency 5-min break |
-| Breaks | ✅ Emergency snooze (type phrase + 60s wait; frozen blocks exempt) |
+`extension/dist/` contains compiled scripts only. It is **not** a loadable extension. The build produces a complete loadable folder containing only runtime assets, excluding environment files, private keys, tests, and dependencies.
 
-## Build and install (unpacked)
+The stable development ID is `fkkpmoiageeieaoplphafmhjkkdadcnf`. Clerk must allow this extension origin and support the configured Sync Host. Optional `CLERK_SIGN_IN_URL` and `CLERK_SYNC_HOST` overrides must use HTTPS. See the root `SYNC_SETUP.md` for account setup.
 
-1. Configure `desktop/.env` or copy `.env.example` to `.env`. The Clerk key and
-   Convex URL are public browser configuration; never add a secret key.
-2. Run `npm install` and `npm run build` inside `extension/`.
-3. Open `chrome://extensions`, enable Developer mode, choose **Load unpacked**,
-   and select `extension/`.
-4. Pin FocusLock, open its popup, and choose **Sign in to sync**. The dashboard's
-   **Continue with Google or email** action opens Clerk's HTTPS Account Portal.
-   The extension checks the resulting session through Clerk Sync Host, refreshes
-   its background tracker, then returns to the dashboard and closes the sign-in
-   tab it created. Existing portal sessions connect without another Google prompt. The extension uploads absolute per-domain counters
-   about once per minute, so retries cannot double-count time.
-5. Use **Open boundaries & stats** for block lists, schedules, Frozen lock, and
-   the Nuclear option.
+## Behavior
 
-The manifest contains the stable public key for development extension ID
-`fkkpmoiageeieaoplphafmhjkkdadcnf`. The matching private `.pem` is local and
-gitignored. This origin must remain in Clerk's allowed origins, Native API must
-be enabled, and Clerk bot protection must remain disabled for extension auth.
-The build discovers the hosted sign-in and profile URLs from Clerk public environment configuration. Development session sync uses the sign-in website origin; production uses the Clerk API origin. Set `CLERK_SIGN_IN_URL` and `CLERK_SYNC_HOST` to override these defaults (including a valid HTTPS return URL for a custom sign-in page).
+- Account-shared selected websites use earned Focus time: a positive balance permits access, and Chrome records the spend. Local Chrome lists follow their own enable state, schedules, exceptions, and daily limits; earned time never bypasses them.
+- Shared target groups combine app and website members under one daily limit. The extension can create groups from ungrouped synced targets, edit or remove groups, display app and website members, and enforce the limit when a member website is opened. Usage from other devices arrives in sync snapshots, so near-simultaneous cross-device use can exceed a cap before both clients observe it.
+- Chrome enforces synced website schedules and per-target website limits as well as its local per-list schedules and limits. Native app blocking remains the job of Android and Windows.
+- The global daily leisure cap is currently enforced by Chrome for selected account-shared websites using synced scroll totals plus locally observed spend. Android does not currently enforce that global preference.
+- A positive daily allowance permits a matching site until its local tracked budget is exhausted. A zero allowance blocks matching sites whenever the list is active.
+- Overnight schedules belong to the day on which they start.
+- Strict Mode and frozen lists reject snoozes. Snoozes are capped at five minutes by the worker, regardless of the requested duration.
+- Active Strict Mode commitments survive sign-out/account changes. A different account cannot shorten them or remove their held blocked domains.
+- Permalock is a device-local, append-only permanent block list. Its verdict wins over snoozes, exceptions, schedules, daily allowances, Strict Mode, and both Nuclear modes; no dashboard control, import, or reset can remove an entry, and the blocked page offers no snooze or dashboard escape. It is never uploaded or restored by account sync.
+- Shared Nuke is separate from local timed Nuclear mode. Shared Nuke remains active until the originating account completes its reset; the configured HTTPS sign-in origins remain reachable for account recovery.
+- Browser history and fragment navigation trigger enforcement. Maintenance rechecks open active tabs as schedules, limits, and temporary passes change.
+- Only the focused active tab contributes usage; idle time pauses accumulation. A session-storage cursor survives background worker restarts. Usage is kept by local date for up to 60 days and saved on the one-minute maintenance interval and navigation/focus transitions.
+- Chrome subscribes to the authenticated Convex enforcement query over a WebSocket. Strict Mode, shared websites, schedules, groups, credit balance, and relevant daily usage changes apply directly when Convex pushes them; no minute policy polling is required. Chrome 116+ supports WebSocket activity in extension workers. The subscription refreshes tokens, reconnects automatically, and is recreated when a worker wakes. Ordinary usage upload and device heartbeat remain on a four-hour cadence; **Sync now** forces an immediate upload. Offline clients enforce their latest saved snapshot. Cross-device caps remain best-effort because other devices must upload their usage before it can be shared.
 
-Authentication stays on the HTTPS portal because OAuth providers cannot
-return directly to `chrome-extension://`. The extension returns to its own tab only after Clerk confirms the session;
-the stable extension origin must be allowed by Clerk for session syncing.
+## Safeguards
 
-## Structure
+Content scripts may ask only for a verdict on their own document. Account operations and state-changing messages require a page from this extension. Local storage access is restricted to trusted extension contexts. Imported malformed collections are normalized before enforcement.
 
-```
-extension/
-  manifest.json
-  src/matcher.js        shared URL-pattern engine
-  src/store.js          storage schema + password hashing
-  background/service-worker.js   tracking + blocking verdicts + alarms
-  content/content-guard.js       SPA-navigation fallback
-  blocked/              motivational block page + emergency break
-  popup/                dashboard-style usage + connection popup
-  options/              full dashboard plus persistent Clerk account sign-in
-  src/cloud-sync.js     Clerk session + Convex heartbeat/usage bridge
-  build.mjs             bundles Clerk SDK code into MV3-safe local scripts
-  icons/lock.svg
-```
+Convex calls have a seven-second deadline. Pending writes remain durable when requests fail or the server rejects a stale update. Returned account data is checked against the current Clerk identity before being displayed. Local controls remain available when popup authentication is unavailable.
 
-## How blocking works
+Chrome still lets a user disable or uninstall an extension. This package does not provide native application blocking, Android's local Frog task state and automations, or OS-level uninstall protection. Group limits cover shared app and website usage, but cross-device totals depend on synced snapshots and cannot guarantee exact concurrent cutoff. See [EXTENSION_MOBILE_PARITY.md](EXTENSION_MOBILE_PARITY.md) for the current feature boundary and acceptance status, and `HARDENING.md` for security and test notes.
 
-`verdictFor(url, state)` in the service worker: internal URLs never blocked →
-Nuclear (if live) → each active list (frozen-lock > schedule window > always-on) →
-whitelist = block unless allowed; blacklist = block on pattern hit unless exception →
-daily-limit exhaustion also blocks. Hits redirect the tab to `blocked.html` and
-increment the blocked counter. A content-script guard covers SPA navigations the
-`webNavigation` listener might miss.
+## Verification
 
-## How tracking works
+From `extension/`:
 
-`tabs.onActivated` + `tabs.onUpdated` + `windows.onFocusChanged` maintain the
-active URL; `chrome.idle` gates accumulation; a 1-min alarm flushes slices into
-`stats[YYYY-MM-DD][domain]`. Counts only when Chrome is focused and you're not idle.
+- `npm test` — account sync, auth, enforcement, matching, and UI guard regressions.
+- `npm run check` — syntax-check every runtime JavaScript entry.
+- `npm run test:ui` — isolated UI fixtures, navigation, persistence, narrow layouts, and popup behavior.
+- `npm run test:browser` — build and load the real extension into disposable Chromium; test navigation blocking, offline cached enforcement, and dashboard layouts.
 
-## Limits vs desktop Cold Turkey
+Browser checks require Playwright's Chromium (`npx playwright-core install chromium`). They do not sign into a personal account or modify the user's installed extension.
 
-- No app-blocking, no hosts-file lock, no uninstall prevention — Chrome can't do those without a native companion. Mitigation: password lock + Frozen Turkey + Nuclear make casual bypass painful.
-- Determined users can still disable the extension via `chrome://extensions` (same limitation as every Chrome blocker). Strict mode + password raise the bar; OS-level enforcement needs the `desktop/` companion.
-
-## Dev and verification
-
-- `npm run check` syntax-checks the service worker, popup, dashboard auth, and cloud bridge.
-- `npm run build` creates gitignored `dist/popup.js`, `dist/options-auth.js`, and `dist/cloud-sync.js`.
-- Load the unpacked extension, browse a normal HTTP(S) site for at least one
-  minute, then reopen the popup. Verify the current-site time increases.
-- Sign in, press **Sync now**, and verify Chrome and Android status rows plus the
-  combined daily total. The same browser device must appear in Windows Account.
-- Block `example.com`, visit it, expect the FocusLock block page, then confirm
-  the attempt in the options dashboard.
+For live acceptance, reload the final build, sign into the same account on Chrome and Android, change a disposable website boundary, and verify propagation and blocking in both directions. Then test an offline edit/reconnect and account switching. Passing fixture tests is not evidence that this signed-in round trip succeeded.

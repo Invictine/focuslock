@@ -42,6 +42,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -339,7 +341,7 @@ fun StaggeredFadeSlide(
     }
     val alpha = remember(screenKey, index) { Animatable(if (eligible) 0f else 1f) }
     val travel = remember(screenKey, index) { Animatable(if (eligible) 1f else 0f) }
-    val systemMotionEnabled = rememberSystemMotionEnabled()
+    val systemMotionEnabled = LocalSystemMotionEnabled.current
     LaunchedEffect(visible, screenKey, index, systemMotionEnabled) {
         if (!eligible || !systemMotionEnabled) {
             alpha.snapTo(1f)
@@ -370,6 +372,15 @@ fun StaggeredFadeSlide(
  * a tab return and keeps entrances to once per process per screen.
  */
 private val seenEntranceScreens = mutableSetOf<String>()
+
+private val LocalSystemMotionEnabled = staticCompositionLocalOf { true }
+
+/** One settings observer for the entire themed screen, instead of one per animated row. */
+@Composable
+fun ProvideMotionPreferences(content: @Composable () -> Unit) {
+    val enabled = rememberSystemMotionEnabled()
+    CompositionLocalProvider(LocalSystemMotionEnabled provides enabled, content = content)
+}
 
 /** Observe settings changes, not frames; unregister on leaving composition. */
 @Composable
@@ -407,7 +418,7 @@ fun rememberDecorativeMotionEnabled(): Boolean {
         resumed = lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
         onDispose { lifecycle.removeObserver(observer) }
     }
-    val systemEnabled = rememberSystemMotionEnabled()
+    val systemEnabled = LocalSystemMotionEnabled.current
     val motionScale = rememberCoroutineScope().coroutineContext[MotionDurationScale]
     return resumed && systemEnabled && (motionScale?.scaleFactor ?: 1f) > 0f
 }

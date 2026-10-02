@@ -56,6 +56,11 @@ export function peekSync(accountKey: string, deviceId: string): PendingSync {
   return read(accountKey, deviceId);
 }
 
+/** Keep absolute counters whose latest value has not been accepted by Convex. */
+export function unacknowledgedUsage(usage: UsageBucket[], acknowledged: Record<string, number> = {}): UsageBucket[] {
+  return usage.filter((row) => row.trackedSeconds > (acknowledged[usageKey(row)] ?? -1));
+}
+
 export function acknowledgeSync(accountKey: string, deviceId: string, sent: PendingSync) {
   const pending = read(accountKey, deviceId);
   pending.acknowledged ??= {};

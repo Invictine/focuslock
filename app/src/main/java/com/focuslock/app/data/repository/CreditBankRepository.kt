@@ -117,6 +117,11 @@ class CreditBankRepository(private val context: Context) {
         val CREDITED_IDS_JSON = stringPreferencesKey("credited_ids_json")
         val LAST_SYNC_TIMESTAMP = longPreferencesKey("last_sync_timestamp")
         val STATE_UPDATED_AT = longPreferencesKey("state_updated_at")
+        val SYNCED_STATE_UPDATED_AT = longPreferencesKey("synced_state_updated_at")
+        // Convex's lifetime Chrome counters acknowledged by this account's bank.
+        // Kept as one JSON value so the marker and any corresponding bank adjustment
+        // commit in the same DataStore transaction.
+        val EXTERNAL_COUNTERS_JSON = stringPreferencesKey("external_counters_json")
     }
 
     // In-memory fast state for real-time countdown.
@@ -164,6 +169,11 @@ class CreditBankRepository(private val context: Context) {
             .onCompletion { historyLoaded.complete(Unit) }
             .catch { e -> android.util.Log.w("CreditBank", "history collector failed", e) }
             .launchIn(repositoryScope)
+
+        // Remove credit awarded by legacy notification heuristics as soon as the
+        // repository starts. The explicit reads below repeat this idempotent cleanup
+        // so callers never observe the old balance while this job is still queued.
+        repositoryScope.launch { removeLegacyNotificationCredits() }
     }
 
     val statsFlow: Flow<UserStats> = context.bankDataStore.data
@@ -226,6 +236,7 @@ class CreditBankRepository(private val context: Context) {
     }
 
     suspend fun getBalanceSeconds(): Long {
+        removeLegacyNotificationCredits()
         checkAndResetDailyStats()
         flushPendingScroll() // no-op when nothing is batched
         val stored = readBankPrefs()[Keys.CREDIT_BALANCE_SECONDS] ?: 0L
@@ -272,6 +283,8 @@ class CreditBankRepository(private val context: Context) {
             put("history", p[Keys.WORK_HISTORY_JSON] ?: "[]")
             put("credited", p[Keys.CREDITED_IDS_JSON] ?: "[]")
             put("updatedAt", p[Keys.STATE_UPDATED_AT] ?: 0L)
+            put("syncedUpdatedAt", p[Keys.SYNCED_STATE_UPDATED_AT] ?: -1L)
+            put("externalCounters", p[Keys.EXTERNAL_COUNTERS_JSON] ?: "")
         }
     }
 
@@ -286,6 +299,12 @@ class CreditBankRepository(private val context: Context) {
                 p[Keys.WORK_HISTORY_JSON] = snapshot.optString("history", "[]")
                 p[Keys.CREDITED_IDS_JSON] = snapshot.optString("credited", "[]")
                 p[Keys.STATE_UPDATED_AT] = snapshot.optLong("updatedAt", 0L).coerceAtLeast(0L)
+                val syncedUpdatedAt = snapshot.optLong("syncedUpdatedAt", -1L)
+                if (syncedUpdatedAt >= 0L) p[Keys.SYNCED_STATE_UPDATED_AT] = syncedUpdatedAt
+                else p.remove(Keys.SYNCED_STATE_UPDATED_AT)
+                val counters = snapshot.optString("externalCounters", "")
+                if (counters.isBlank()) p.remove(Keys.EXTERNAL_COUNTERS_JSON)
+                else p[Keys.EXTERNAL_COUNTERS_JSON] = counters
             }
         }
         _liveBalanceSeconds.value = snapshot.optLong("balance", 0L).coerceAtLeast(0L)
@@ -305,6 +324,8 @@ class CreditBankRepository(private val context: Context) {
                 prefs.remove(Keys.CREDITED_IDS_JSON)
                 prefs.remove(Keys.LAST_SYNC_TIMESTAMP)
                 prefs.remove(Keys.STATE_UPDATED_AT)
+                prefs.remove(Keys.SYNCED_STATE_UPDATED_AT)
+                prefs.remove(Keys.EXTERNAL_COUNTERS_JSON)
             }
         }
         pendingScrollSeconds = 0L
@@ -324,7 +345,46 @@ class CreditBankRepository(private val context: Context) {
         val tasksCompletedToday: Int,
         val lastResetDate: String,
         val stateUpdatedAt: Long,
+        val syncedStateUpdatedAt: Long? = null,
     )
+
+    /** Monotonic server-owned Chrome deltas observed in one focus snapshot. */
+    data class ExternalStateCounters(
+        val earnedSeconds: Long = 0L,
+        val spentSeconds: Long = 0L,
+        val date: String = "",
+        val workSecondsToday: Long = 0L,
+        val scrollSecondsToday: Long = 0L,
+        val tasksCompletedToday: Long = 0L,
+    ) {
+        fun normalized() = copy(
+            earnedSeconds = earnedSeconds.coerceAtLeast(0L),
+            spentSeconds = spentSeconds.coerceAtLeast(0L),
+            workSecondsToday = workSecondsToday.coerceAtLeast(0L),
+            scrollSecondsToday = scrollSecondsToday.coerceAtLeast(0L),
+            tasksCompletedToday = tasksCompletedToday.coerceAtLeast(0L),
+        )
+
+        fun toJson() = JSONObject()
+            .put("earned", earnedSeconds).put("spent", spentSeconds).put("date", date)
+            .put("work", workSecondsToday).put("scroll", scrollSecondsToday)
+            .put("tasks", tasksCompletedToday).toString()
+    }
+
+    private fun parseExternalCounters(raw: String?): ExternalStateCounters? {
+        if (raw.isNullOrBlank()) return null
+        return try {
+            val json = JSONObject(raw)
+            ExternalStateCounters(
+                earnedSeconds = json.optLong("earned", 0L),
+                spentSeconds = json.optLong("spent", 0L),
+                date = json.optString("date", ""),
+                workSecondsToday = json.optLong("work", 0L),
+                scrollSecondsToday = json.optLong("scroll", 0L),
+                tasksCompletedToday = json.optLong("tasks", 0L),
+            ).normalized()
+        } catch (_: Exception) { null }
+    }
 
     /**
      * Fresh read of the aggregate state used by the sync push/pull decision
@@ -333,6 +393,9 @@ class CreditBankRepository(private val context: Context) {
      * see the FocusSyncManager focus-state step.
      */
     suspend fun readAggregateState(): BankAggregate {
+        // FocusSyncManager calls this while already holding stateMutex. Use the
+        // unlocked helper here to avoid re-entering the non-reentrant mutex.
+        removeLegacyNotificationCreditsLocked()
         checkAndResetDailyStats()
         flushPendingScroll() // no-op when nothing is batched
         val prefs = readBankPrefs()
@@ -343,6 +406,7 @@ class CreditBankRepository(private val context: Context) {
             tasksCompletedToday = prefs[Keys.TASKS_COMPLETED_TODAY] ?: 0,
             lastResetDate = prefs[Keys.LAST_RESET_DATE].orEmpty(),
             stateUpdatedAt = prefs[Keys.STATE_UPDATED_AT] ?: 0L,
+            syncedStateUpdatedAt = prefs[Keys.SYNCED_STATE_UPDATED_AT],
         )
     }
 
@@ -368,12 +432,19 @@ class CreditBankRepository(private val context: Context) {
         tasksCompletedToday: Int,
         lastResetDate: String,
         updatedAt: Long,
-    ) {
+        externalCounters: ExternalStateCounters? = null,
+        expectedLocalUpdatedAt: Long? = null,
+    ): Boolean {
         val today = todayString()
         val staleDaily = lastResetDate.isNotBlank() && lastResetDate < today
+        var applied = false
         stateMutex.withLock {
-            editBankPrefs { prefs ->
+            val committed = editBankPrefs { prefs ->
+                if (expectedLocalUpdatedAt != null &&
+                    (prefs[Keys.STATE_UPDATED_AT] ?: 0L) != expectedLocalUpdatedAt
+                ) return@editBankPrefs
                 if (updatedAt < (prefs[Keys.STATE_UPDATED_AT] ?: 0L)) return@editBankPrefs
+                applied = true
                 prefs[Keys.CREDIT_BALANCE_SECONDS] = balanceSeconds.coerceAtLeast(0L)
                 if (staleDaily) {
                     // Remote daily counters are from an older day: keep today's local
@@ -393,12 +464,75 @@ class CreditBankRepository(private val context: Context) {
                     prefs[Keys.LAST_RESET_DATE] = lastResetDate
                 }
                 prefs[Keys.STATE_UPDATED_AT] = updatedAt
+                prefs[Keys.SYNCED_STATE_UPDATED_AT] = updatedAt
+                externalCounters?.let { prefs[Keys.EXTERNAL_COUNTERS_JSON] = it.normalized().toJson() }
                 _liveBalanceSeconds.value = effectiveBalance(balanceSeconds.coerceAtLeast(0L))
                 balanceLoaded = true
             }
+            applied = applied && committed
         }
         cachedResetDate = if (staleDaily) today else lastResetDate
+        return applied
     }
+
+    /**
+     * Merge unacknowledged Chrome counter deltas into a newer local Android aggregate.
+     * Counter baseline and bank adjustment are one edit, making retries/restarts safe.
+     * Caller can then CAS that returned aggregate against the snapshot it read.
+     */
+    suspend fun mergeExternalCountersAndRead(
+        counters: ExternalStateCounters,
+        remoteStateUpdatedAt: Long,
+    ): BankAggregate = stateMutex.withLock {
+        // This flushes pending scroll before applying external spend and uses the same
+        // state -> scroll lock order as normal bank writes.
+        val before = readAggregateState()
+        val remote = counters.normalized()
+        val prefsBefore = readBankPrefs()
+        val stored = parseExternalCounters(prefsBefore[Keys.EXTERNAL_COUNTERS_JSON])
+        val baseline = if (stored != null) stored else if (
+            (prefsBefore[Keys.LAST_SYNC_TIMESTAMP] ?: 0L) > remoteStateUpdatedAt
+        ) {
+            // Upgrade migration: newer local sync stamp is evidence the old aggregate
+            // likely already contains these server counters. Seed without reapplying.
+            remote
+        } else {
+            ExternalStateCounters(date = remote.date)
+        }
+        val delta = externalCounterDelta(baseline, remote, before.lastResetDate)
+        val committed = editBankPrefs { prefs ->
+            if (delta.earnedSeconds != 0L || delta.spentSeconds != 0L ||
+                delta.workSecondsToday != 0L || delta.scrollSecondsToday != 0L ||
+                delta.tasksCompletedToday != 0L) {
+                val oldBalance = prefs[Keys.CREDIT_BALANCE_SECONDS] ?: 0L
+                prefs[Keys.CREDIT_BALANCE_SECONDS] =
+                    (oldBalance + delta.earnedSeconds - delta.spentSeconds).coerceAtLeast(0L)
+                prefs[Keys.STATE_UPDATED_AT] = maxOf(
+                    System.currentTimeMillis(), (prefs[Keys.STATE_UPDATED_AT] ?: 0L) + 1L,
+                )
+                prefs[Keys.TOTAL_WORK_SECONDS_TODAY] =
+                    (prefs[Keys.TOTAL_WORK_SECONDS_TODAY] ?: 0L) + delta.workSecondsToday
+                prefs[Keys.TOTAL_SCROLL_SECONDS_TODAY] =
+                    (prefs[Keys.TOTAL_SCROLL_SECONDS_TODAY] ?: 0L) + delta.scrollSecondsToday
+                prefs[Keys.TASKS_COMPLETED_TODAY] =
+                    ((prefs[Keys.TASKS_COMPLETED_TODAY] ?: 0).toLong() + delta.tasksCompletedToday)
+                        .coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+                _liveBalanceSeconds.value = effectiveBalance(prefs[Keys.CREDIT_BALANCE_SECONDS] ?: 0L)
+                balanceLoaded = true
+            }
+            prefs[Keys.EXTERNAL_COUNTERS_JSON] = remote.toJson()
+        }
+        check(committed) { "Could not persist external counter baseline" }
+        readAggregateState()
+    }
+
+    data class ExternalCounterDelta(
+        val earnedSeconds: Long,
+        val spentSeconds: Long,
+        val workSecondsToday: Long,
+        val scrollSecondsToday: Long,
+        val tasksCompletedToday: Long,
+    )
 
     /** Merges synced history/IDs only. Aggregate credit state is owned by focusState. */
     suspend fun mergeRemoteWorkRecords(records: List<TickTickWorkRecord>): Int {
@@ -681,66 +815,55 @@ class CreditBankRepository(private val context: Context) {
     /** Audit-named alias for [flushPendingScroll]. */
     suspend fun flushScrollIfDirty() = flushPendingScroll()
 
-    suspend fun addEmergencyCredits(minutes: Int) {
-        // Manual-only grant (emergency button). Never auto-called: Debug screen
-        // shows balance vs focusMinutes so any manual grant is auditable as
-        // "balance > 0 while focus == 0". See reconcileBalanceWithFocus below —
-        // legacy/Convex carryover inflation is self-healed, manual grants stay.
-        val seconds = minutes * 60L
-        android.util.Log.d("CreditBank", "addEmergencyCredits manual grant: +${minutes}m")
-        stateMutex.withLock {
-            editBankPrefs { prefs ->
-                val current = prefs[Keys.CREDIT_BALANCE_SECONDS] ?: 0L
-                val updated = current + seconds
-                prefs[Keys.CREDIT_BALANCE_SECONDS] = updated
-                prefs[Keys.STATE_UPDATED_AT] = System.currentTimeMillis()
-                _liveBalanceSeconds.value = effectiveBalance(updated)
-                balanceLoaded = true
-            }
-        }
+    /** Remove only auditable credit previously awarded from unreliable notifications. */
+    suspend fun removeLegacyNotificationCredits(): Boolean = stateMutex.withLock {
+        removeLegacyNotificationCreditsLocked()
     }
 
-    /**
-     * One-time self-heal for legacy inflation (old task-credits + emergency +
-     * Convex carryover persisting in CREDIT_BALANCE_SECONDS while work is 0).
-     * Call on app start (MainActivity LaunchedEffect). Only zeroes the balance
-     * when there is genuinely zero work today (no work seconds, no tasks, no
-     * focus history) — non-zero work banks are never touched.
-     * @return true if an inflated balance was clamped to 0.
-     */
-    suspend fun reconcileBalanceWithFocus(): Boolean {
-        stateMutex.withLock {
-            checkAndResetDailyStats()
-            val prefs = readBankPrefs()
-            val workSec = prefs[Keys.TOTAL_WORK_SECONDS_TODAY] ?: 0L
-            val tasks = prefs[Keys.TASKS_COMPLETED_TODAY] ?: 0
+    /** Caller must hold [stateMutex]. */
+    private suspend fun removeLegacyNotificationCreditsLocked(): Boolean {
+        val before = readBankPrefs()
+        val preview = cleanLegacyNotificationCredits(
+            history = decodeHistory(before[Keys.WORK_HISTORY_JSON]),
+            balanceSeconds = before[Keys.CREDIT_BALANCE_SECONDS] ?: 0L,
+            workSecondsToday = before[Keys.TOTAL_WORK_SECONDS_TODAY] ?: 0L,
+            lastResetDate = before[Keys.LAST_RESET_DATE].orEmpty(),
+            today = todayString(),
+        )
+        // getBalanceSeconds() is called by the active countdown; avoid a DataStore
+        // edit transaction on every poll once legacy rows have been cleaned.
+        if (!preview.changed) return false
+
+        var changed = false
+        val committed = editBankPrefs { prefs ->
+            val history = decodeHistory(prefs[Keys.WORK_HISTORY_JSON])
             val balance = prefs[Keys.CREDIT_BALANCE_SECONDS] ?: 0L
-            if (balance <= 0L) return false
-            if (workSec == 0L && tasks == 0) {
-                // Confirm no focus history either (belt-and-braces: counters could be
-                // reset while history lingers, or vice versa).
-                val hasFocusHistory = try {
-                    val all = decodeHistory(prefs[Keys.WORK_HISTORY_JSON])
-                    val startOfDay = startOfTodayMillis()
-                    all.any { it.timestamp >= startOfDay && isFocusRecord(it.source, it.durationMinutes) }
-                } catch (_: Exception) { false }
-                if (!hasFocusHistory) {
-                    android.util.Log.w(
-                        "CreditBank",
-                        "reconcileBalanceWithFocus: zero work today but balance=${balance}s — clamping legacy inflation to 0"
-                    )
-                    editBankPrefs { e ->
-                        e[Keys.CREDIT_BALANCE_SECONDS] = 0L
-                        e[Keys.STATE_UPDATED_AT] = System.currentTimeMillis()
-                        _liveBalanceSeconds.value = 0L
-                        balanceLoaded = true
-                    }
-                    return true
-                }
-            }
+            val workSeconds = prefs[Keys.TOTAL_WORK_SECONDS_TODAY] ?: 0L
+            val resetDate = prefs[Keys.LAST_RESET_DATE].orEmpty()
+            val today = todayString()
+            val cleanup = cleanLegacyNotificationCredits(
+                history = history,
+                balanceSeconds = balance,
+                workSecondsToday = workSeconds,
+                lastResetDate = resetDate,
+                today = today,
+            )
+            if (!cleanup.changed) return@editBankPrefs
+
+            changed = true
+            prefs[Keys.CREDIT_BALANCE_SECONDS] = cleanup.balanceSeconds
+            prefs[Keys.TOTAL_WORK_SECONDS_TODAY] = cleanup.workSecondsToday
+            prefs[Keys.WORK_HISTORY_JSON] = json.encodeToString(cleanup.history)
+            prefs[Keys.STATE_UPDATED_AT] = System.currentTimeMillis()
+            _liveBalanceSeconds.value = effectiveBalance(cleanup.balanceSeconds)
+            _workHistory.value = cleanup.history
+            balanceLoaded = true
         }
-        return false
+        return committed && changed
     }
+
+    /** Backward-compatible entry point; only evidence-backed legacy awards are removed. */
+    suspend fun reconcileBalanceWithFocus(): Boolean = removeLegacyNotificationCredits()
 
     /** Debug/test reset: clears today counters + history AND balance (0 work = 0 bank). */
     suspend fun resetTodayCounters() {
@@ -787,6 +910,9 @@ class CreditBankRepository(private val context: Context) {
                     prefs[Keys.TOTAL_SCROLL_SECONDS_TODAY] = 0L
                     prefs[Keys.TASKS_COMPLETED_TODAY] = 0
                     prefs[Keys.LAST_RESET_DATE] = today
+                    prefs[Keys.STATE_UPDATED_AT] = maxOf(
+                        System.currentTimeMillis(), (prefs[Keys.STATE_UPDATED_AT] ?: 0L) + 1L,
+                    )
                     // Prune history older than 7 days to bound storage
                     val raw = prefs[Keys.WORK_HISTORY_JSON]
                     if (!raw.isNullOrBlank()) {
@@ -824,9 +950,81 @@ class CreditBankRepository(private val context: Context) {
         private const val SCROLL_FLUSH_THRESHOLD_SECONDS = 30L
         private const val SCROLL_FLUSH_INTERVAL_MS = 30_000L
 
-        /** Focus gate: only notification pomodoros + manual entries count. Tasks never count. */
+        /** Pure positive-delta merge; a date change resets only the external daily baseline. */
+        internal fun externalCounterDelta(
+            baseline: ExternalStateCounters,
+            current: ExternalStateCounters,
+            localDate: String,
+        ): ExternalCounterDelta {
+            val next = current.normalized()
+            val old = baseline.normalized()
+            val sameExternalDay = old.date == next.date
+            val dailyApplies = next.date.isNotBlank() && next.date == localDate
+            return ExternalCounterDelta(
+                earnedSeconds = (next.earnedSeconds - old.earnedSeconds).coerceAtLeast(0L),
+                spentSeconds = (next.spentSeconds - old.spentSeconds).coerceAtLeast(0L),
+                workSecondsToday = if (dailyApplies) (next.workSecondsToday - if (sameExternalDay) old.workSecondsToday else 0L).coerceAtLeast(0L) else 0L,
+                scrollSecondsToday = if (dailyApplies) (next.scrollSecondsToday - if (sameExternalDay) old.scrollSecondsToday else 0L).coerceAtLeast(0L) else 0L,
+                tasksCompletedToday = if (dailyApplies) (next.tasksCompletedToday - if (sameExternalDay) old.tasksCompletedToday else 0L).coerceAtLeast(0L) else 0L,
+            )
+        }
+
+        /** Explicit focus logs and completed API focus sessions count; tasks/notifications do not. */
         fun isFocusRecord(source: WorkRecordSource, durationMinutes: Int) =
-            (source == WorkRecordSource.TICKTICK_NOTIFICATION || source == WorkRecordSource.MANUAL_ENTRY) && durationMinutes > 0
+            (source == WorkRecordSource.MANUAL_ENTRY || source == WorkRecordSource.TICKTICK_FOCUS_API) &&
+                durationMinutes > 0
+
+        internal data class LegacyNotificationCleanup(
+            val history: List<TickTickWorkRecord>,
+            val balanceSeconds: Long,
+            val workSecondsToday: Long,
+            val changed: Boolean,
+        )
+
+        /** Pure, idempotent migration logic; legacy rows remain visible for audit. */
+        internal fun cleanLegacyNotificationCredits(
+            history: List<TickTickWorkRecord>,
+            balanceSeconds: Long,
+            workSecondsToday: Long,
+            lastResetDate: String,
+            today: String,
+        ): LegacyNotificationCleanup {
+            val invalidRows = history.filter {
+                it.source == WorkRecordSource.TICKTICK_NOTIFICATION && it.earnedMinutesCredited > 0
+            }
+            if (invalidRows.isEmpty()) {
+                return LegacyNotificationCleanup(history, balanceSeconds, workSecondsToday, changed = false)
+            }
+
+            // A duplicated legacy row for one ID could only have been credited once.
+            val distinctAwards = invalidRows.distinctBy { it.id }
+            val earnedSeconds = distinctAwards.sumOf { it.earnedMinutesCredited.toLong() * 60L }
+            val workToRemove = if (lastResetDate.isBlank()) {
+                // Legacy installs may have a missing date while their current counters
+                // still include the notification batch; remove the known matching work.
+                distinctAwards.sumOf { it.durationMinutes.coerceAtLeast(0).toLong() * 60L }
+            } else if (lastResetDate == today) {
+                distinctAwards.filter { dateString(it.timestamp) == lastResetDate }
+                    .sumOf { it.durationMinutes.coerceAtLeast(0).toLong() * 60L }
+            } else {
+                0L
+            }
+            val cleanedHistory = history.map {
+                if (it.source == WorkRecordSource.TICKTICK_NOTIFICATION && it.earnedMinutesCredited > 0) {
+                    it.copy(earnedMinutesCredited = 0)
+                } else it
+            }
+            return LegacyNotificationCleanup(
+                history = cleanedHistory,
+                balanceSeconds = (balanceSeconds - earnedSeconds).coerceAtLeast(0L),
+                workSecondsToday = (workSecondsToday - workToRemove).coerceAtLeast(0L),
+                changed = true,
+            )
+        }
+
+        private fun dateString(timestamp: Long): String =
+            java.time.Instant.ofEpochMilli(timestamp).atZone(ZoneId.systemDefault()).toLocalDate()
+                .format(DateTimeFormatter.ofPattern("yyyy-MM-dd", Locale.US))
 
         /** Pure work→leisure conversion. Extracted for unit testing. */
         fun calculateEarnedMinutes(workMinutes: Int, workRatio: Int, taskBonusMinutes: Int): Int {

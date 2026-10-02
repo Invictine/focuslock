@@ -47,7 +47,7 @@
   th { color: var(--fl-on-surface-variant,#bbb4b1); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
   .bar { height: 8px; background: var(--fl-surface-container-high,#232326); border-radius: 99px; overflow: hidden; min-width: 80px; }
   .bar i { display: block; height: 100%; background: var(--fl-primary,#dfbdb6); }
-  .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--fl-success-container,#29392e); border: 1px solid var(--fl-success,#b7cbbb); color: var(--fl-success,#b7cbbb); padding: 10px 18px; border-radius: var(--fl-radius-medium,12px); display: none; }
+  .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); max-width: min(560px,calc(100vw - 32px)); background: var(--fl-success-container,#29392e); border: 1px solid var(--fl-success,#b7cbbb); color: var(--fl-success,#b7cbbb); padding: 10px 18px; border-radius: var(--fl-radius-medium,12px); display: none; line-height: 1.45; }
   .sched { border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-medium,12px); padding: 12px 14px; margin: 8px 0; font-size: 13px; background: var(--fl-surface-container-lowest,#09090b); }
   .mut { color: var(--fl-on-surface-variant,#bbb4b1); font-size: 12px; }
   .days { display: flex; gap: 4px; margin-top: 6px; }
@@ -138,6 +138,9 @@
     .page-intro h1 { font-size: 28px; }
     .site-row { grid-template-columns: minmax(0,1fr) auto; }
     .site-row .btnrow { grid-column: 1 / -1; }
+    .segmented { display: flex; width: 100%; }
+    .segmented button { flex: 1 1 0; justify-content: center; gap: 5px; padding: 8px 6px; font-size: 12px; }
+    .seg-count { padding-inline: 6px; }
   }
 
   /* Boundaries: segmented surfaces, search, chips, rows, modal */
@@ -148,6 +151,7 @@
   .segmented button.on .seg-count { background: var(--fl-primary,#dfbdb6); color: var(--fl-on-primary,#30201d); }
   .searchrow { display: flex; gap: 8px; margin-bottom: 10px; }
   .searchrow input { flex: 1; }
+  #tab-permalock .searchrow input { min-width: 0; }
   .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
   .chip { border-radius: 999px; padding: 6px 12px; font-size: 12px; background: transparent; color: var(--fl-on-surface-variant,#bbb4b1); border: 1px solid var(--fl-outline-variant,#353235); }
   .chip.on { background: var(--fl-primary-container,#40302d); border-color: var(--fl-primary,#dfbdb6); color: var(--fl-on-primary-container,#f4dcd6); }
@@ -161,6 +165,11 @@
   .modal[hidden] { display: none; }
   .modal-card { width: min(460px, 94vw); background: var(--fl-surface-container,#1b1b1e); border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-large,20px); padding: 22px; }
   .modal-card h2 { margin: 0 0 4px; }
+  .merge-target-list { max-height: min(42vh,360px); overflow: auto; border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-medium,12px); padding: 8px; }
+  .merge-target-option { display: flex; gap: 10px; align-items: flex-start; padding: 9px; border-radius: var(--fl-radius-small,8px); margin: 0; }
+  .merge-target-option:hover { background: var(--fl-surface-container-high,#232326); }
+  .merge-target-option input { width: auto; margin: 3px 0 0; flex: none; }
+  .merge-target-option span { min-width: 0; overflow-wrap: anywhere; }
 
   /* Focus overview: balance rings, hour graph, timer */
   .rings { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 8px 0 12px; }
@@ -190,7 +199,7 @@
     header { position: fixed; left: 0; right: 0; bottom: 0; top: auto; height: auto; border-right: 0; border-top: 1px solid var(--fl-outline-variant,#353235); background: var(--fl-surface-container-lowest,#09090b); z-index: 30; }
     .hwrap { height: auto; padding: 0; gap: 0; flex-direction: column; }
     .brand { display: none; }
-    nav { grid-template-columns: repeat(4, minmax(0,1fr)); gap: 0; }
+    nav { grid-template-columns: repeat(5, minmax(0,1fr)); gap: 0; }
     nav button { flex-direction: column; justify-content: center; align-items: center; gap: 4px; padding: 9px 4px 11px; border: 0; border-radius: 0; font-size: 11px; text-align: center; }
     nav button svg { width: 20px; height: 20px; }
     nav button.on { background: transparent; border-color: transparent; color: var(--fl-primary,#dfbdb6); }
@@ -209,6 +218,7 @@
   <nav aria-label="Dashboard sections">
     <button data-tab="stats"><svg viewBox="0 0 24 24"><path d="M4 19V5M4 19h16"/><path d="m7 15 3-4 3 2 5-6"/></svg>Focus</button>
     <button data-tab="blocks"><svg viewBox="0 0 24 24"><path d="M5 5h14v14H5z"/><path d="M8 9h8M8 13h5"/></svg>Boundaries</button>
+    <button data-tab="permalock"><svg viewBox="0 0 24 24"><path d="M12 3 5 6v6c0 4.4 3 7.4 7 9 4-1.6 7-4.6 7-9V6z"/><circle cx="12" cy="11.5" r="1.6"/><path d="M12 13.5v2.5"/></svg>Permalock</button>
     <button data-tab="settings"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="m19 15 1 1-3 3-1-1M9 19l-1 1-3-3 1-1M5 9 4 8l3-3 1 1M15 5l1-1 3 3-1 1"/></svg>Settings</button>
     <button data-tab="account" class="on"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3"/><path d="M5 20a7 7 0 0 1 14 0"/></svg>Account</button>
   </nav>
@@ -254,6 +264,7 @@
     <div class="segmented" id="boundaryTabs" role="tablist" aria-label="Boundary surface">
       <button type="button" data-surface="apps" role="tab" aria-selected="false">Applications <span class="seg-count" id="appCount">0</span></button>
       <button type="button" data-surface="sites" role="tab" aria-selected="true" class="on">Websites <span class="seg-count" id="siteCount">0</span></button>
+      <button type="button" data-surface="groups" role="tab" aria-selected="false">Groups <span class="seg-count" id="groupCount">0</span></button>
     </div>
 
     <section id="surface-apps" hidden>
@@ -264,10 +275,20 @@
       </div>
     </section>
 
+    <section id="surface-groups" hidden>
+      <div class="card">
+        <h2>Target groups</h2>
+        <p class="d">One daily limit for these apps and websites. Usage syncs across your devices. Merge targets here or in the Android app.</p>
+        <div class="btnrow"><button type="button" class="go" id="createGroup">Merge targets</button></div>
+        <p class="mut" id="groupSyncState" aria-live="polite"></p>
+      </div>
+      <div id="groupList"></div>
+    </section>
+
     <section id="surface-sites">
       <div class="card">
         <h2>Websites</h2>
-        <p class="d">The fully editable surface in Chrome. Search, filter by category, add custom sites, or delete them.</p>
+        <p class="d">Earned Focus time permits access to account-shared websites. Chrome-only lists block locally. Search, filter by category, add custom sites, or delete them.</p>
         <div class="searchrow">
           <input id="siteSearch" placeholder="Search websites…" autocomplete="off" />
           <button id="addSite" class="go">+ Add website</button>
@@ -298,6 +319,19 @@
     </section>
   </section>
 
+  <section class="tab" id="tab-permalock">
+    <div class="card">
+      <h2>Permalock</h2>
+      <p class="d">Sites blocked here stay blocked. No snoozes, no exceptions, no expiry, and no removal.</p>
+      <div class="searchrow">
+        <input id="permaInput" placeholder="example.com" autocomplete="off" aria-label="Domain to block permanently" />
+        <button id="permaAdd" class="go">+ Add permanent block</button>
+      </div>
+      <p class="account-error" id="permaError" role="alert" hidden></p>
+      <div id="permaRows"></div>
+    </div>
+  </section>
+
   <div class="modal" id="addSiteModal" hidden>
     <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="addSiteTitle">
       <h2 id="addSiteTitle">Add website</h2>
@@ -308,6 +342,21 @@
       <select id="addSiteList"></select>
       <p class="account-error" id="addSiteError" role="alert" hidden></p>
       <div class="btnrow"><button id="addSiteConfirm" class="go">Add website</button><button id="addSiteCancel" class="ghost">Cancel</button></div>
+    </div>
+  </div>
+
+  <div class="modal" id="createGroupModal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="createGroupTitle">
+      <h2 id="createGroupTitle">Merge targets</h2>
+      <p class="d">Choose at least two ungrouped apps or websites. Targets already in a group stay there.</p>
+      <label for="groupName">Group name</label>
+      <input id="groupName" maxlength="80" placeholder="e.g. Social media" autocomplete="off" />
+      <label class="merge-target-option"><input id="groupLimitEnabled" type="checkbox" /><span>Apply one daily limit</span></label>
+      <label for="groupLimitMinutes">Minutes per day</label>
+      <input id="groupLimitMinutes" type="number" min="1" max="1440" step="1" placeholder="Enter a limit" disabled />
+      <div id="groupTargetOptions" class="merge-target-list" role="group" aria-label="Targets to merge"></div>
+      <p class="account-error" id="createGroupError" role="alert" hidden></p>
+      <div class="btnrow"><button type="button" class="go" id="createGroupSave" disabled>Create group</button><button type="button" class="ghost" id="createGroupCancel">Cancel</button></div>
     </div>
   </div>
 
@@ -351,8 +400,13 @@
   </section>
 
   <section class="tab" id="tab-stats">
+    <section class="card" id="focusConnectNotice" hidden aria-labelledby="focusConnectHeading">
+      <h2 id="focusConnectHeading">Focus tools live with your account</h2>
+      <p class="d">Website tracking and boundaries keep working on this device. Connect an account to use focus credit, sessions, and tasks.</p>
+      <div class="btnrow"><button id="focusConnect" class="go" type="button">Connect account</button></div>
+    </section>
     <div class="grid2">
-      <div class="card">
+      <div class="card" id="cloudWorkCard">
         <h2>Log work</h2>
         <p class="d">Credit earned = minutes ÷ ratio + task bonus, saved to your FocusLock account.</p>
         <label>What did you work on?</label>
@@ -361,7 +415,7 @@
         <input id="workMinutes" type="number" min="1" max="480" value="25" />
         <div class="btnrow"><button id="workLog" class="go">Log work</button><span class="mut" id="workPreview"></span></div>
       </div>
-      <div class="card">
+      <div class="card" id="cloudTimerCard">
         <h2>Focus timer</h2>
         <p class="d">15 / 25 / 50 minute sessions. Finishing early still earns credit after 5 minutes.</p>
         <div class="days" id="timerPresets" role="group" aria-label="Focus duration">
@@ -372,7 +426,7 @@
       </div>
     </div>
     <div class="grid2">
-      <div class="card focus-balance">
+      <div class="card focus-balance" id="cloudBalanceCard">
         <div class="listhead"><h2>Leisure balance</h2><span class="badge" id="focusRatioBadge">Work : scroll 1:4</span></div>
         <p class="d" id="balanceCaption">Sign in to sync your Focus balance.</p>
         <div class="rings">
@@ -395,21 +449,22 @@
         </div>
         <p class="mut" id="leisureDetail">Real balance appears after your first sync.</p>
       </div>
-      <div class="card">
+      <div class="card" id="cloudGraphCard">
         <h2>Focus through the day</h2>
         <p class="d">Minutes focused per hour, from your real sessions today.</p>
         <div class="hour-graph" id="hourGraph" aria-label="Focus minutes by hour"></div>
         <div class="hour-axis" id="hourAxis"></div>
+        <p class="mut" id="hourEmpty" hidden>No focus sessions yet today.</p>
       </div>
     </div>
 
-    <div class="card">
+    <div class="card" id="cloudBankCard">
       <h2>Scroll bank</h2>
       <p class="d" id="scrollBankCaption">Sign in to see your scroll bank.</p>
       <div class="bar bank"><i id="scrollBankBar" style="width:0%"></i></div>
     </div>
 
-    <div class="card">
+    <div class="card" id="cloudRecentCard">
       <h2>Recent work</h2>
       <p class="d" id="recentSum">Nothing logged yet.</p>
       <div id="recentWork"></div>
@@ -457,7 +512,7 @@
     </div>
     <div class="card" id="lockdownCard">
       <div class="listhead"><h2>Lockdown</h2><span class="badge" id="lockdownBadge">Off</span></div>
-      <p class="d">Boundaries lock for a fixed window. Frozen locks cannot be undone early. Reflects the real per-list Frozen state and enable flags.</p>
+      <p class="d">Strict Mode and frozen lists keep your boundaries locked until their timers end.</p>
       <div class="lockdown-row"><strong id="lockdownRemaining">No active lockdown</strong><span class="mut" id="lockdownDetail">Every list is editable.</span></div>
       <div id="lockdownLists"></div>
       <div class="btnrow">
@@ -473,7 +528,7 @@
       </div>
       <div class="card">
         <h2>Sync &amp; notifications</h2>
-        <p class="d">Auto-sync runs in the background about once per minute while signed in.</p>
+        <p class="d">Background usage and device sync runs every four hours. Account and boundary changes sync promptly, and you can use Sync now for an immediate refresh. Boundaries keep enforcing locally while offline.</p>
         <div id="syncList"></div>
         <div class="tick-row">
           <div><strong>TickTick tasks</strong><span class="mut" id="tickStatus">Task bonus applies to work you log here and to tasks completed in Android.</span></div>
@@ -484,7 +539,7 @@
   </section>
 </main>
 </div>
-<div class="toast" id="toast"></div>
+<div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 <script src="../src/matcher.js"></script>
 <script src="../src/store.js"></script>
 <script src="options.js"></script>

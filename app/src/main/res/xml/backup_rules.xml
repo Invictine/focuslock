@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
     <include domain="sharedpref" path="." />
+    <exclude domain="sharedpref" path="removal_reminder_media.xml" />
+    <exclude domain="sharedpref" path="removal_reminder_launch_policy.xml" />
 </full-backup-content>

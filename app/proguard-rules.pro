@@ -24,6 +24,11 @@
 -dontwarn com.clerk.**
 
 # --- WorkManager ---
+# Room 2.x discovers generated database implementations by their original name.
+# Preserve the names and constructors used by WorkManager's startup database.
+-keep class androidx.work.impl.WorkDatabase { *; }
+-keep class androidx.work.impl.WorkDatabase_Impl { *; }
+
 # Workers are instantiated reflectively from class names persisted in WorkDatabase.
 # WorkManager ships consumer rules, but keep our workers' constructors explicitly
 # so a future WorkManager upgrade can never drop them.

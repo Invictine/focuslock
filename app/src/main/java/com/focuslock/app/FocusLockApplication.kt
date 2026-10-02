@@ -15,6 +15,7 @@ import com.focuslock.app.data.repository.SettingsRepository
 import com.focuslock.app.data.repository.StrictModeAutomationRepository
 import com.focuslock.app.data.repository.TargetGroupsRepository
 import com.focuslock.app.sync.FocusSyncManager
+import com.focuslock.app.service.TickTickFocusSync
 import com.focuslock.app.work.DailyReminderScheduler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -54,6 +55,9 @@ class FocusLockApplication : Application() {
     lateinit var syncManager: FocusSyncManager
         private set
 
+    lateinit var tickTickFocusSync: TickTickFocusSync
+        private set
+
     /** Process-lifetime scope for lightweight startup reconciliation work. */
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -75,6 +79,9 @@ class FocusLockApplication : Application() {
             settingsRepository,
             targetGroupsRepository,
         )
+        tickTickFocusSync = TickTickFocusSync(settingsRepository, creditBankRepository) {
+            syncManager.requestPolicyRefresh()
+        }
 
         // Clerk auth (optional until configured). Key comes from BuildConfig via
         // local.properties `clerk.publishableKey` — see README. Empty = offline mode.
@@ -92,6 +99,10 @@ class FocusLockApplication : Application() {
         appScope.launch {
             try {
                 permanentBlocksRepository.warm()
+                permanentBlocksRepository.migrateLegacy(
+                    settingsRepository.getBlockedApps(),
+                    settingsRepository.getBlockedWebsites(),
+                )
                 if (settingsRepository.dailyReminderEnabledFlow.first()) {
                     DailyReminderScheduler.schedule(
                         this@FocusLockApplication,

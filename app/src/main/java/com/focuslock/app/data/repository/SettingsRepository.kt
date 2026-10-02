@@ -32,6 +32,10 @@ private val Context.dataStore by preferencesDataStore(name = "focuslock_settings
 class SettingsRepository(private val context: Context) {
 
     private val json = Json { ignoreUnknownKeys = true }
+    /** Shared, continuously warm mirror for permanent checks on the browser/app hot paths. */
+    private val permanentBlocks by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        PermanentBlocksRepository(context.applicationContext)
+    }
 
     // Corruption-hardened DataStore access (crash fix): DataStore throws on a corrupt
     // file; every flow and first()/edit() call here previously died with it. Reads
@@ -316,7 +320,7 @@ class SettingsRepository(private val context: Context) {
 
     /**
      * Focus-tab home variation key (see FocusHomeStyle). Unknown/blank values are
-     * tolerated here; the UI maps anything unrecognized back to rings.
+     * tolerated here; the UI maps anything unrecognized back to Balance.
      */
     val focusHomeStyleFlow: Flow<String> = context.dataStore.data.map { preferences ->
         preferences[PreferencesKeys.FOCUS_HOME_STYLE] ?: DEFAULT_FOCUS_HOME_STYLE
@@ -486,6 +490,15 @@ class SettingsRepository(private val context: Context) {
     suspend fun getBlockedApps(): List<BlockedApp> =
         if (blockedAppsLoaded.value) _blockedApps.value else blockedAppsFlow.first()
 
+    /** Promote legacy list flags before any whole-list write can replace their source list. */
+    private suspend fun migrateLegacyPermanentCommitments(
+        incomingApps: List<BlockedApp> = emptyList(),
+        incomingWebsites: List<BlockedWebsite> = emptyList(),
+    ) {
+        permanentBlocks.warm()
+        permanentBlocks.migrateLegacy(getBlockedApps() + incomingApps, getBlockedWebsites() + incomingWebsites)
+    }
+
     /**
      * Whole-list writer (backup import path). Outside Strict Mode this replaces the list
      * exactly as before. While Strict Mode is active the incoming list is merged inside the
@@ -494,6 +507,7 @@ class SettingsRepository(private val context: Context) {
      * re-stamps [PreferencesKeys.BLOCKED_APPS_UPDATED_AT] so the next LWW round keeps it.
      */
     suspend fun updateBlockedApps(apps: List<BlockedApp>, markLocalChange: Boolean = true) {
+        migrateLegacyPermanentCommitments(incomingApps = apps)
         var written: List<BlockedApp>? = null
         val committed = editSettings { preferences ->
             val merged = if (isLockdownActiveIn(preferences)) {
@@ -686,6 +700,7 @@ class SettingsRepository(private val context: Context) {
     }
 
     suspend fun applyRemoteBlockedApps(apps: List<BlockedApp>, updatedAt: Long) {
+        migrateLegacyPermanentCommitments()
         // Remote clients never send isPermanent; keep the local flag for matching packages
         // so a sync can't wipe a permanent block. Unmatched entries stay non-permanent.
         // The local list is read INSIDE the edit transform so the merge basis is atomic
@@ -836,10 +851,21 @@ class SettingsRepository(private val context: Context) {
         getBlockedApps().any { it.packageName == packageName && it.isBlocked }
 
     /**
-     * Toggles a permanent block for [packageName]. Enabling always blocks the app;
-     * disabling clears the permanent flag but leaves the app blocked.
+     * Appends a permanent app commitment. Existing commitments cannot be disabled.
      */
     suspend fun setAppPermanent(packageName: String, permanent: Boolean) {
+        val permanentStore = permanentBlocks
+        permanentStore.warm()
+        var appName = packageName
+        if (permanent) {
+            appName = getBlockedApps().firstOrNull { it.packageName == packageName }?.appName
+                ?: permanentStore.appNamesFlow.first()[packageName.trim().lowercase()]
+                ?: packageName
+            if (!permanentStore.add(packageName, appName)) return
+        } else if (permanentStore.isPermanentlyBlocked(packageName)) {
+            // The dedicated append-only store is authoritative across local and cloud edits.
+            return
+        }
         editAppsAtomically { current ->
             val index = current.indexOfFirst { it.packageName == packageName }
             if (index != -1) {
@@ -849,7 +875,7 @@ class SettingsRepository(private val context: Context) {
                 current.add(
                     BlockedApp(
                         packageName = packageName,
-                        appName = packageName,
+                        appName = appName,
                         isBlocked = true,
                         isPermanent = true
                     )
@@ -864,6 +890,9 @@ class SettingsRepository(private val context: Context) {
 
     /** Hot-path read for permanent enforcement; uses the in-memory cache when warm. */
     suspend fun isAppPermanent(packageName: String): Boolean {
+        val permanentStore = permanentBlocks
+        try { permanentStore.warm() } catch (_: Exception) { }
+        if (permanentStore.isPermanentlyBlocked(packageName)) return true
         val apps = if (blockedAppsLoaded.value) _blockedApps.value else blockedAppsFlow.first()
         return apps.any { it.packageName == packageName && it.isPermanent }
     }
@@ -881,6 +910,7 @@ class SettingsRepository(private val context: Context) {
      * re-stamps [PreferencesKeys.BLOCKED_WEBSITES_UPDATED_AT] so the next LWW round keeps it.
      */
     suspend fun updateBlockedWebsites(websites: List<BlockedWebsite>, markLocalChange: Boolean = true) {
+        migrateLegacyPermanentCommitments(incomingWebsites = websites)
         var written: List<BlockedWebsite>? = null
         val committed = editSettings { preferences ->
             val merged = if (isLockdownActiveIn(preferences)) {
@@ -911,6 +941,7 @@ class SettingsRepository(private val context: Context) {
         readSettingsPrefs()[PreferencesKeys.BLOCKED_WEBSITES_UPDATED_AT] ?: 0L
 
     suspend fun applyRemoteBlockedWebsites(websites: List<BlockedWebsite>, updatedAt: Long) {
+        migrateLegacyPermanentCommitments()
         // Remote clients never send isPermanent; keep the local flag for matching domains
         // so a sync can't wipe a permanent block. Unmatched entries stay non-permanent.
         // The local list is read INSIDE the edit transform (atomic merge basis, item 6).
@@ -1008,12 +1039,18 @@ class SettingsRepository(private val context: Context) {
     }
 
     /**
-     * Toggles a permanent block for [domain]. Enabling always blocks the site;
-     * disabling clears the permanent flag but leaves the site blocked.
+     * Appends a permanent website commitment. Existing commitments cannot be disabled.
      */
     suspend fun setWebsitePermanent(domain: String, permanent: Boolean) {
         val cleaned = cleanDomain(domain)
         if (cleaned.isBlank()) return
+        val permanentStore = permanentBlocks
+        permanentStore.warm()
+        if (permanent) {
+            if (!permanentStore.addWebsite(domain)) return
+        } else if (permanentStore.isPermanentlyBlockedDomain(domain)) {
+            return
+        }
         editWebsitesAtomically { current ->
             val index = current.indexOfFirst { it.domain.equals(cleaned, ignoreCase = true) }
             if (index != -1) {
@@ -1041,6 +1078,9 @@ class SettingsRepository(private val context: Context) {
     suspend fun isWebsitePermanent(urlOrDomain: String): Boolean {
         val normalized = cleanDomain(urlOrDomain)
         if (normalized.isBlank()) return false
+        val permanentStore = permanentBlocks
+        try { permanentStore.warm() } catch (_: Exception) { }
+        if (permanentStore.isPermanentlyBlockedDomain(urlOrDomain)) return true
         val websites = if (blockedWebsitesLoaded.value) _blockedWebsites.value else blockedWebsitesFlow.first()
         return websites.any { site ->
             site.isPermanent && (
@@ -1547,8 +1587,8 @@ class SettingsRepository(private val context: Context) {
         const val MIN_DAILY_TASKS_GOAL = 1
         const val MAX_DAILY_TASKS_GOAL = 50
 
-        /** Default Focus-tab home variation key (see FocusHomeStyle.RINGS). */
-        const val DEFAULT_FOCUS_HOME_STYLE = "rings"
+        /** Default Focus-tab home variation key (Balance). */
+        const val DEFAULT_FOCUS_HOME_STYLE = "balance"
 
         /** Default daily reminder time: 09:00 local. */
         const val DEFAULT_DAILY_REMINDER_MINUTE_OF_DAY = 9 * 60

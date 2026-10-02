@@ -92,7 +92,6 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
     val tickTickUserName by settings.tickTickUserNameFlow.collectAsStateWithLifecycle(initialValue = "")
     val tickTickClientId by settings.tickTickClientIdFlow.collectAsStateWithLifecycle(initialValue = "")
     val tickTickClientSecret by settings.tickTickClientSecretFlow.collectAsStateWithLifecycle(initialValue = "")
-    val notificationEnabled by settings.tickTickNotificationEnabledFlow.collectAsStateWithLifecycle(initialValue = true)
     val boundariesLock by settings.boundariesLockFlow.collectAsStateWithLifecycle(initialValue = false)
     val focusHomeStyleKey by settings.focusHomeStyleFlow.collectAsStateWithLifecycle(
         initialValue = SettingsRepository.DEFAULT_FOCUS_HOME_STYLE
@@ -326,33 +325,28 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
         }
         isSyncing = true
         try {
-            val api = TickTickApiClient()
-            // Auto-refresh expired OAuth tokens; personal tokens pass through unchanged.
-            val validToken = TickTickAuthConfig.getValidAccessToken(settings, api)
-            if (validToken.isNullOrBlank()) {
+            // The shared sync manager reads the persisted credentials and refreshes OAuth itself.
+            val result = FocusLockApplication.instance.tickTickFocusSync.sync()
+            if (result == null) {
                 syncMessage = "TickTick session expired — reconnect with TickTick login below."
                 if (showToast) Toast.makeText(context, syncMessage, Toast.LENGTH_LONG).show()
                 return
             }
-            val records = api.fetchCompletedTasksToday(validToken)
-            val ratio = settings.workRatioFlow.first()
-            val bonus = settings.taskBonusFlow.first()
-            val (newCount, earned) = bank.recordWorkCreditsDeduped(records, ratio, bonus)
             val ts = bank.getLastSyncTimestamp()
             lastSyncText = if (ts > 0) {
                 "Last synced ${syncDateFormatter.format(Date(ts))}"
             } else lastSyncText
-            syncMessage = if (records.isEmpty()) {
-                "No focus sessions — TickTick tasks don't count as focus"
-            } else if (newCount == 0) {
-                "Already up to date — ${records.size} completed task(s) already credited."
+            syncMessage = if (result.sessionsFound == 0) {
+                "No completed focus sessions found today."
+            } else if (result.newSessions == 0) {
+                "Already up to date — today's focus sessions were already synced."
             } else {
-                "Synced! $newCount new task(s) → +$earned min leisure."
+                "Synced ${result.newSessions} focus session(s) — ${result.focusMinutes} min focused, +${result.earnedMinutes} min earned."
             }
             if (showToast) Toast.makeText(context, syncMessage, Toast.LENGTH_LONG).show()
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
-            syncMessage = "Sync failed: ${e.message}. Check connection or use Log Work fallback."
+            syncMessage = "Focus session sync failed. Check your connection and try again."
             if (showToast) Toast.makeText(context, syncMessage, Toast.LENGTH_LONG).show()
         } finally {
             isSyncing = false
@@ -478,8 +472,7 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
                     )
                 }
 
-                val currentStyle = FocusHomeStyle.entries.firstOrNull { it.key == focusHomeStyleKey }
-                    ?: FocusHomeStyle.RINGS
+                val currentStyle = FocusHomeStyle.fromKey(focusHomeStyleKey)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -562,6 +555,12 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
                     }
                 }
 
+                Text(
+                    "Sync completed Pomodoro and stopwatch focus sessions from TickTick to earn leisure time.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
                 if (isTickTickConnected) {
                     Surface(
                         color = MaterialTheme.colorScheme.secondaryContainer,
@@ -621,7 +620,7 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
                     ) {
                         Icon(Icons.Outlined.Sync, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text(if (isSyncing) "Syncing..." else "Sync Tasks Now")
+                        Text(if (isSyncing) "Syncing..." else "Sync focus now")
                     }
 
                     syncMessage?.let {
@@ -765,19 +764,20 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            "On-Device Notification Sync",
+                            "TickTick focus credits",
                             style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            "Catches Pomodoros & tasks as they finish. Needs Notification access below.",
+                            "Automatic focus import is unavailable. Log completed focus time in FocusLock; task notifications earn no credits.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                     Switch(
-                        checked = notificationEnabled,
-                        onCheckedChange = { scope.launch { settings.setTickTickNotificationEnabled(it) } },
+                        checked = false,
+                        enabled = false,
+                        onCheckedChange = {},
                         colors = SwitchDefaults.colors(
                             checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
                             checkedTrackColor = MaterialTheme.colorScheme.primary
@@ -843,7 +843,7 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
 
                 PixelPermissionItem(
                     title = "Notification Listener",
-                    subtitle = "Captures TickTick Pomodoros automatically",
+                    subtitle = "Optional; notifications do not earn focus credits",
                     isGranted = isNotifOn == true,
                     highlighted = effectiveHighlight == PermissionKind.NOTIFICATION_LISTENER,
                     onClick = { PermissionHelper.openNotificationListenerSettings(context) }
@@ -872,8 +872,8 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
                 HorizontalDivider(color = MaterialTheme.colorScheme.surfaceContainerHighest)
 
                 PixelPermissionItem(
-                    title = "Prevent Uninstall (Device Admin)",
-                    subtitle = if (isDeviceAdminOn == true) "Protected against impulsive uninstallation" else "Blocks impulsive uninstalls during a binge",
+                    title = "Device admin protection",
+                    subtitle = if (isDeviceAdminOn == true) "Admin must be disabled before uninstalling" else "Adds an extra step before uninstalling",
                     isGranted = isDeviceAdminOn == true,
                     highlighted = effectiveHighlight == PermissionKind.DEVICE_ADMIN,
                     onClick = {
@@ -884,7 +884,15 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
                 )
                 if (isDeviceAdminOn == true) {
                     TextButton(
-                        onClick = { showDeactivateAdminDialog = true },
+                        onClick = {
+                            if (com.focuslock.app.reminder.RemovalReminderStore(context).enabled) {
+                                com.focuslock.app.reminder.RemovalReminderController.show(
+                                    context, "deactivate", fromForeground = true
+                                )
+                            } else {
+                                showDeactivateAdminDialog = true
+                            }
+                        },
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(
@@ -896,6 +904,8 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
                 }
             }
         }
+
+        RemovalReminderSettings()
 
         // Debug entry (totals, records, sync state)
         Card(
@@ -953,7 +963,7 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     FocusHomeStyle.entries.forEach { style ->
-                        val selected = style.key == focusHomeStyleKey
+                        val selected = style == FocusHomeStyle.fromKey(focusHomeStyleKey)
                         fun pick() {
                             scope.launch { settings.setFocusHomeStyle(style.key) }
                             showHomeStyleDialog = false
@@ -1113,7 +1123,7 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
         AlertDialog(
             onDismissRequest = { showDeactivateAdminDialog = false },
             title = { Text("Deactivate device admin?") },
-            text = { Text("This allows FocusLock to be uninstalled without your confirmation.") },
+            text = { Text("This removes device-admin protection and allows FocusLock to be uninstalled.") },
             confirmButton = {
                 TextButton(onClick = {
                     showDeactivateAdminDialog = false

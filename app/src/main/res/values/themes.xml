@@ -10,6 +10,14 @@
         <item name="android:forceDarkAllowed" tools:targetApi="29">false</item>
     </style>
 
+    <style name="Theme.FocusLock.Reminder" parent="Theme.FocusLock">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+        <item name="android:backgroundDimEnabled">true</item>
+        <item name="android:backgroundDimAmount">0.6</item>
+        <item name="android:windowDisablePreview">true</item>
+    </style>
+
     <style name="Theme.FocusLock.Blocker" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/bg_dark</item>
         <item name="android:statusBarColor">@color/bg_dark</item>

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>FocusLock · Five home studies</title>
+  <link rel="stylesheet" href="lab.css"><link rel="stylesheet" href="variants-b.css"><link rel="stylesheet" href="variants-c.css">
+</head>
+<body>
+  <header class="lab-header"><a href="#halo" class="wordmark"><span class="brand-icon">F</span>FocusLock <span class="header-slash">/</span> <span class="header-sub">Home studies</span></a><span class="prototype-label">Android · Interactive concepts</span></header>
+  <main class="lab-main">
+    <div class="lab-intro"><div><p class="lab-eyebrow">A DIFFERENT WAY TO SEE YOUR DAY</p><h1>Five ways to find focus.</h1><p class="lab-lede">Same essentials. Five different ways to organize them.</p></div><button id="compare" class="lab-button" aria-pressed="false">Compare all five ↗</button></div>
+    <nav id="concept-tabs" class="concept-tabs" aria-label="Choose a homepage concept"></nav>
+    <div class="lab-toolbar"><div class="toolbar-fields"><label>Preview state<select id="scenario"><option value="ready">An ordinary day</option><option value="behind">Leisure is ahead</option><option value="empty">A fresh start</option><option value="loading">Loading data</option><option value="setup">Permissions missing</option><option value="error">TickTick unavailable</option><option value="signedout">TickTick disconnected</option></select></label><label>Width<select id="phone-width"><option value="390">390 px</option><option value="320">320 px</option></select></label><label>Text<select id="text-scale"><option value="1">100%</option><option value="1.3">130%</option><option value="2">200%</option></select></label></div><button id="reset" class="lab-button quiet">Reset demo</button></div>
+    <section id="stage" class="stage" aria-label="Interactive homepage prototypes"></section>
+    <footer class="lab-footer"><span>Sample data. Interactions stay in this preview.</span><span>Scroll inside each phone to explore the full homepage.</span></footer>
+  </main>
+  <dialog id="sheet" aria-labelledby="sheet-title"><div id="sheet-content"></div></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="lab.js"></script>
+</body>
+</html>

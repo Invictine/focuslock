@@ -32,8 +32,20 @@ fn main() {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 if window.label() == blocker::BLOCKER_LABEL {
                     // The blocker is hidden, never destroyed, so the tracker can
-                    // show it again on the next block.
+                    // show it again on the next block. A permanent overlay must
+                    // not be taken down at all — Alt+F4 and programmatic closes
+                    // are refused here (belt-and-braces on top of
+                    // `closable(false)`), otherwise the user could leave the
+                    // block by closing the window.
                     api.prevent_close();
+                    if let Some(state) = window
+                        .app_handle()
+                        .try_state::<blocker::BlockerRuntime>()
+                    {
+                        if state.is_permanent_active() {
+                            return;
+                        }
+                    }
                     let _ = window.hide();
                 }
             }
@@ -60,6 +72,8 @@ fn main() {
             tracking::get_running_apps,
             tracking::set_tracker_config,
             tracking::set_blocked_targets,
+            tracking::get_permanent_targets,
+            tracking::add_permanent_targets,
             tracking::start_tracking,
             tracking::stop_tracking,
             tracking::clear_tracking_data,

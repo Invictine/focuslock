@@ -48,22 +48,23 @@
     <h1>Stay focused.</h1>
     <p class="sub">FocusLock blocked this page so future-you says thanks.</p>
     <div class="url" id="blockedUrl"></div>
-    <section class="frog" id="frogCard" aria-live="polite" hidden>
+    <section class="frog" id="frogCard" aria-live="polite" aria-busy="true">
       <div class="frog-kicker">Eat the Frog</div>
-      <div class="frog-title" id="frogTitle"></div>
+      <div class="frog-title" id="frogTitle">Loading today’s focus task…</div>
       <p class="frog-meta" id="frogMeta"></p>
       <div class="progress" id="frogProgress" role="progressbar" aria-label="Today's frog progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><span></span></div>
-      <div class="progress-label" id="frogProgressLabel"></div>
-      <a class="frog-cta" id="frogCta" href="#" hidden>Open Eat the Frog in dashboard →</a>
+      <div class="progress-label" id="frogProgressLabel" hidden></div>
+      <a class="frog-cta" id="frogCta" href="#" hidden>Open Focus dashboard →</a>
     </section>
     <div class="row">
       <button class="primary" id="goBack">← Go back</button>
       <button id="dashboard">Open dashboard</button>
       <button id="snoozeBtn">Need 5 min?</button>
     </div>
-    <div id="snoozeBox">
-      <div style="font-size:13px;color:var(--fl-on-surface-variant,#bbb4b1)">Emergency break: type <b id="phrase" style="color:var(--fl-warning,#e5c58f)"></b> then wait <b id="count">60</b>s. Frozen Turkey blocks cannot be bypassed.</div>
-      <input id="phraseInput" placeholder="type the phrase…" autocomplete="off" />
+    <div id="snoozeBox" aria-live="polite">
+      <div id="snoozeHelp" style="font-size:13px;color:var(--fl-on-surface-variant,#bbb4b1)">Emergency break: type <b id="phrase" style="color:var(--fl-warning,#e5c58f)"></b> then wait <b id="count">60</b>s. Frozen Turkey blocks cannot be bypassed.</div>
+      <label for="phraseInput" class="hint" style="display:block;text-align:left;margin-top:0">Type the phrase to start the wait</label>
+      <input id="phraseInput" placeholder="type the phrase…" autocomplete="off" aria-describedby="snoozeHelp" />
       <button id="snoozeGo" class="danger" disabled>Unlock 5 minutes</button>
     </div>
     <div class="hint">Cold Turkey rule: locked sessions can't be undone. <a href="#" id="closeTab">Close tab</a></div>

@@ -4,6 +4,11 @@ const publishableKey = process.env.CLERK_PUBLISHABLE_KEY;
 const syncHost = process.env.CLERK_SYNC_HOST;
 const browserSignInUrl = process.env.CLERK_SIGN_IN_URL;
 const optionsUrl = chrome.runtime.getURL('options/options.html');
+const AUTH_PENDING_KEY = 'focuslock.browserAuthPending';
+const AUTH_TAB_KEY = 'focuslock.browserAuthTabId';
+const RETURN_TAB_KEY = 'focuslock.browserAuthReturnTabId';
+const AUTH_DEADLINE_KEY = 'focuslock.browserAuthDeadline';
+const AUTH_TIMEOUT_MS = 5 * 60 * 1000;
 let clerk;
 
 const elements = {
@@ -34,6 +39,34 @@ let cloud = null;
 let syncing = false;
 let openingBrowser = false;
 
+function clearBrowserAuthPending() {
+  for (const key of [AUTH_PENDING_KEY, AUTH_TAB_KEY, RETURN_TAB_KEY, AUTH_DEADLINE_KEY]) {
+    sessionStorage.removeItem(key);
+  }
+}
+
+function persistBrowserAuthPending() {
+  sessionStorage.setItem(AUTH_PENDING_KEY, '1');
+  sessionStorage.setItem(AUTH_DEADLINE_KEY, String(authDeadline));
+  if (authTabId != null) sessionStorage.setItem(AUTH_TAB_KEY, String(authTabId));
+  if (returnTabId != null) sessionStorage.setItem(RETURN_TAB_KEY, String(returnTabId));
+}
+
+function restoreBrowserAuthPending() {
+  if (!sessionStorage.getItem(AUTH_PENDING_KEY)) return false;
+  const savedDeadline = Number(sessionStorage.getItem(AUTH_DEADLINE_KEY));
+  authDeadline = Number.isFinite(savedDeadline) && savedDeadline > Date.now()
+    ? savedDeadline : Date.now() + AUTH_TIMEOUT_MS;
+  const savedAuthTab = Number(sessionStorage.getItem(AUTH_TAB_KEY));
+  const savedReturnTab = Number(sessionStorage.getItem(RETURN_TAB_KEY));
+  authTabId = Number.isInteger(savedAuthTab) && savedAuthTab > 0 ? savedAuthTab : null;
+  returnTabId = Number.isInteger(savedReturnTab) && savedReturnTab > 0 ? savedReturnTab : null;
+  persistBrowserAuthPending();
+  elements.title.textContent = 'Finish signing in in the new tab';
+  elements.detail.textContent = 'Complete sign-in there. FocusLock will bring you back when your account connects.';
+  return true;
+}
+
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -50,9 +83,9 @@ function relativeTime(timestamp) {
 
 function connectionBadge(label, device) {
   if (!device) return `<span class="badge">${escapeHtml(label)} not linked</span>`;
-  const fresh = Date.now() - Number(device.lastSeen || 0) < 10 * 60 * 1000;
+  const fresh = Date.now() - Number(device.lastSeen || 0) < 20 * 60 * 1000;
   const good = device.trackingStatus === 'active' && fresh;
-  return `<span class="badge ${good ? 'good' : ''}">${escapeHtml(label)} ${good ? 'connected' : relativeTime(device.lastSeen)}</span>`;
+  return `<span class="badge ${good ? 'good' : ''}">${escapeHtml(label)} ${good ? 'recently active' : relativeTime(device.lastSeen)}</span>`;
 }
 
 function platformLabel(platform) {
@@ -70,16 +103,16 @@ function renderDevices(devices) {
     return;
   }
   elements.devices.innerHTML = list.map((device) => {
-    const fresh = Date.now() - Number(device.lastSeen || 0) < 10 * 60 * 1000;
+    const fresh = Date.now() - Number(device.lastSeen || 0) < 20 * 60 * 1000;
     const healthy = device.trackingStatus === 'active' && fresh;
     const meta = [
       platformLabel(device.platform),
       device.appVersion ? 'v' + device.appVersion : '',
-      device.statusDetail || (healthy ? 'Tracking active' : 'Tracking needs attention'),
+      device.statusDetail || (healthy ? 'Tracking recently active' : 'Tracking needs attention'),
     ].filter(Boolean).join(' · ');
     return `<div class="site-row"><div><strong>${escapeHtml(device.name || platformLabel(device.platform))}</strong>`
       + `<span class="mut">${escapeHtml(meta)}</span></div>`
-      + `<span class="badge ${healthy ? 'on' : ''}">${healthy ? '● connected' : escapeHtml(relativeTime(device.lastSeen))}</span></div>`;
+      + `<span class="badge ${healthy ? 'on' : ''}">${healthy ? '● Recently active' : escapeHtml(relativeTime(device.lastSeen))}</span></div>`;
   }).join('');
 }
 
@@ -89,7 +122,7 @@ async function checkBrowserSignIn() {
     clearInterval(authTimer);
     authDeadline = 0;
     elements.signIn.disabled = false;
-    sessionStorage.removeItem('focuslock.browserAuthPending');
+    clearBrowserAuthPending();
     elements.error.textContent = 'Sign-in has not reached FocusLock. Return here and try again.';
     elements.error.hidden = false;
     return;
@@ -102,7 +135,7 @@ async function checkBrowserSignIn() {
     if (!background?.signedIn) throw new Error(background?.error || 'The background tracker has not connected yet');
     clearInterval(authTimer);
     authDeadline = 0;
-    sessionStorage.removeItem('focuslock.browserAuthPending');
+    clearBrowserAuthPending();
     render();
     if (returnTabId != null) {
       await chrome.tabs.update(returnTabId, { active: true });
@@ -123,16 +156,20 @@ async function openBrowserSignIn() {
   elements.signIn.disabled = true;
   elements.error.hidden = true;
   try {
-    if (!browserSignInUrl || !/^https?:\/\//i.test(browserSignInUrl)) {
+    let signInUrl;
+    try { signInUrl = new URL(browserSignInUrl); } catch { signInUrl = null; }
+    if (!signInUrl || signInUrl.protocol !== 'https:') {
       elements.error.textContent = 'Browser sign-in is not configured. Rebuild the extension with its Clerk configuration.';
       elements.error.hidden = false;
       return;
     }
     render();
-    sessionStorage.setItem('focuslock.browserAuthPending', '1');
+    authDeadline = Date.now() + AUTH_TIMEOUT_MS;
+    persistBrowserAuthPending();
     returnTabId = (await chrome.tabs.getCurrent())?.id ?? null;
-    authDeadline = Date.now() + 5 * 60 * 1000;
+    persistBrowserAuthPending();
     authTabId = (await chrome.tabs.create({ url: browserSignInUrl, active: true })).id;
+    persistBrowserAuthPending();
     clearInterval(authTimer);
     authTimer = setInterval(() => void checkBrowserSignIn(), 2000);
     void checkBrowserSignIn();
@@ -141,7 +178,7 @@ async function openBrowserSignIn() {
   } catch (error) {
     clearInterval(authTimer);
     authDeadline = 0;
-    sessionStorage.removeItem('focuslock.browserAuthPending');
+    clearBrowserAuthPending();
     elements.error.textContent = `Could not open browser sign-in: ${error?.message || error}. Please try again.`;
     elements.error.hidden = false;
   } finally {
@@ -164,8 +201,10 @@ function render() {
     if (elements.cloud) elements.cloud.textContent = '';
     if (elements.pitch) elements.pitch.hidden = true;
     if (elements.devicesCard) elements.devicesCard.hidden = true;
-    elements.title.textContent = 'Connect your FocusLock account';
-    elements.detail.textContent = 'Sign in securely in your browser to sync Chrome, Android, and Windows.';
+    elements.title.textContent = authDeadline ? 'Finish signing in in the new tab' : 'Connect your FocusLock account';
+    elements.detail.textContent = authDeadline
+      ? 'Complete sign-in there. FocusLock will bring you back when your account connects.'
+      : 'Sign in securely in your browser to sync Chrome, Android, and Windows.';
     elements.state.innerHTML = '<span class="badge">Chrome local only</span><span class="badge">Cloud sync off</span>';
     return;
   }
@@ -176,7 +215,8 @@ function render() {
   const android = devices.find((device) => device.platform === 'android');
   if (elements.badge) { elements.badge.textContent = 'Priority Active'; elements.badge.classList.add('prio'); }
   elements.title.textContent = `Connected as ${email}`;
-  elements.detail.textContent = cloud?.lastSyncAt ? `Account data ${relativeTime(cloud.lastSyncAt)}.` : 'Your account is connected. Syncing device status...';
+  elements.detail.textContent = cloud?.lastWarning
+    || (cloud?.lastSyncAt ? `Account data ${relativeTime(cloud.lastSyncAt)}.` : 'Your account is connected. Syncing device status...');
   elements.state.innerHTML = connectionBadge('Chrome', browser) + connectionBadge('Android', android);
   if (elements.cloud) {
     elements.cloud.textContent = cloud?.lastSyncAt
@@ -228,6 +268,11 @@ async function init() {
     if (clerk.session && !cloud && !syncing) void refreshCloud(true);
   });
   render();
+  if (restoreBrowserAuthPending()) {
+    render();
+    authTimer = setInterval(() => void checkBrowserSignIn(), 2000);
+    void checkBrowserSignIn();
+  }
   if (clerk.session) {
     await chrome.runtime.sendMessage({ type: 'cloudAuthRefresh' });
     await refreshCloud(true);

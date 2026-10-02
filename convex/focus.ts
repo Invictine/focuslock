@@ -1,5 +1,7 @@
-import { mutation, query } from "./_generated/server";
+import { mutation, query, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
+import { loadUsageSummary, loadKnownTargets } from "./usage";
+import { applyCollectionDiff, validateCollection, validateUpdatedAt } from "./storageDiff";
 
 async function requireUserId(ctx: any): Promise<string> {
   const identity = await ctx.auth.getUserIdentity();
@@ -7,7 +9,7 @@ async function requireUserId(ctx: any): Promise<string> {
   return identity.subject;
 }
 
-type SyncCollection = "blockedApps" | "blockedWebsites" | "appLimits" | "blockSchedules";
+type SyncCollection = "blockedApps" | "blockedWebsites" | "appLimits" | "blockSchedules" | "targetGroups";
 
 /** The verified account key, shared by OAuth and Clerk SDK clients. */
 export const getAccount = query({
@@ -33,32 +35,21 @@ async function setCollectionVersion(
   updatedAt: number,
 ) {
   const existing = await getCollectionVersion(ctx, userId, collection);
-  if (existing) await ctx.db.patch(existing._id, { updatedAt });
-  else await ctx.db.insert("syncVersions", { userId, collection, updatedAt });
+  if (existing) {
+    if (existing.updatedAt !== updatedAt) await ctx.db.patch(existing._id, { updatedAt });
+  } else await ctx.db.insert("syncVersions", { userId, collection, updatedAt });
 }
 
 /** Full snapshot for the signed-in user — powers auto-sync on both clients. */
 export const getSnapshot = query({
-  args: {},
-  handler: async (ctx) => {
+  args: { knownVersion: v.optional(v.string()), knownGroupsUpdatedAt: v.optional(v.number()),
+    usageDate: v.optional(v.string()), includeKnownTargets: v.optional(v.boolean()) },
+  handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
     const state = await ctx.db
       .query("focusState")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .first();
-    const apps = await ctx.db
-      .query("blockedApps")
-      .withIndex("by_user", (q) => q.eq("userId", userId))
-      .collect();
-    const sites = await ctx.db
-      .query("blockedWebsites")
-      .withIndex("by_user", (q) => q.eq("userId", userId))
-      .collect();
-    const records = await ctx.db
-      .query("workRecords")
-      .withIndex("by_user", (q) => q.eq("userId", userId))
-      .order("desc")
-      .take(200);
     const nuke = await ctx.db
       .query("nukeState")
       .withIndex("by_user", (q) => q.eq("userId", userId))
@@ -69,16 +60,70 @@ export const getSnapshot = query({
       .first();
     const appsVersion = await getCollectionVersion(ctx, userId, "blockedApps");
     const sitesVersion = await getCollectionVersion(ctx, userId, "blockedWebsites");
+    const latestRecord = await ctx.db.query("workRecords")
+      .withIndex("by_user", (q) => q.eq("userId", userId)).order("desc").first();
+    // Legacy collections without version rows need a one-time scan so their
+    // content is not hidden behind a misleading zero version.
+    const legacyApps = appsVersion ? undefined : await ctx.db.query("blockedApps")
+      .withIndex("by_user", (q) => q.eq("userId", userId)).collect();
+    const legacySites = sitesVersion ? undefined : await ctx.db.query("blockedWebsites")
+      .withIndex("by_user", (q) => q.eq("userId", userId)).collect();
+    const appsUpdatedAt = appsVersion?.updatedAt ?? Math.max(0, ...(legacyApps ?? []).map((app) => app.updatedAt));
+    const sitesUpdatedAt = sitesVersion?.updatedAt ?? Math.max(0, ...(legacySites ?? []).map((site) => site.updatedAt));
+    const version = JSON.stringify([
+      state?.updatedAt ?? 0, appsUpdatedAt, sitesUpdatedAt,
+      latestRecord?._creationTime ?? 0, nuke?.updatedAt ?? 0, prefs?.updatedAt ?? 0,
+    ]);
+    // Opt-in group version piggybacks the Android pull. Older clients retain
+    // their original response contract and separate groupsState endpoint.
+    let groupsState;
+    if (args.knownGroupsUpdatedAt !== undefined) {
+      const groupsVersion = await ctx.db.query("syncVersions")
+        .withIndex("by_user_collection", (q) => q.eq("userId", userId).eq("collection", "targetGroups")).first();
+      const legacyGroups = groupsVersion ? undefined : await ctx.db.query("targetGroups")
+        .withIndex("by_user", (q) => q.eq("userId", userId)).collect();
+      const updatedAt = groupsVersion?.updatedAt ?? Math.max(0, ...(legacyGroups ?? []).map((row) => row.updatedAt));
+      if (args.knownGroupsUpdatedAt !== updatedAt) {
+        groupsState = { updatedAt, groups: legacyGroups ?? await ctx.db.query("targetGroups")
+          .withIndex("by_user", (q) => q.eq("userId", userId)).collect() };
+      }
+    }
+    const extras = {
+      ...(groupsState ? { groupsState } : {}),
+      ...(args.usageDate ? { usageSummary: await loadUsageSummary(ctx, userId, { fromDate: args.usageDate, toDate: args.usageDate }) } : {}),
+      ...(args.includeKnownTargets ? { knownTargets: await loadKnownTargets(ctx, userId) } : {}),
+    };
+    if (args.knownVersion === version) return { unchanged: true, version, ...extras };
+    let previous: number[] | undefined;
+    try {
+      const parsed = JSON.parse(args.knownVersion ?? "");
+      if (Array.isArray(parsed) && parsed.length === 6 && parsed.every((n) => typeof n === "number")) {
+        previous = parsed;
+      }
+    } catch { /* first sync or an older client */ }
+    const current = JSON.parse(version) as number[];
+    const changed = (index: number) => !previous || previous[index] !== current[index];
+    const apps = changed(1) ? legacyApps ?? await ctx.db.query("blockedApps")
+      .withIndex("by_user", (q) => q.eq("userId", userId)).collect() : undefined;
+    const sites = changed(2) ? legacySites ?? await ctx.db.query("blockedWebsites")
+      .withIndex("by_user", (q) => q.eq("userId", userId)).collect() : undefined;
+    const records = changed(3) ? await ctx.db.query("workRecords")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .order("desc").take(200) : undefined;
     return {
-      state,
+      unchanged: false,
+      partial: !!previous,
+      version,
+      state: changed(0) ? state : undefined,
       apps,
       sites,
       records,
-      nuke,
-      prefs,
+      nuke: changed(4) ? (nuke ?? null) : undefined,
+      prefs: changed(5) ? (prefs ?? null) : undefined,
+      ...extras,
       stateUpdatedAt: state?.updatedAt ?? 0,
-      appsUpdatedAt: appsVersion?.updatedAt ?? Math.max(0, ...apps.map((app) => app.updatedAt)),
-      sitesUpdatedAt: sitesVersion?.updatedAt ?? Math.max(0, ...sites.map((site) => site.updatedAt)),
+      appsUpdatedAt,
+      sitesUpdatedAt,
     };
   },
 });
@@ -92,6 +137,9 @@ export const saveState = mutation({
     tasksCompletedToday: v.number(),
     lastResetDate: v.string(),
     updatedAt: v.number(),
+    expectedUpdatedAt: v.optional(v.number()),
+    acknowledgedExternalEarnedSeconds: v.optional(v.number()),
+    acknowledgedExternalSpentSeconds: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
@@ -99,13 +147,38 @@ export const saveState = mutation({
       .query("focusState")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .first();
+    const currentUpdatedAt = existing?.updatedAt ?? 0;
+    if (![args.expectedUpdatedAt, args.acknowledgedExternalEarnedSeconds, args.acknowledgedExternalSpentSeconds]
+      .filter((value): value is number => value !== undefined).every((value) => Number.isFinite(value) && value >= 0)) {
+      throw new Error("Invalid focus-state acknowledgement");
+    }
+    if (args.expectedUpdatedAt !== undefined && args.expectedUpdatedAt !== currentUpdatedAt) {
+      return { applied: false, updatedAt: currentUpdatedAt };
+    }
+    const currentExternalEarned = existing?.externalEarnedSeconds ?? 0;
+    const currentExternalSpent = existing?.externalSpentSeconds ?? 0;
+    if ((args.acknowledgedExternalEarnedSeconds !== undefined && args.acknowledgedExternalEarnedSeconds !== currentExternalEarned) ||
+        (args.acknowledgedExternalSpentSeconds !== undefined && args.acknowledgedExternalSpentSeconds !== currentExternalSpent)) {
+      return { applied: false, updatedAt: currentUpdatedAt };
+    }
+    const nextState = {
+      creditBalanceSeconds: args.creditBalanceSeconds,
+      totalWorkSecondsToday: args.totalWorkSecondsToday,
+      totalScrollSecondsToday: args.totalScrollSecondsToday,
+      tasksCompletedToday: args.tasksCompletedToday,
+      lastResetDate: args.lastResetDate,
+      updatedAt: args.updatedAt,
+    };
     if (existing) {
       // Ignore stale writes from a device with an old clock/cache.
       if (args.updatedAt < existing.updatedAt) return { applied: false, updatedAt: existing.updatedAt };
-      await ctx.db.patch(existing._id, { ...args, userId });
+      // Patch only the native absolute-state fields. External lifetime and
+      // per-day counters are owned by recordWork/recordUsageBatch and survive
+      // older clients that do not send acknowledgement markers.
+      await ctx.db.patch(existing._id, nextState);
       return { applied: true, updatedAt: args.updatedAt };
     }
-    await ctx.db.insert("focusState", { ...args, userId });
+    await ctx.db.insert("focusState", { ...nextState, userId });
     return { applied: true, updatedAt: args.updatedAt };
   },
 });
@@ -126,13 +199,15 @@ export const saveBlockedApps = mutation({
   },
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
+    validateUpdatedAt(args.updatedAt);
+    validateCollection(args.apps, "Blocked apps", (app) => [app.packageName]);
     const version = await getCollectionVersion(ctx, userId, "blockedApps");
     if (version && args.updatedAt < version.updatedAt) return { applied: false, updatedAt: version.updatedAt };
     const existing = await ctx.db
       .query("blockedApps")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .collect();
-    const storedVersion = Math.max(version?.updatedAt ?? 0, ...existing.map((row) => row.updatedAt));
+    const storedVersion = Math.max(version?.updatedAt ?? 0, ...existing.map((row) => row.updatedAt ?? 0));
     if (args.updatedAt < storedVersion) return { applied: false, updatedAt: storedVersion };
     const prefs = await ctx.db.query("userPrefs")
       .withIndex("by_user", (q) => q.eq("userId", userId)).first();
@@ -141,12 +216,12 @@ export const saveBlockedApps = mutation({
           !args.apps.some((incoming) => incoming.packageName === app.packageName && incoming.isBlocked))) {
       throw new Error("Blocked apps cannot be removed during Strict Mode");
     }
-    for (const doc of existing) await ctx.db.delete(doc._id);
-    for (const app of args.apps) {
-      await ctx.db.insert("blockedApps", { ...app, userId, updatedAt: args.updatedAt });
-    }
-    await setCollectionVersion(ctx, userId, "blockedApps", args.updatedAt);
-    return { applied: true, updatedAt: args.updatedAt };
+    const effectiveClock = Math.max(args.updatedAt, storedVersion + 1);
+    const changedRows = await applyCollectionDiff(ctx, "blockedApps", userId, existing, args.apps,
+      (app) => [app.packageName], effectiveClock);
+    const collectionClock = changedRows ? effectiveClock : Math.max(args.updatedAt, storedVersion);
+    await setCollectionVersion(ctx, userId, "blockedApps", collectionClock);
+    return { applied: true, updatedAt: collectionClock };
   },
 });
 
@@ -166,13 +241,15 @@ export const saveBlockedWebsites = mutation({
   },
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
+    validateUpdatedAt(args.updatedAt);
+    validateCollection(args.sites, "Blocked websites", (site) => [site.domain]);
     const version = await getCollectionVersion(ctx, userId, "blockedWebsites");
     if (version && args.updatedAt < version.updatedAt) return { applied: false, updatedAt: version.updatedAt };
     const existing = await ctx.db
       .query("blockedWebsites")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .collect();
-    const storedVersion = Math.max(version?.updatedAt ?? 0, ...existing.map((row) => row.updatedAt));
+    const storedVersion = Math.max(version?.updatedAt ?? 0, ...existing.map((row) => row.updatedAt ?? 0));
     if (args.updatedAt < storedVersion) return { applied: false, updatedAt: storedVersion };
     const prefs = await ctx.db.query("userPrefs")
       .withIndex("by_user", (q) => q.eq("userId", userId)).first();
@@ -181,12 +258,104 @@ export const saveBlockedWebsites = mutation({
           !args.sites.some((incoming) => incoming.domain === site.domain && incoming.isBlocked))) {
       throw new Error("Blocked websites cannot be removed during Strict Mode");
     }
-    for (const doc of existing) await ctx.db.delete(doc._id);
-    for (const site of args.sites) {
-      await ctx.db.insert("blockedWebsites", { ...site, userId, updatedAt: args.updatedAt });
+    const effectiveClock = Math.max(args.updatedAt, storedVersion + 1);
+    const changedRows = await applyCollectionDiff(ctx, "blockedWebsites", userId, existing, args.sites,
+      (site) => [site.domain], effectiveClock);
+    const collectionClock = changedRows ? effectiveClock : Math.max(args.updatedAt, storedVersion);
+    await setCollectionVersion(ctx, userId, "blockedWebsites", collectionClock);
+    return { applied: true, updatedAt: collectionClock };
+  },
+});
+
+/** Small conditional pull for browser enforcement. Versions also represent an
+ * intentionally empty collection, so deleting the last site reaches browsers. */
+export const getSyncPulse = query({
+  args: {
+    sitesUpdatedAt: v.number(), prefsUpdatedAt: v.number(), nukeUpdatedAt: v.optional(v.number()),
+    knownPolicyVersion: v.optional(v.string()), usageDate: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    if (args.usageDate !== undefined) {
+      const parsed = new Date(`${args.usageDate}T00:00:00Z`);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(args.usageDate) || !Number.isFinite(parsed.getTime()) ||
+          parsed.toISOString().slice(0, 10) !== args.usageDate) throw new Error("Invalid usage date");
     }
-    await setCollectionVersion(ctx, userId, "blockedWebsites", args.updatedAt);
-    return { applied: true, updatedAt: args.updatedAt };
+    const sitesVersion = await getCollectionVersion(ctx, userId, "blockedWebsites");
+    const prefs = await ctx.db.query("userPrefs")
+      .withIndex("by_user", (q) => q.eq("userId", userId)).first();
+    const legacySites = sitesVersion ? undefined : await ctx.db.query("blockedWebsites")
+      .withIndex("by_user", (q) => q.eq("userId", userId)).collect();
+    const sitesUpdatedAt = sitesVersion?.updatedAt ?? Math.max(0, ...(legacySites ?? []).map((site) => site.updatedAt));
+    const prefsUpdatedAt = prefs?.updatedAt ?? 0;
+    const nuke = args.nukeUpdatedAt === undefined ? undefined : await ctx.db.query("nukeState")
+      .withIndex("by_user", (q) => q.eq("userId", userId)).first();
+    const nukeUpdatedAt = nuke?.updatedAt ?? 0;
+    const sites = sitesUpdatedAt !== args.sitesUpdatedAt
+      ? legacySites ?? await ctx.db.query("blockedWebsites")
+        .withIndex("by_user", (q) => q.eq("userId", userId)).collect()
+      : undefined;
+    let policyVersion: string | undefined;
+    let policy: { state: any; groups: any[]; limits: any[]; schedules: any[] } | undefined;
+    if (args.knownPolicyVersion !== undefined) {
+      const [state, groupsVersion, limitsVersion, schedulesVersion] = await Promise.all([
+        ctx.db.query("focusState").withIndex("by_user", (q) => q.eq("userId", userId)).first(),
+        getCollectionVersion(ctx, userId, "targetGroups"),
+        getCollectionVersion(ctx, userId, "appLimits"),
+        getCollectionVersion(ctx, userId, "blockSchedules"),
+      ]);
+      const [legacyGroups, legacyLimits, legacySchedules] = await Promise.all([
+        groupsVersion ? Promise.resolve(undefined) : ctx.db.query("targetGroups").withIndex("by_user", (q) => q.eq("userId", userId)).collect(),
+        limitsVersion ? Promise.resolve(undefined) : ctx.db.query("appLimits").withIndex("by_user", (q) => q.eq("userId", userId)).collect(),
+        schedulesVersion ? Promise.resolve(undefined) : ctx.db.query("blockSchedules").withIndex("by_user", (q) => q.eq("userId", userId)).collect(),
+      ]);
+      const groupsUpdatedAt = groupsVersion?.updatedAt ?? Math.max(0, ...(legacyGroups ?? []).map((row) => row.updatedAt));
+      const limitsUpdatedAt = limitsVersion?.updatedAt ?? Math.max(0, ...(legacyLimits ?? []).map((row) => row.updatedAt));
+      const schedulesUpdatedAt = schedulesVersion?.updatedAt ?? Math.max(0, ...(legacySchedules ?? []).map((row) => row.updatedAt));
+      policyVersion = JSON.stringify([state?.updatedAt ?? 0, groupsUpdatedAt, limitsUpdatedAt, schedulesUpdatedAt]);
+      if (args.knownPolicyVersion !== policyVersion) {
+        const [groups, limits, schedules] = await Promise.all([
+          legacyGroups ?? ctx.db.query("targetGroups").withIndex("by_user", (q) => q.eq("userId", userId)).collect(),
+          legacyLimits ?? ctx.db.query("appLimits").withIndex("by_user", (q) => q.eq("userId", userId)).collect(),
+          legacySchedules ?? ctx.db.query("blockSchedules").withIndex("by_user", (q) => q.eq("userId", userId)).collect(),
+        ]);
+        policy = { state, groups, limits, schedules };
+      }
+    }
+    const includePolicyPrefs = args.knownPolicyVersion !== undefined;
+    const prefsPayload = (prefsUpdatedAt !== args.prefsUpdatedAt || includePolicyPrefs)
+      ? prefs ? {
+          strictMode: prefs.strictMode,
+          strictEndsAt: prefs.strictEndsAt,
+          strictPreset: prefs.strictPreset,
+          strictNukeAfterFive: prefs.strictNukeAfterFive,
+          ...(includePolicyPrefs ? {
+            globalDailyCapMinutes: prefs.globalDailyCapMinutes,
+            strictSessionId: prefs.strictSessionId,
+            strictApprovedEndsAt: prefs.strictApprovedEndsAt,
+            strictApprovedAt: prefs.strictApprovedAt,
+            strictApprovedSessionId: prefs.strictApprovedSessionId,
+          } : {}),
+        } : null
+      : undefined;
+    return {
+      sitesUpdatedAt,
+      prefsUpdatedAt,
+      ...(args.nukeUpdatedAt === undefined ? {} : {
+        nukeUpdatedAt,
+        nuke: nukeUpdatedAt !== args.nukeUpdatedAt ? nuke ?? null : undefined,
+      }),
+      sites: sites?.map((site) => ({
+        domain: site.domain,
+        isBlocked: site.isBlocked,
+        ...(args.knownPolicyVersion === undefined ? {} : { category: site.category }),
+      })),
+      prefs: prefsPayload,
+      ...(policyVersion === undefined ? {} : { policyVersion, ...(policy ? { policy } : {}) }),
+      ...(args.usageDate === undefined ? {} : {
+        usageSummary: await loadUsageSummary(ctx, userId, { fromDate: args.usageDate, toDate: args.usageDate }),
+      }),
+    };
   },
 });
 
@@ -262,7 +431,7 @@ export const recordWork = mutation({
   args: {
     recordId: v.string(), title: v.string(), durationMinutes: v.number(),
     timestamp: v.number(), source: v.string(), earnedMinutesCredited: v.number(),
-    date: v.string(), tasksCompleted: v.number(),
+    date: v.string(), tasksCompleted: v.number(), projectName: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
@@ -273,14 +442,15 @@ export const recordWork = mutation({
       q.eq("userId", userId).eq("recordId", args.recordId)).first();
     if (existing) return { applied: true, duplicate: true };
     const { date, tasksCompleted, ...record } = args;
-    await ctx.db.insert("workRecords", { ...record, userId });
-    const { recordId, ...session } = record;
-    const existingSession = await ctx.db.query("focusSessions").withIndex("by_user_session", (q) =>
-      q.eq("userId", userId).eq("sessionId", recordId)).first();
-    if (!existingSession) await ctx.db.insert("focusSessions", { ...session, sessionId: recordId, userId });
+    // The history and session views share one durable event instead of two
+    // identical indexed documents. Legacy standalone sessions stay readable.
+    await ctx.db.insert("workRecords", { ...record, userId, representsFocusSession: true });
     const state = await ctx.db.query("focusState").withIndex("by_user", (q) => q.eq("userId", userId)).first();
     const sameDay = state?.lastResetDate === date;
     const olderDay = !!state && state.lastResetDate > date;
+    const externalDate = state?.externalDate ?? "";
+    const sameExternalDay = externalDate === date;
+    const olderExternalDay = Boolean(externalDate && externalDate > date);
     const next = {
       userId,
       creditBalanceSeconds: (state?.creditBalanceSeconds ?? 0) + args.earnedMinutesCredited * 60,
@@ -291,6 +461,15 @@ export const recordWork = mutation({
         (sameDay ? state.tasksCompletedToday : 0) + tasksCompleted,
       lastResetDate: olderDay ? state.lastResetDate : date,
       updatedAt: Math.max(Date.now(), (state?.updatedAt ?? 0) + 1),
+      externalEarnedSeconds: (state?.externalEarnedSeconds ?? 0) + args.earnedMinutesCredited * 60,
+      externalSpentSeconds: state?.externalSpentSeconds ?? 0,
+      externalDate: olderExternalDay ? externalDate : date,
+      externalWorkSecondsToday: olderExternalDay ? state?.externalWorkSecondsToday ?? 0
+        : (sameExternalDay ? state?.externalWorkSecondsToday ?? 0 : 0) + args.durationMinutes * 60,
+      externalScrollSecondsToday: olderExternalDay ? state?.externalScrollSecondsToday ?? 0
+        : sameExternalDay ? state?.externalScrollSecondsToday ?? 0 : 0,
+      externalTasksCompletedToday: olderExternalDay ? state?.externalTasksCompletedToday ?? 0
+        : (sameExternalDay ? state?.externalTasksCompletedToday ?? 0 : 0) + tasksCompleted,
     };
     if (state) await ctx.db.patch(state._id, next);
     else await ctx.db.insert("focusState", next);
@@ -299,16 +478,51 @@ export const recordWork = mutation({
 });
 
 export const getDashboard = query({
-  args: {
-    fromDate: v.optional(v.string()),
-    toDate: v.optional(v.string()),
-  },
-  handler: async (ctx, args) => {
+  args: { fromDate: v.optional(v.string()), toDate: v.optional(v.string()) },
+  handler: async (ctx, args) => loadDashboard(ctx, await requireUserId(ctx), args, true),
+});
+
+/** Reactive enforcement surface excludes history, usage and presence. */
+export const getConfiguration = query({
+  args: {},
+  handler: async (ctx) => loadDashboard(ctx, await requireUserId(ctx), {}, false),
+});
+
+export const getState = query({
+  args: {},
+  handler: async (ctx) => {
     const userId = await requireUserId(ctx);
-    const state = await ctx.db
+    const state = await ctx.db.query("focusState").withIndex("by_user", (q) => q.eq("userId", userId)).first();
+    return { state, stateUpdatedAt: state?.updatedAt ?? 0 };
+  },
+});
+
+export const getHistory = query({
+  args: {},
+  handler: async (ctx) => {
+    const userId = await requireUserId(ctx);
+    return await loadWorkHistory(ctx, userId);
+  },
+});
+
+async function loadWorkHistory(ctx: QueryCtx, userId: string) {
+  const records = await ctx.db.query("workRecords").withIndex("by_user", (q) => q.eq("userId", userId)).order("desc").take(200);
+  const legacy = await ctx.db.query("focusSessions").withIndex("by_user", (q) => q.eq("userId", userId)).order("desc").take(200);
+  const merged = new Map(legacy.map((session) => [session.sessionId, { ...session }]));
+  for (const record of records) if (record.representsFocusSession) {
+    const { _id, recordId, representsFocusSession: _flag, projectName: _project, ...event } = record;
+    // IDs are only presentation keys; session mutations still use sessionId.
+    merged.set(recordId, { ...event, _id: _id as any, sessionId: recordId });
+  }
+  return { records, sessions: [...merged.values()].sort((a, b) => b._creationTime - a._creationTime).slice(0, 200) };
+}
+
+async function loadDashboard(ctx: QueryCtx, userId: string,
+  args: { fromDate?: string; toDate?: string }, includeHistory: boolean) {
+    const state = includeHistory ? await ctx.db
       .query("focusState")
       .withIndex("by_user", (q) => q.eq("userId", userId))
-      .first();
+      .first() : null;
     const apps = await ctx.db
       .query("blockedApps")
       .withIndex("by_user", (q) => q.eq("userId", userId))
@@ -317,11 +531,8 @@ export const getDashboard = query({
       .query("blockedWebsites")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .collect();
-    const records = await ctx.db
-      .query("workRecords")
-      .withIndex("by_user", (q) => q.eq("userId", userId))
-      .order("desc")
-      .take(200);
+    const history = includeHistory ? await loadWorkHistory(ctx, userId) : { records: [], sessions: [] };
+    const records = history.records;
     const limits = await ctx.db
       .query("appLimits")
       .withIndex("by_user", (q) => q.eq("userId", userId))
@@ -330,15 +541,11 @@ export const getDashboard = query({
       .query("blockSchedules")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .collect();
-    const sessions = await ctx.db
-      .query("focusSessions")
-      .withIndex("by_user", (q) => q.eq("userId", userId))
-      .order("desc")
-      .take(200);
+    const sessions = history.sessions;
     // Fetch only the requested window straight from the (userId, date) index,
     // newest first, capped at the 90 rows the response shape carries — instead
     // of collecting every dailyUsage row and filtering/sorting in JS.
-    const usage = args.fromDate && args.toDate
+    const usage = !includeHistory ? [] : args.fromDate && args.toDate
       ? await ctx.db.query("dailyUsage").withIndex("by_user_date", (q) =>
           q.eq("userId", userId).gte("date", args.fromDate!).lte("date", args.toDate!),
         ).order("desc").take(90)
@@ -357,10 +564,10 @@ export const getDashboard = query({
       .query("userPrefs")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .first();
-    const devices = await ctx.db
+    const devices = includeHistory ? await ctx.db
       .query("devices")
       .withIndex("by_user", (q) => q.eq("userId", userId))
-      .collect();
+      .collect() : [];
     const versions = await Promise.all(
       (["blockedApps", "blockedWebsites", "appLimits", "blockSchedules"] as const)
         .map((collection) => getCollectionVersion(ctx, userId, collection)),
@@ -373,8 +580,8 @@ export const getDashboard = query({
       limitsUpdatedAt: versions[2]?.updatedAt ?? Math.max(0, ...limits.map((row) => row.updatedAt)),
       schedulesUpdatedAt: versions[3]?.updatedAt ?? Math.max(0, ...schedules.map((row) => row.updatedAt)),
     };
-  },
-});
+}
+
 
 /** Replace the full per-target limits list (small list, simple LWW). */
 export const saveAppLimits = mutation({
@@ -393,20 +600,22 @@ export const saveAppLimits = mutation({
   },
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
+    validateUpdatedAt(args.updatedAt);
+    validateCollection(args.limits, "App limits", (limit) => [limit.targetKind, limit.targetKey]);
     const version = await getCollectionVersion(ctx, userId, "appLimits");
     if (version && args.updatedAt < version.updatedAt) return { applied: false, updatedAt: version.updatedAt };
     const existing = await ctx.db
       .query("appLimits")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .collect();
-    const storedVersion = Math.max(version?.updatedAt ?? 0, ...existing.map((row) => row.updatedAt));
+    const storedVersion = Math.max(version?.updatedAt ?? 0, ...existing.map((row) => row.updatedAt ?? 0));
     if (args.updatedAt < storedVersion) return { applied: false, updatedAt: storedVersion };
-    for (const doc of existing) await ctx.db.delete(doc._id);
-    for (const l of args.limits) {
-      await ctx.db.insert("appLimits", { ...l, userId, updatedAt: args.updatedAt });
-    }
-    await setCollectionVersion(ctx, userId, "appLimits", args.updatedAt);
-    return { applied: true, updatedAt: args.updatedAt };
+    const effectiveClock = Math.max(args.updatedAt, storedVersion + 1);
+    const changedRows = await applyCollectionDiff(ctx, "appLimits", userId, existing, args.limits,
+      (limit) => [limit.targetKind, limit.targetKey], effectiveClock);
+    const collectionClock = changedRows ? effectiveClock : Math.max(args.updatedAt, storedVersion);
+    await setCollectionVersion(ctx, userId, "appLimits", collectionClock);
+    return { applied: true, updatedAt: collectionClock };
   },
 });
 
@@ -429,20 +638,22 @@ export const saveSchedules = mutation({
   },
   handler: async (ctx, args) => {
     const userId = await requireUserId(ctx);
+    validateUpdatedAt(args.updatedAt);
+    validateCollection(args.schedules, "Schedules", (schedule) => [schedule.scheduleId]);
     const version = await getCollectionVersion(ctx, userId, "blockSchedules");
     if (version && args.updatedAt < version.updatedAt) return { applied: false, updatedAt: version.updatedAt };
     const existing = await ctx.db
       .query("blockSchedules")
       .withIndex("by_user", (q) => q.eq("userId", userId))
       .collect();
-    const storedVersion = Math.max(version?.updatedAt ?? 0, ...existing.map((row) => row.updatedAt));
+    const storedVersion = Math.max(version?.updatedAt ?? 0, ...existing.map((row) => row.updatedAt ?? 0));
     if (args.updatedAt < storedVersion) return { applied: false, updatedAt: storedVersion };
-    for (const doc of existing) await ctx.db.delete(doc._id);
-    for (const s of args.schedules) {
-      await ctx.db.insert("blockSchedules", { ...s, userId, updatedAt: args.updatedAt });
-    }
-    await setCollectionVersion(ctx, userId, "blockSchedules", args.updatedAt);
-    return { applied: true, updatedAt: args.updatedAt };
+    const effectiveClock = Math.max(args.updatedAt, storedVersion + 1);
+    const changedRows = await applyCollectionDiff(ctx, "blockSchedules", userId, existing, args.schedules,
+      (schedule) => [schedule.scheduleId], effectiveClock);
+    const collectionClock = changedRows ? effectiveClock : Math.max(args.updatedAt, storedVersion);
+    await setCollectionVersion(ctx, userId, "blockSchedules", collectionClock);
+    return { applied: true, updatedAt: collectionClock };
   },
 });
 

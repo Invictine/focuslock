@@ -7,76 +7,161 @@ import android.provider.Settings
 import android.telecom.TelecomManager
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.mutablePreferencesOf
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.focuslock.app.data.model.BlockedApp
+import com.focuslock.app.data.model.BlockedWebsite
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import org.json.JSONObject
+import java.net.IDN
+import java.net.URI
 import java.util.Collections
 
 private val Context.permanentBlocksDataStore by preferencesDataStore(name = "focuslock_permanent_app_blocks")
 
-/**
- * Device-local, append-only store for apps that should always be blocked.
- *
- * This deliberately has no expiry, credit, session, emergency, or in-app remove
- * operation. A separate store keeps a sync restore or a normal boundary edit from
- * silently weakening a user's permanent commitment.
- */
+/** Device-local append-only store for permanent app and website commitments. */
 class PermanentBlocksRepository(private val context: Context) {
     private object Keys {
         val PACKAGES = stringSetPreferencesKey("packages")
+        val DOMAINS = stringSetPreferencesKey("domains")
+        val APP_NAMES = stringPreferencesKey("app_names_json")
     }
 
-    private val mirror = Collections.synchronizedSet(mutableSetOf<String>())
+    private val packageMirror = Collections.synchronizedSet(mutableSetOf<String>())
+    private val domainMirror = Collections.synchronizedSet(mutableSetOf<String>())
+    private val namesMirror = Collections.synchronizedMap(mutableMapOf<String, String>())
     private val warmMutex = Mutex()
-    @Volatile private var hasLoaded = false
+    private val mirrorScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val firstSnapshot = CompletableDeferred<Unit>()
+    @Volatile private var mirrorJob: Job? = null
 
-    val packagesFlow: Flow<Set<String>> = context.permanentBlocksDataStore.data
-        // Keep the last known set if DataStore has a transient read failure. Clearing
-        // it here would turn a permanent commitment into a temporary fail-open block.
-        .catch { emit(mutablePreferencesOf(Keys.PACKAGES to synchronized(mirror) { mirror.toSet() })) }
-        .map { prefs ->
-            val value = prefs[Keys.PACKAGES].orEmpty().map(::normalize).filter(String::isNotEmpty).toSet()
-            synchronized(mirror) {
-                mirror.clear()
-                mirror.addAll(value)
-            }
-            hasLoaded = true
-            value
-        }
+    /** Every projection updates all mirrors together, so collecting one flow cannot leave another cold. */
+    private val snapshotFlow: Flow<Preferences> = context.permanentBlocksDataStore.data
+        .map { prefs -> updateMirrors(prefs); prefs }
+        .catch { emit(fallbackSnapshot()) }
 
-    /** Starts the DataStore collector and warms the synchronous enforcement mirror. */
+    val packagesFlow: Flow<Set<String>> = snapshotFlow.map {
+        synchronized(packageMirror) { packageMirror.toSet() }
+    }
+
+    /** Permanent sites are independently persisted so ordinary boundary and cloud writes cannot erase them. */
+    val domainsFlow: Flow<Set<String>> = snapshotFlow.map {
+        synchronized(domainMirror) { domainMirror.toSet() }
+    }
+
+    /** Saved labels remain available even after the target package is uninstalled. */
+    val appNamesFlow: Flow<Map<String, String>> = snapshotFlow.map {
+        synchronized(namesMirror) { namesMirror.toMap() }
+    }
+
+    /** Starts DataStore collection and warms synchronous enforcement mirrors. */
     suspend fun warm() {
-        if (hasLoaded) return
         warmMutex.withLock {
-            if (!hasLoaded) packagesFlow.first()
+            if (mirrorJob == null) {
+                mirrorJob = mirrorScope.launch {
+                    snapshotFlow.collect {
+                        firstSnapshot.complete(Unit)
+                    }
+                }
+            }
         }
+        firstSnapshot.await()
     }
 
     fun isPermanentlyBlocked(packageName: String): Boolean =
-        synchronized(mirror) { normalize(packageName) in mirror }
+        synchronized(packageMirror) { normalizePackage(packageName) in packageMirror }
 
-    /** Idempotent. Returns false when the package is protected and cannot be added. */
-    suspend fun add(packageName: String): Boolean {
-        val normalized = normalize(packageName)
+    fun isPermanentlyBlockedDomain(urlOrDomain: String): Boolean {
+        val host = PermanentWebsitePolicy.normalize(urlOrDomain) ?: return false
+        return synchronized(domainMirror) { domainMirror.any { PermanentWebsitePolicy.matches(host, it) } }
+    }
+
+    /** Idempotent. Returns false when invalid or protected. [appName] is retained across uninstall. */
+    suspend fun add(packageName: String, appName: String? = null): Boolean {
+        val normalized = normalizePackage(packageName)
         if (normalized.isEmpty() || isProtectedPackage(context, normalized)) return false
+        val label = appName?.trim()?.takeIf(String::isNotEmpty)
         context.permanentBlocksDataStore.edit { prefs ->
-            val current = prefs[Keys.PACKAGES].orEmpty().toMutableSet()
-            current += normalized
-            prefs[Keys.PACKAGES] = current
-            synchronized(mirror) { mirror += normalized }
+            prefs[Keys.PACKAGES] = prefs[Keys.PACKAGES].orEmpty() + normalized
+            // Legacy Settings entries sometimes only know the package identifier. That
+            // fallback must never replace a previously saved human-readable app label.
+            if (label != null && label != normalized) {
+                val names = parseNames(prefs[Keys.APP_NAMES]).toMutableMap()
+                names[normalized] = label
+                prefs[Keys.APP_NAMES] = namesToJson(names)
+                synchronized(namesMirror) { namesMirror[normalized] = label }
+            }
+            synchronized(packageMirror) { packageMirror.add(normalized) }
         }
         return true
+    }
+
+    /** Appends a validated website commitment. Existing domains cannot be removed in-app. */
+    suspend fun addWebsite(raw: String): Boolean {
+        val domain = PermanentWebsitePolicy.normalize(raw) ?: return false
+        context.permanentBlocksDataStore.edit { prefs ->
+            prefs[Keys.DOMAINS] = prefs[Keys.DOMAINS].orEmpty() + domain
+            synchronized(domainMirror) { domainMirror.add(domain) }
+        }
+        return true
+    }
+
+    /** Migrates legacy flags once and on every warm; the independent sets make this idempotent. */
+    suspend fun migrateLegacy(apps: List<BlockedApp>, websites: List<BlockedWebsite>) {
+        apps.filter { it.isPermanent }.forEach { add(it.packageName, it.appName) }
+        websites.filter { it.isPermanent }.forEach { addWebsite(it.domain) }
     }
 
     /** Permanent blocks intentionally cannot be removed by the app UI. */
     fun canRemoveInApp(): Boolean = false
 
-    private fun normalize(value: String): String = value.trim().lowercase()
+    private fun normalizePackage(value: String): String = value.trim().lowercase()
+
+    private fun updateMirrors(prefs: Preferences) {
+        val packages = prefs[Keys.PACKAGES].orEmpty().map(::normalizePackage).filter(String::isNotEmpty).toSet()
+        val domains = prefs[Keys.DOMAINS].orEmpty().mapNotNull(PermanentWebsitePolicy::normalize).toSet()
+        val names = parseNames(prefs[Keys.APP_NAMES])
+        // Independent collectors can process an older snapshot just after an add.
+        // Permanent commitments are monotonic; an older read must never clear one.
+        synchronized(packageMirror) { packageMirror.addAll(packages) }
+        synchronized(domainMirror) { domainMirror.addAll(domains) }
+        synchronized(namesMirror) { namesMirror.putAll(names) }
+        firstSnapshot.complete(Unit)
+    }
+
+    private fun fallbackSnapshot(): Preferences = mutablePreferencesOf(
+        Keys.PACKAGES to synchronized(packageMirror) { packageMirror.toSet() },
+        Keys.DOMAINS to synchronized(domainMirror) { domainMirror.toSet() },
+        Keys.APP_NAMES to namesToJson(synchronized(namesMirror) { namesMirror.toMap() }),
+    )
+
+    private fun parseNames(raw: String?): Map<String, String> = try {
+        val json = JSONObject(raw ?: "{}")
+        buildMap {
+            val keys = json.keys()
+            while (keys.hasNext()) {
+                val rawKey = keys.next()
+                val key = normalizePackage(rawKey)
+                val value = json.optString(rawKey).trim()
+                if (key.isNotEmpty() && value.isNotEmpty()) put(key, value)
+            }
+        }
+    } catch (_: Exception) { emptyMap() }
+
+    private fun namesToJson(names: Map<String, String>): String = JSONObject(names).toString()
 
     companion object {
         /** Packages which must never be permanently blocked because they are recovery paths. */
@@ -87,8 +172,7 @@ class PermanentBlocksRepository(private val context: Context) {
                 packageName == "com.google.android.dialer" || packageName == "com.samsung.android.dialer") return true
             val pm = context.packageManager
             val launcher = pm.resolveActivity(
-                Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME),
-                PackageManager.MATCH_DEFAULT_ONLY
+                Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), PackageManager.MATCH_DEFAULT_ONLY
             )?.activityInfo?.packageName
             if (packageName == launcher) return true
             val defaultDialer = try {
@@ -101,6 +185,31 @@ class PermanentBlocksRepository(private val context: Context) {
                 packageName == "com.google.android.packageinstaller"
         }
     }
+}
+
+/** Validation and matching shared by the permanent-site UI and enforcement. */
+object PermanentWebsitePolicy {
+    fun normalize(raw: String): String? {
+        val input = raw.trim()
+        if (input.isEmpty() || input.any(Char::isWhitespace)) return null
+        val candidate = try {
+            val uri = URI(if (input.contains("://")) input else "https://$input")
+            if (uri.scheme?.lowercase() !in setOf("http", "https") || uri.rawUserInfo != null) return null
+            uri.host ?: return null
+        } catch (_: Exception) { return null }
+        val ascii = try { IDN.toASCII(candidate.trimEnd('.'), IDN.USE_STD3_ASCII_RULES).lowercase() }
+        catch (_: Exception) { return null }
+        // Keep normalization aligned with the existing website boundary helper.
+        val cleaned = SettingsRepository.cleanDomain(ascii)
+        if (cleaned.length !in 1..253 || cleaned.startsWith('.') || cleaned.endsWith('.')) return null
+        val labels = cleaned.split('.')
+        if (labels.size < 2 || labels.any { it.isEmpty() || it.length > 63 || it.startsWith('-') || it.endsWith('-') }) return null
+        if (labels.any { label -> label.any { !(it in 'a'..'z' || it in '0'..'9' || it == '-') } }) return null
+        return cleaned
+    }
+
+    fun matches(host: String, domain: String): Boolean =
+        host.equals(domain, ignoreCase = true) || host.endsWith(".$domain", ignoreCase = true)
 }
 
 /** Pure enforcement rule used by the service and JVM tests. */

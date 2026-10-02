@@ -7,6 +7,7 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p convex/tsconfig.json",
     "sync:check-config": "node scripts/check-sync-config.mjs",
+    "convex:capacity": "node scripts/estimate-convex-capacity.mjs",
     "theme:generate": "node scripts/generate-theme.mjs",
     "theme:check": "node scripts/generate-theme.mjs --check",
     "convex:dev": "convex dev",

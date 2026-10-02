@@ -52,6 +52,13 @@ android {
                 "proguard-rules.pro"
             )
         }
+        // Locally installable optimized build. Uses the existing development key so
+        // it can replace debug without uninstalling or losing settings/account data.
+        create("performance") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += "release"
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

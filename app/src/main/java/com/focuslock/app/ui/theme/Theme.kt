@@ -13,6 +13,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.focuslock.app.ui.components.ProvideMotionPreferences
 
 private val PixelDarkColorScheme = darkColorScheme(
     primary = PixelPrimaryDark,
@@ -78,6 +79,6 @@ fun FocusLockTheme(
             small = RoundedCornerShape(8.dp), medium = RoundedCornerShape(12.dp),
             large = RoundedCornerShape(20.dp), extraLarge = RoundedCornerShape(24.dp)
         ),
-        content = content
+        content = { ProvideMotionPreferences(content) }
     )
 }

@@ -1,4 +1,10 @@
 pluginManagement {
+    // AGP 9.0.1 embeds R8 9.0.32, which warns on newer dependency Kotlin metadata.
+    // Pin a compatible stable optimizer without changing the Android/Kotlin plugins.
+    buildscript {
+        repositories { google(); mavenCentral() }
+        dependencies { classpath("com.android.tools:r8:9.1.55") }
+    }
     repositories {
         google {
             content {

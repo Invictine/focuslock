@@ -1,5 +1,5 @@
 import { beforeEach, expect, it } from "vitest";
-import { accountUsage, acknowledgeSync, enqueueSync, peekSync,
+import { accountUsage, acknowledgeSync, enqueueSync, peekSync, unacknowledgedUsage,
   enqueueMutation, pendingMutations, acknowledgeMutation } from "../desktop/src/offlineQueue";
 
 let disk: Map<string, string>;
@@ -41,6 +41,32 @@ it('does not upload another account\'s global native usage on switch', () => {
 it('aggregates same-domain native rows before calculating account deltas', () => {
   expect(accountUsage('alice', 'pc', [bucket(50), bucket(70)])[0].trackedSeconds).toBe(120);
   expect(accountUsage('alice', 'pc', [bucket(60), bucket(80)])[0].trackedSeconds).toBe(140);
+});
+
+it('only queues counters above the last acknowledged value and keeps failed rows for retry', () => {
+  const old = bucket(120);
+  const fresh = { ...bucket(15), targetKey: 'fresh.example' };
+  enqueueSync('alice', 'pc', heartbeat, [old]);
+  acknowledgeSync('alice', 'pc', peekSync('alice', 'pc'));
+  const cumulative = accountUsage('alice', 'pc', [old, fresh]);
+  expect(unacknowledgedUsage(cumulative, peekSync('alice', 'pc').acknowledged)).toEqual([fresh]);
+  enqueueSync('alice', 'pc', heartbeat, unacknowledgedUsage(cumulative, peekSync('alice', 'pc').acknowledged));
+  expect(peekSync('alice', 'pc').usage).toEqual([fresh]);
+  // A failed upload is still on disk, even if a later scan has no new delta.
+  expect(unacknowledgedUsage(accountUsage('alice', 'pc', [old, fresh]), peekSync('alice', 'pc').acknowledged)).toEqual([fresh]);
+  expect(peekSync('alice', 'pc').usage).toEqual([fresh]);
+  acknowledgeSync('alice', 'pc', peekSync('alice', 'pc'));
+  expect(unacknowledgedUsage(accountUsage('alice', 'pc', [old, fresh]), peekSync('alice', 'pc').acknowledged)).toEqual([]);
+});
+
+it('acknowledges expired cloud rows without removing device-local usage', () => {
+  const local = accountUsage('alice', 'pc', [bucket(300)]);
+  enqueueSync('alice', 'pc', heartbeat, local);
+  // recordUsageBatch can accept the transaction while reporting that this old
+  // row predates retention. The successful response still acknowledges it.
+  acknowledgeSync('alice', 'pc', peekSync('alice', 'pc'));
+  expect(accountUsage('alice', 'pc', [bucket(300)])[0].trackedSeconds).toBe(300);
+  expect(unacknowledgedUsage(local, peekSync('alice', 'pc').acknowledged)).toEqual([]);
 });
 
 it('stores mutations until individually acknowledged without losing concurrent additions', () => {

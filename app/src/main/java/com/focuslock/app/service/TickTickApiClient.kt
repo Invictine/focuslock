@@ -71,7 +71,7 @@ data class TickTickUserProfile(
 /** One completed-today task awaiting final sort (project order → newest-first by completion). */
 private data class PendingCompletedTask(val title: String, val project: String, val completedMillis: Long)
 
-class TickTickApiClient {
+class TickTickApiClient(private val focusHttpClient: OkHttpClient = sharedHttpClient) {
 
     // The OkHttp client moved to the companion (sharedHttpClient): every TickTickApiClient()
     // call site (dashboard, settings, blocker) now shares one process-wide connection pool,
@@ -374,23 +374,53 @@ class TickTickApiClient {
         }
     }
 
-    /**
-     * Tasks NEVER count as focus. Focus comes only from logged focus durations
-     * (TickTick focus/pomodoro sessions with an explicit duration, or the
-     * user-operated Focus Timer / manual log). This function intentionally
-     * returns an empty list so no caller can award work minutes or credits for
-     * completed tasks. Callers must treat empty as "no focus sessions found —
-     * tasks don't count" and must NOT award credits for tasks.
-     *
-     * Signature is kept so existing callers (Settings sync, Blocker verify)
-     * keep compiling. Use [fetchCompletedTaskTitlesToday] for display-only
-     * task stats (titles give 0 focus minutes).
-     */
-    suspend fun fetchCompletedTasksToday(token: String): List<TickTickWorkRecord> = withContext(Dispatchers.IO) {
-        // Tasks never count as focus; focus comes only from logged focus durations.
-        if (token.isBlank()) return@withContext emptyList()
-        emptyList()
+    /** Compatibility alias for callers migrating from the former empty task-fetch stub. */
+    @Deprecated("Use fetchFocusSessionsToday; completed tasks do not represent focus time")
+    suspend fun fetchCompletedTasksToday(token: String): List<TickTickWorkRecord> =
+        fetchFocusSessionsToday(token)
+
+    /** Fetch completed, real focus sessions from TickTick's official focus API. */
+    suspend fun fetchFocusSessionsToday(token: String): List<TickTickWorkRecord> = withContext(Dispatchers.IO) {
+        require(token.isNotBlank()) { "TickTick access token is blank" }
+        val now = System.currentTimeMillis()
+        val calendar = java.util.Calendar.getInstance().apply {
+            timeInMillis = now
+            set(java.util.Calendar.HOUR_OF_DAY, 0)
+            set(java.util.Calendar.MINUTE, 0)
+            set(java.util.Calendar.SECOND, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+        }
+        val fromMillis = calendar.timeInMillis
+        // Include overnight sessions even if TickTick selects records by start time.
+        // Only sessions ending today pass the parser below.
+        val from = formatFocusBoundary(fromMillis - 24L * 60L * 60L * 1000L)
+        val to = formatFocusBoundary(now)
+        val records = mutableListOf<TickTickWorkRecord>()
+        for (type in 0..1) {
+            val url = okhttp3.HttpUrl.Builder()
+                .scheme("https").host("api.ticktick.com")
+                .addPathSegments("open/v1/focus")
+                .addQueryParameter("from", from)
+                .addQueryParameter("to", to)
+                .addQueryParameter("type", type.toString())
+                .build()
+            val request = Request.Builder().url(url)
+                .header("Authorization", "Bearer $token")
+                .get().build()
+            val body = focusHttpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    throw java.io.IOException("TickTick focus request failed with HTTP ${response.code}")
+                }
+                response.body?.string() ?: throw java.io.IOException("TickTick focus response body was empty")
+            }
+            val parsed = TickTickFocusParser.parse(body, expectedType = type, startOfDayMillis = fromMillis, nowMillis = now)
+            records += parsed
+        }
+        records.distinctBy { it.id }
     }
+
+    private fun formatFocusBoundary(millis: Long): String =
+        java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ssZ", Locale.US).format(Date(millis))
 
     /**
      * Display-only helper: titles of tasks completed today, for stats/debug UI.
@@ -480,6 +510,66 @@ class TickTickApiClient {
                 emptyList()
             }
         }
+
+    /**
+     * Strict open-task fetch for UI callers that must distinguish an empty account
+     * from a failed refresh. Existing [fetchOpenTasks] deliberately keeps its
+     * never-throw contract for background callers; this variant propagates project
+     * list and project-data failures (cancellation is always propagated).
+     */
+    suspend fun fetchOpenTasksStrict(token: String): List<TickTickTaskItem> =
+        withContext(Dispatchers.IO) {
+            if (token.isBlank()) throw IllegalArgumentException("Blank TickTick token")
+            val projectBodies = fetchProjectDataBodiesStrict(token)
+            projectBodies.flatMap { (_, body) -> parseProjectTasksJson(body) }
+        }
+
+    private suspend fun fetchProjectDataBodiesStrict(token: String): List<Pair<TickTickProject, String>> =
+        withContext(Dispatchers.IO) {
+            val projects = try {
+                val request = Request.Builder()
+                    .url("https://api.ticktick.com/open/v1/project")
+                    .header("Authorization", "Bearer $token")
+                    .build()
+                sharedHttpClient.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) error("TickTick project list failed: ${response.code}")
+                    json.decodeFromString<List<TickTickProject>>(response.body?.string().orEmpty())
+                }
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                throw IllegalStateException("Unable to load TickTick projects", e)
+            }
+
+            val semaphore = Semaphore(MAX_PARALLEL_PROJECT_REQUESTS)
+            coroutineScope {
+                projects.filterNot { it.closed }.take(30).map { project ->
+                    async {
+                        semaphore.withPermit {
+                            val body = fetchProjectDataBodyStrict(token, project.id)
+                            project to body
+                        }
+                    }
+                }.awaitAll()
+            }
+        }
+
+    private fun fetchProjectDataBodyStrict(token: String, projectId: String): String {
+        try {
+            val request = Request.Builder()
+                .url("https://api.ticktick.com/open/v1/project/$projectId/data")
+                .header("Authorization", "Bearer $token")
+                .build()
+            sharedHttpClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) error("TickTick project data failed: ${response.code}")
+                return response.body?.string().orEmpty()
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            throw IllegalStateException("Unable to load TickTick project $projectId", e)
+        }
+    }
 
     /**
      * Network path of [fetchCompletedTaskTitlesToday]. Returns null when the request

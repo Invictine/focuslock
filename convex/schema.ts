@@ -10,6 +10,12 @@ export default defineSchema({
     tasksCompletedToday: v.number(),
     lastResetDate: v.string(),
     updatedAt: v.number(),
+    externalEarnedSeconds: v.optional(v.number()),
+    externalSpentSeconds: v.optional(v.number()),
+    externalDate: v.optional(v.string()),
+    externalWorkSecondsToday: v.optional(v.number()),
+    externalScrollSecondsToday: v.optional(v.number()),
+    externalTasksCompletedToday: v.optional(v.number()),
   }).index("by_user", ["userId"]),
 
   blockedApps: defineTable({
@@ -45,6 +51,7 @@ export default defineSchema({
     source: v.string(),
     earnedMinutesCredited: v.number(),
     projectName: v.optional(v.string()),
+    representsFocusSession: v.optional(v.boolean()),
   })
     .index("by_user", ["userId"])
     .index("by_user_record", ["userId", "recordId"]),
@@ -163,6 +170,13 @@ export default defineSchema({
     .index("by_user", ["userId"])
     .index("by_user_device", ["userId", "deviceId"]),
 
+  // Stable labels live apart from presence so heartbeats do not invalidate
+  // expensive usage-summary and target-catalog subscriptions.
+  deviceProfiles: defineTable({
+    userId: v.string(), deviceId: v.string(), name: v.string(),
+    platform: v.union(v.literal("android"), v.literal("windows"), v.literal("browser")),
+  }).index("by_user_device", ["userId", "deviceId"]),
+
   // Absolute per-device counters make retries idempotent. Multiple devices
   // never overwrite one aggregate row, and summaries add the buckets.
   deviceUsage: defineTable({
@@ -174,14 +188,41 @@ export default defineSchema({
     targetLabel: v.string(),
     category: v.optional(v.string()),
     trackedSeconds: v.number(),
+    leisureSeconds: v.optional(v.number()),
     blockedSeconds: v.optional(v.number()),
     launchCount: v.optional(v.number()),
+    catalogedTrackedSeconds: v.optional(v.number()),
     updatedAt: v.number(),
   })
-    .index("by_user", ["userId"])
     .index("by_user_date", ["userId", "date"])
-    .index("by_user_device_date", ["userId", "deviceId", "date"])
+    .index("by_date", ["date"])
     .index("by_user_usage_bucket", ["userId", "deviceId", "date", "targetKind", "targetKey"]),
+
+  // One metadata/cumulative-counter row per installation/target rather than
+  // scanning every historical day to populate the merge picker.
+  usageCatalog: defineTable({
+    userId: v.string(), deviceId: v.string(),
+    targetKind: v.union(v.literal("app"), v.literal("website")),
+    targetKey: v.string(), targetLabel: v.string(), category: v.optional(v.string()),
+    trackedSeconds: v.number(), lastDate: v.string(),
+  }).index("by_user_device_target", ["userId", "deviceId", "targetKind", "targetKey"]),
+
+  usageCatalogState: defineTable({
+    userId: v.string(), ready: v.boolean(),
+  }).index("by_user", ["userId"]),
+
+  // Archived target/device totals are monthly; small daily totals retain the
+  // chart without retaining every old app/site/day counter.
+  usageArchives: defineTable({
+    userId: v.string(), month: v.string(),
+    targets: v.array(v.object({
+      deviceId: v.string(), targetKind: v.union(v.literal("app"), v.literal("website")),
+      targetKey: v.string(), targetLabel: v.string(), category: v.optional(v.string()),
+      trackedSeconds: v.number(), blockedSeconds: v.number(), launchCount: v.number(), lastDate: v.string(),
+    })),
+    days: v.array(v.object({ date: v.string(), trackedSeconds: v.number(), blockedSeconds: v.number() })),
+    updatedAt: v.number(),
+  }).index("by_user_month", ["userId", "month"]),
 
   // StayFree parity: global prefs (strict mode, reminders, exports).
   // workRatio / taskBonusMinutes are cross-platform synced settings (Android,

@@ -65,7 +65,7 @@ export function useMutationReplay() {
       } catch { /* Never clear unreadable or unacknowledged data. */ }
     };
     void replay();
-    const timer = window.setInterval(replay, 15000);
+    const timer = window.setInterval(replay, 4 * 60 * 60_000);
     window.addEventListener('online', replay);
     return () => { window.clearInterval(timer); window.removeEventListener('online', replay); };
   }, [auth.user?.id, auth.getSyncToken]);

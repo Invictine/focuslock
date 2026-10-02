@@ -2,13 +2,13 @@ package com.focuslock.app.ui.apps
 
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,10 +18,10 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Apps
@@ -59,13 +59,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import com.focuslock.app.FocusLockApplication
 import com.focuslock.app.data.model.BlockedApp
 import com.focuslock.app.data.model.BlockedWebsite
 import com.focuslock.app.service.InstalledAppsRepository
 import com.focuslock.app.ui.components.AppIconTileForPackage
 import com.focuslock.app.ui.components.IconBadge
-import com.focuslock.app.ui.components.MotionTokens
 import com.focuslock.app.ui.components.PendingMergeTarget
 import com.focuslock.app.ui.components.ScreenHeader
 import com.focuslock.app.ui.components.SectionHeader
@@ -129,24 +131,36 @@ fun BoundariesScreen(
 
     val storedApps by settings.blockedAppsFlow.collectAsStateWithLifecycle(initialValue = null)
     val storedWebsites by settings.blockedWebsitesFlow.collectAsStateWithLifecycle(initialValue = null)
+    val permanentPackagesState by app.permanentBlocksRepository.packagesFlow.collectAsStateWithLifecycle(initialValue = null)
+    val permanentDomainsState by app.permanentBlocksRepository.domainsFlow.collectAsStateWithLifecycle(initialValue = null)
+    val permanentStoreLoaded = permanentPackagesState != null && permanentDomainsState != null
+    val permanentPackages = permanentPackagesState.orEmpty()
+    val permanentDomains = permanentDomainsState.orEmpty()
     // Combined freeze: Boundaries Lock OR Strict Mode (single source of truth).
     val boundariesFrozen by settings.boundariesFrozenFlow.collectAsStateWithLifecycle(initialValue = false)
     val lockdownMode by settings.lockdownModeFlow.collectAsStateWithLifecycle(initialValue = false)
     val limits by appLimits.limitsFlow.collectAsStateWithLifecycle(initialValue = emptyMap())
+    // null = overview; a value = that picker tab is open.
+    var pickerTab by rememberSaveable { mutableStateOf<PickerTab?>(null) }
 
     // Live Strict Mode cooldown for accurate refusal copy; polls only while it is active.
     var lockdownRemainingMs by remember { mutableStateOf(0L) }
-    LaunchedEffect(lockdownMode) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(lockdownMode, pickerTab, lifecycleOwner) {
         if (!lockdownMode) {
             lockdownRemainingMs = 0L
-        } else {
-            while (true) {
-                lockdownRemainingMs = try {
-                    settings.lockdownCooldownRemainingMs()
-                } catch (_: Exception) {
-                    0L
+        } else if (pickerTab == null) {
+            lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                while (true) {
+                    val remainingMs = try {
+                        settings.lockdownCooldownRemainingMs()
+                    } catch (_: Exception) {
+                        null
+                    }
+                    lockdownRemainingMs = remainingMs ?: 0L
+                    if (remainingMs == 0L) break
+                    delay(minOf(remainingMs ?: 30_000L, 30_000L))
                 }
-                delay(30_000)
             }
         }
     }
@@ -168,8 +182,6 @@ fun BoundariesScreen(
     }
     val installedApps = installedAppsState.orEmpty()
 
-    // null = overview; a value = that picker tab is open.
-    var pickerTab by rememberSaveable { mutableStateOf<PickerTab?>(null) }
     BackHandler(enabled = pickerTab != null) { pickerTab = null }
 
     // Cross-device "New bucket…" hand-off: keep the target locally (so it survives the
@@ -190,19 +202,26 @@ fun BoundariesScreen(
     val appOverrides = remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
     val websiteOverrides = remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
     val storedAppsList = storedApps.orEmpty()
+    val storedWebsitesList = storedWebsites.orEmpty()
+    val effectivePermanentDomains = permanentDomains + storedWebsitesList.filter { it.isPermanent }.map { it.domain }
     val appOverrideMap = appOverrides.value
-    val blockedApps: List<BlockedApp> = remember(storedAppsList, appOverrideMap) {
-        storedAppsList.mapNotNull { stored ->
+    val blockedApps: List<BlockedApp> = remember(
+        storedAppsList, appOverrideMap, permanentPackages, permanentStoreLoaded, storedApps != null
+    ) {
+            if (!permanentStoreLoaded || storedApps == null) emptyList() else storedAppsList.mapNotNull { stored ->
             val blocked = appOverrideMap[stored.packageName] ?: stored.isBlocked
-            stored.takeIf { blocked }
+            stored.takeIf {
+                blocked && !it.isPermanent && !isPermanentPackage(it.packageName, permanentPackages)
+            }
         }
     }
 
     // Subtitle count matches the "Blocked apps" list exactly: every blocked entry,
     // installed or not, so the Applications row and the list below never disagree.
     val blockedAppCount = blockedApps.size
-    val blockedWebsites = storedWebsites.orEmpty().filter {
-        websiteOverrides.value[it.domain] ?: it.isBlocked
+    val blockedWebsites = if (!permanentStoreLoaded || storedWebsites == null) emptyList() else storedWebsitesList.filter {
+        (websiteOverrides.value[it.domain] ?: it.isBlocked) &&
+            !it.isPermanent && !isPermanentDomain(it.domain, effectivePermanentDomains)
     }.sortedBy { it.displayName.lowercase() }
     val blockedWebsiteCount = blockedWebsites.size
     val activeLimitCount = limits.count { it.value.enabled && it.value.dailyMinutes > 0 }
@@ -323,150 +342,176 @@ private fun BoundariesOverview(
     // runs on first composition only and never replays on scroll or state flips.
     var entered by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { entered = true }
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = UiTokens.ScreenPadding)
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(
+            start = UiTokens.ScreenPadding,
+            end = UiTokens.ScreenPadding,
+            bottom = UiTokens.SectionGap
+        )
     ) {
+        item(key = "boundaries-header", contentType = "screenHeader") {
             StaggeredFadeSlide(visible = entered, index = 0, screenKey = "boundaries_overview") {
-            ScreenHeader(
-                title = "Your boundaries",
-                subtitle = "Choose what waits until after your work."
-            )
+                ScreenHeader(
+                    title = "Your boundaries",
+                    subtitle = "Choose what waits until after your work."
+                )
+            }
         }
 
         if (boundariesFrozen) {
-            Spacer(Modifier.height(12.dp))
-            StaggeredFadeSlide(visible = entered, index = 1, screenKey = "boundaries_overview") {
-                Surface(
-                shape = RoundedCornerShape(16.dp),
-                color = MaterialTheme.colorScheme.secondaryContainer,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Row(
-                    modifier = Modifier.padding(16.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.Lock,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSecondaryContainer,
-                        modifier = Modifier.size(20.dp)
-                    )
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            text = if (lockdownMode) "Strict Mode is active" else "Boundaries Lock is on",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer
-                        )
-                        Text(
-                            text = when {
-                                !lockdownMode -> "Turn it off in Settings to remove blocks."
-                                lockdownRemainingMs > 0L -> "Edits locked for ${formatLockdownRemaining(lockdownRemainingMs)}."
-                                else -> "Edits stay locked until it's off."
-                            },
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer
-                        )
-                    }
-                }
-                }
+            item(key = "boundaries-frozen-spacer", contentType = "spacer") {
+                Spacer(Modifier.height(12.dp))
             }
-        }
-
-        StaggeredFadeSlide(visible = entered, index = 1, screenKey = "boundaries_overview") {
-            SectionHeader("Blocking")
-        }
-        Spacer(Modifier.height(8.dp))
-
-        StaggeredFadeSlide(visible = entered, index = 2, screenKey = "boundaries_overview") {
-            Surface(
-                shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surfaceContainer,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .animateContentSize(animationSpec = MotionTokens.SpatialIntSize)
-            ) {
-            Column {
-                BoundaryNavRow(
-                    title = "Applications",
-                    metadata = when {
-                        !appsStorageLoaded -> "Loading…"
-                        blockedAppCount == 1 -> "1 blocked"
-                        else -> "$blockedAppCount blocked"
-                    },
-                    icon = Icons.Rounded.Apps,
-                    iconContainer = MaterialTheme.colorScheme.primaryContainer,
-                    iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
-                    onClick = onOpenApplications
-                )
-                HorizontalDivider(
-                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
-                    modifier = Modifier.padding(start = 76.dp)
-                )
-                BoundaryNavRow(
-                    title = "Websites",
-                    metadata = when {
-                        !websitesStorageLoaded -> "Loading…"
-                        blockedWebsiteCount == 1 -> "1 blocked domain"
-                        else -> "$blockedWebsiteCount blocked domains"
-                    },
-                    icon = Icons.Rounded.Language,
-                    iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
-                    iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
-                    onClick = onOpenWebsites
-                )
-            }
-        }
-        }
-
-        // Every currently blocked app (installed or not), directly under Blocking.
-        // Hidden entirely when nothing is blocked — no empty header or card.
-        // Row entrances are staggered but capped (~6 items) so long lists settle fast.
-        if (blockedApps.isNotEmpty()) {
-            StaggeredFadeSlide(visible = entered, index = 3, screenKey = "boundaries_overview") {
-                SectionHeader("Blocked apps")
-            }
-            Spacer(Modifier.height(8.dp))
-            Surface(
-                shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surfaceContainer,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column(modifier = Modifier.animateContentSize(animationSpec = MotionTokens.SpatialIntSize)) {
-                    blockedApps.forEachIndexed { rowIndex, blockedApp ->
-                        StaggeredFadeSlide(
-                            visible = entered,
-                            index = 4 + minOf(rowIndex, 4),
-                            screenKey = "boundaries_overview"
+            item(key = "boundaries-frozen-notice", contentType = "statusCard") {
+                StaggeredFadeSlide(visible = entered, index = 1, screenKey = "boundaries_overview") {
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            BlockedAppToggleRow(
-                                app = blockedApp,
-                                frozen = boundariesFrozen,
-                                lockedMessage = lockedMessage,
-                                onToggle = onBlockedAppToggle,
-                                showDivider = rowIndex < blockedApps.lastIndex
+                            Icon(
+                                imageVector = Icons.Rounded.Lock,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                modifier = Modifier.size(20.dp)
                             )
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    text = if (lockdownMode) "Strict Mode is active" else "Boundaries Lock is on",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                                )
+                                Text(
+                                    text = when {
+                                        !lockdownMode -> "Turn it off in Settings to remove blocks."
+                                        lockdownRemainingMs > 0L -> "Edits locked for ${formatLockdownRemaining(lockdownRemainingMs)}."
+                                        else -> "Edits stay locked until it's off."
+                                    },
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                                )
+                            }
                         }
                     }
                 }
             }
         }
 
-        if (blockedWebsites.isNotEmpty()) {
-            StaggeredFadeSlide(visible = entered, index = 4, screenKey = "boundaries_overview") {
-                SectionHeader("Blocked websites")
+        item(key = "boundaries-blocking-header", contentType = "sectionHeader") {
+            StaggeredFadeSlide(visible = entered, index = 1, screenKey = "boundaries_overview") {
+                SectionHeader("Blocking")
             }
+        }
+        item(key = "boundaries-blocking-spacer", contentType = "spacer") {
             Spacer(Modifier.height(8.dp))
-            Surface(
-                shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surfaceContainer,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Column {
-                    blockedWebsites.forEachIndexed { index, website ->
+        }
+
+        item(key = "boundaries-navigation", contentType = "navigationCard") {
+            StaggeredFadeSlide(visible = entered, index = 2, screenKey = "boundaries_overview") {
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainer,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column {
+                        BoundaryNavRow(
+                            title = "Applications",
+                            metadata = when {
+                                !appsStorageLoaded -> "Loading…"
+                                blockedAppCount == 1 -> "1 blocked"
+                                else -> "$blockedAppCount blocked"
+                            },
+                            icon = Icons.Rounded.Apps,
+                            iconContainer = MaterialTheme.colorScheme.primaryContainer,
+                            iconTint = MaterialTheme.colorScheme.onPrimaryContainer,
+                            onClick = onOpenApplications
+                        )
+                        HorizontalDivider(
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f),
+                            modifier = Modifier.padding(start = 76.dp)
+                        )
+                        BoundaryNavRow(
+                            title = "Websites",
+                            metadata = when {
+                                !websitesStorageLoaded -> "Loading…"
+                                blockedWebsiteCount == 1 -> "1 blocked domain"
+                                else -> "$blockedWebsiteCount blocked domains"
+                            },
+                            icon = Icons.Rounded.Language,
+                            iconContainer = MaterialTheme.colorScheme.tertiaryContainer,
+                            iconTint = MaterialTheme.colorScheme.onTertiaryContainer,
+                            onClick = onOpenWebsites
+                        )
+                    }
+                }
+            }
+        }
+
+        // Every currently blocked app (installed or not), directly under Blocking.
+        // Hidden entirely when nothing is blocked — no empty header or card.
+        // Row entrances are staggered but capped (~6 items) so long lists settle fast.
+        if (blockedApps.isNotEmpty()) {
+            item(key = "boundaries-apps-header", contentType = "sectionHeader") {
+                StaggeredFadeSlide(visible = entered, index = 3, screenKey = "boundaries_overview") {
+                    SectionHeader("Blocked apps")
+                }
+            }
+            item(key = "boundaries-apps-spacer", contentType = "spacer") {
+                Spacer(Modifier.height(8.dp))
+            }
+            itemsIndexed(
+                items = blockedApps,
+                key = { _, app -> "blocked-app-${app.packageName}" },
+                contentType = { _, _ -> "blockedAppRow" }
+            ) { rowIndex, blockedApp ->
+                Surface(
+                    shape = boundariesRowShape(rowIndex, blockedApps.lastIndex),
+                    color = MaterialTheme.colorScheme.surfaceContainer,
+                    modifier = Modifier.animateItem()
+                ) {
+                    StaggeredFadeSlide(
+                        visible = entered,
+                        index = 4 + minOf(rowIndex, 4),
+                        screenKey = "boundaries_overview"
+                    ) {
+                        BlockedAppToggleRow(
+                            app = blockedApp,
+                            frozen = boundariesFrozen,
+                            lockedMessage = lockedMessage,
+                            onToggle = onBlockedAppToggle,
+                            showDivider = rowIndex < blockedApps.lastIndex
+                        )
+                    }
+                }
+            }
+        }
+
+        if (blockedWebsites.isNotEmpty()) {
+            item(key = "boundaries-websites-header", contentType = "sectionHeader") {
+                StaggeredFadeSlide(visible = entered, index = 4, screenKey = "boundaries_overview") {
+                    SectionHeader("Blocked websites")
+                }
+            }
+            item(key = "boundaries-websites-spacer", contentType = "spacer") {
+                Spacer(Modifier.height(8.dp))
+            }
+            itemsIndexed(
+                items = blockedWebsites,
+                key = { _, website -> "blocked-website-${website.domain}" },
+                contentType = { _, _ -> "blockedWebsiteRow" }
+            ) { index, website ->
+                Surface(
+                    shape = boundariesRowShape(index, blockedWebsites.lastIndex),
+                    color = MaterialTheme.colorScheme.surfaceContainer,
+                    modifier = Modifier.animateItem()
+                ) {
+                    Column {
                         BlockedWebsiteToggleRow(
                             website = website,
                             frozen = boundariesFrozen,
@@ -485,35 +530,55 @@ private fun BoundariesOverview(
         // Real existing feature: per-app daily limits live inside the applications picker,
         // so the row only appears when at least one limit is configured.
         if (activeLimitCount > 0) {
-            StaggeredFadeSlide(visible = entered, index = 4, screenKey = "boundaries_overview") {
-                SectionHeader("Limits")
+            item(key = "boundaries-limits-header", contentType = "sectionHeader") {
+                StaggeredFadeSlide(visible = entered, index = 4, screenKey = "boundaries_overview") {
+                    SectionHeader("Limits")
+                }
             }
-            Spacer(Modifier.height(8.dp))
-            StaggeredFadeSlide(visible = entered, index = 5, screenKey = "boundaries_overview") {
-                Surface(
-                shape = RoundedCornerShape(20.dp),
-                color = MaterialTheme.colorScheme.surfaceContainer,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                BoundaryNavRow(
-                    title = "Daily limits",
-                    metadata = if (activeLimitCount == 1) {
-                        "1 app has a daily limit"
-                    } else {
-                        "$activeLimitCount apps have a daily limit"
-                    },
-                    icon = Icons.Rounded.Timer,
-                    iconContainer = MaterialTheme.colorScheme.secondaryContainer,
-                    iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
-                    onClick = onOpenApplications
-                )
+            item(key = "boundaries-limits-spacer", contentType = "spacer") {
+                Spacer(Modifier.height(8.dp))
+            }
+            item(key = "boundaries-limits-card", contentType = "navigationCard") {
+                StaggeredFadeSlide(
+                    visible = entered,
+                    index = 5,
+                    modifier = Modifier.fillMaxWidth(),
+                    screenKey = "boundaries_overview"
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainer,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        BoundaryNavRow(
+                            title = "Daily limits",
+                            metadata = if (activeLimitCount == 1) {
+                                "1 app has a daily limit"
+                            } else {
+                                "$activeLimitCount apps have a daily limit"
+                            },
+                            icon = Icons.Rounded.Timer,
+                            iconContainer = MaterialTheme.colorScheme.secondaryContainer,
+                            iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
+                            onClick = onOpenApplications
+                        )
+                    }
                 }
             }
         }
 
-        Spacer(Modifier.height(UiTokens.SectionGap))
+        item(key = "boundaries-bottom-spacer", contentType = "spacer") {
+            Spacer(Modifier.height(UiTokens.SectionGap))
+        }
     }
 }
+
+private fun boundariesRowShape(index: Int, lastIndex: Int) = RoundedCornerShape(
+    topStart = if (index == 0) 20.dp else 0.dp,
+    topEnd = if (index == 0) 20.dp else 0.dp,
+    bottomStart = if (index == lastIndex) 20.dp else 0.dp,
+    bottomEnd = if (index == lastIndex) 20.dp else 0.dp
+)
 
 @Composable
 private fun BoundaryNavRow(

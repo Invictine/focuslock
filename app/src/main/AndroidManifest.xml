@@ -43,6 +43,12 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".reminder.RemovalReminderActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.FocusLock.Reminder" />
+
         <!-- Fullscreen Lockout/Blocker Activity -->
         <activity
             android:name=".ui.blocker.BlockerActivity"

@@ -13,42 +13,16 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.SystemBarStyle
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.OpenInNew
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.outlined.CheckCircle
-import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.focuslock.app.FocusLockApplication
-import com.focuslock.app.data.model.FrogPhase
-import com.focuslock.app.data.model.FrogTask
 import com.focuslock.app.data.model.TickTickWorkRecord
 import com.focuslock.app.data.model.WorkRecordSource
 import com.focuslock.app.service.AppMonitorAccessibilityService
 import com.focuslock.app.service.FrogCoordinator
 import com.focuslock.app.service.InstalledAppsRepository
-import com.focuslock.app.service.TickTickApiClient
 import com.focuslock.app.service.TickTickNotificationListener
 import com.focuslock.app.ui.MainActivity
-import com.focuslock.app.ui.dashboard.home.FrogPickerBody
 import com.focuslock.app.ui.theme.FocusLockTheme
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -59,35 +33,19 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.LocalDate
 import java.time.ZoneId
 import java.util.UUID
 
-/** Ten rotating "stop & think" lines. One per view, chosen by today's attempt count % 10. */
-private val STOP_THINK_MESSAGES = listOf(
-    "Stop. Take one slow breath before anything else.",
-    "What were you planning to do before this app caught your attention?",
-    "This app will still be here. This moment won't.",
-    "Is this attention worth time you'll never get back?",
-    "You wrote this boundary on a clearer day. Trust that version of you.",
-    "Imagine how you'll feel 20 minutes from now — then choose.",
-    "What do you actually need right now: information, boredom relief, or connection?",
-    "Discomfort passes. Regret over lost time lingers.",
-    "Close this. Do one small thing you'll thank yourself for.",
-    "Your future self is watching this moment."
-)
-
 class BlockerActivity : ComponentActivity() {
 
-    private val tickTickApiClient = TickTickApiClient()
     private var creditReceiver: BroadcastReceiver? = null
 
     /**
      * Frog hard-lock focus session, owned by the activity so it survives every
-     * recomposition of [FrogBlockerScreen] and keeps ticking while the screen is
+     * recomposition of [BlockedAppScreen] and keeps ticking while the screen is
      * interactive. [frogSessionStartMs] == 0 means "not running".
      */
     private var frogSessionStartMs = 0L
@@ -103,7 +61,7 @@ class BlockerActivity : ComponentActivity() {
 
     /**
      * STRICT MODE policy (no direct unlock into the blocked app):
-     * - emergencyUnlock() / verifyTickTickWork(): gated on lockdownModeFlow and refused for
+     * - verifyTickTickWork(): gated on lockdownModeFlow and refused for
      *   permanent blocks; they finish() only after credits are granted/banked.
      * - ACTION_CREDIT_UPDATED broadcast: consumed while permanent/lockdown without finish().
      * - Back press is intercepted; FLAG_SECURE hides the recents preview; the accessibility
@@ -277,51 +235,35 @@ class BlockerActivity : ComponentActivity() {
      * (e.g. limit -> frog) instead of keeping stale affordances.
      */
     private fun renderBlockerContent() {
-        val isFrogBlock = isFrogBlocked()
         val currentWebsite = blockedWebsite
         val currentPackage = blockedPackage
         val currentReason = blockReason
         setContent {
             FocusLockTheme {
-                if (isFrogBlock) {
-                    FrogBlockerScreen(
-                        elapsedSeconds = frogSessionElapsedSeconds.longValue,
-                        sessionRunning = frogSessionRunning.value,
-                        onStartFocus = { startFrogFocusSession() },
-                        onStopFocus = { stopFrogFocusSession() },
-                        onGoHome = { goHome() },
-                        onOpenFocusLock = { openFocusLock() },
-                        onComplete = {
-                            Toast.makeText(
-                                this@BlockerActivity,
-                                "Frog done — boundary apps unlocked.",
-                                Toast.LENGTH_LONG
-                            ).show()
-                            finish()
-                        },
-                        onStaleDismiss = {
-                            Toast.makeText(
-                                this@BlockerActivity,
-                                "Frog lock ended — boundary apps unlocked.",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                            finish()
-                        }
-                    )
-                } else {
-                    PixelBlockerScreen(
-                        appName = resolvedAppName.value,
-                        blockedPackage = currentPackage,
-                        isWebsite = currentWebsite != null,
-                        onOpenTickTick = { openTickTickApp() },
-                        onVerifySync = { verifyTickTickWork() },
-                        onGoHome = { goHome() },
-                        onEmergencyUnlock = { emergencyUnlock() },
-                        onOpenFocusLock = { openFocusLock() },
-                        onContinueToChrome = { continueToChrome(currentWebsite) },
-                        blockReason = currentReason
-                    )
-                }
+                BlockerPresentation(
+                    appName = resolvedAppName.value,
+                    blockedPackage = currentPackage,
+                    isWebsite = currentWebsite != null,
+                    blockReason = currentReason,
+                    onCloseApp = { goHome() },
+                    onOpenFocusLock = { openFocusLock() },
+                    onFrogComplete = {
+                        Toast.makeText(
+                            this@BlockerActivity,
+                            "Frog complete.",
+                            Toast.LENGTH_LONG
+                        ).show()
+                        finish()
+                    },
+                    onStaleFrogDismiss = {
+                        Toast.makeText(
+                            this@BlockerActivity,
+                            "Frog lock ended.",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                        finish()
+                    }
+                )
             }
         }
     }
@@ -438,20 +380,26 @@ class BlockerActivity : ComponentActivity() {
             val token = settings.tickTickTokenFlow.first()
 
             if (token.isNotBlank()) {
-                val records = tickTickApiClient.fetchCompletedTasksToday(token)
-                if (records.isEmpty()) {
-                    Toast.makeText(this@BlockerActivity, "No completed TickTick tasks found today.", Toast.LENGTH_LONG).show()
-                    return@launch
+                try {
+                    val result = FocusLockApplication.instance.tickTickFocusSync.sync()
+                    if (result == null) {
+                        Toast.makeText(this@BlockerActivity, "TickTick session expired. Reconnect in FocusLock settings.", Toast.LENGTH_LONG).show()
+                    } else if (result.sessionsFound == 0) {
+                        Toast.makeText(this@BlockerActivity, "No completed focus sessions found today.", Toast.LENGTH_LONG).show()
+                    } else if (result.newSessions > 0) {
+                        Toast.makeText(
+                            this@BlockerActivity,
+                            "Verified ${result.newSessions} focus session(s): +${result.earnedMinutes} min earned.",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    } else {
+                        Toast.makeText(this@BlockerActivity, "Today's focus sessions were already synced.", Toast.LENGTH_LONG).show()
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    Toast.makeText(this@BlockerActivity, "Focus session sync failed. Check your connection and try again.", Toast.LENGTH_LONG).show()
                 }
-                val ratio = settings.workRatioFlow.first()
-                val bonus = settings.taskBonusFlow.first()
-                val (newCount, totalEarned) = bank.recordWorkCreditsDeduped(records, ratio, bonus)
-                if (newCount > 0) {
-                    Toast.makeText(this@BlockerActivity, "Verified! Added +$totalEarned mins.", Toast.LENGTH_SHORT).show()
-                    finish()
-                    return@launch
-                }
-                Toast.makeText(this@BlockerActivity, "No new tasks since your last unlock.", Toast.LENGTH_LONG).show()
             }
 
             val currentBalance = bank.getBalanceSeconds()
@@ -459,7 +407,7 @@ class BlockerActivity : ComponentActivity() {
                 Toast.makeText(this@BlockerActivity, "Unlocked with your banked earned time.", Toast.LENGTH_SHORT).show()
                 finish()
             } else {
-                Toast.makeText(this@BlockerActivity, "No new work verified yet. Complete a task in TickTick or run the Focus Timer first.", Toast.LENGTH_LONG).show()
+                Toast.makeText(this@BlockerActivity, "No new work verified yet. Finish a focus session in TickTick or run the Focus Timer first.", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -615,25 +563,6 @@ class BlockerActivity : ComponentActivity() {
         }
     }
 
-    private fun emergencyUnlock() {
-        // FROG HARD LOCK: no emergency pass is available (or rendered) for this reason.
-        if (isFrogBlocked()) return
-        lifecycleScope.launch {
-            if (isPermanentBlockNow()) {
-                Toast.makeText(this@BlockerActivity, "Permanently blocked: emergency unlock is unavailable.", Toast.LENGTH_LONG).show()
-                return@launch
-            }
-            val lockdown = isStrictActive()
-            if (lockdown) {
-                Toast.makeText(this@BlockerActivity, "Lockdown mode: unlocking disabled.", Toast.LENGTH_LONG).show()
-                return@launch
-            }
-            FocusLockApplication.instance.creditBankRepository.addEmergencyCredits(2)
-            Toast.makeText(this@BlockerActivity, "2-minute emergency pass granted.", Toast.LENGTH_SHORT).show()
-            finish()
-        }
-    }
-
     override fun onDestroy() {
         // Finalize any running frog focus session before the writer scope dies: the
         // pending minutes go out on a detached IO scope (which cancel() cannot cut off),
@@ -672,784 +601,4 @@ class BlockerActivity : ComponentActivity() {
         private const val KEY_BALANCE_AT_BLOCK = "balance_at_block_sec"
         private const val KEY_BLOCK_STARTED_AT = "block_started_at"
     }
-}
-
-/**
- * One clean vertical flow:
- * 1. app name / domain + a single state pill,
- * 2. prominent rotating stop-&-think line,
- * 3. "Attempted N times today" (apps) or "you tried to open <domain>" (websites),
- * 4. minimal actions (Back to Home / Continue to Chrome, TickTick, verify, emergency, FocusLock).
- */
-@Composable
-fun PixelBlockerScreen(
-    appName: String,
-    blockedPackage: String,
-    isWebsite: Boolean,
-    onOpenTickTick: () -> Unit,
-    onVerifySync: () -> Unit,
-    onGoHome: () -> Unit,
-    onEmergencyUnlock: () -> Unit,
-    onOpenFocusLock: () -> Unit = {},
-    onContinueToChrome: () -> Unit = {},
-    blockReason: String? = null
-) {
-    val isPermanentBlock = blockReason == "permanent"
-    // Saveable deadline so rotation doesn't hand out a fresh 10s cooldown. The countdown itself
-    // lives in the leaf button below, so a per-second tick never recomposes this screen.
-    var emergencyCooldownDeadline by rememberSaveable {
-        mutableStateOf(System.currentTimeMillis() + 10_000L)
-    }
-    val settings = FocusLockApplication.instance.settingsRepository
-    val lockdownMode by settings.lockdownModeFlow.collectAsStateWithLifecycle(initialValue = false)
-    val strictActive = lockdownMode || blockReason == "strict"
-
-    // Lifecycle-safe attempt counter: block events for this app since local midnight.
-    // Nullable while DataStore loads so the stat line can stay hidden.
-    val startOfTodayMillis = remember {
-        LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
-    }
-    val attemptsToday by remember(blockedPackage, startOfTodayMillis) {
-        FocusLockApplication.instance.blockLogRepository.eventsFlow.map { events ->
-            events.count { it.packageName == blockedPackage && it.timestampMillis >= startOfTodayMillis }
-        }
-    }.collectAsStateWithLifecycle(initialValue = null)
-
-    // One variation per view: latch the index the first time the count resolves, so a later
-    // emission can't swap the message mid-view.
-    var thinkIndex by rememberSaveable { mutableStateOf(-1) }
-    LaunchedEffect(attemptsToday) {
-        if (thinkIndex < 0 && attemptsToday != null) {
-            thinkIndex = attemptsToday!! % STOP_THINK_MESSAGES.size
-        }
-    }
-
-    val hardState = isPermanentBlock || strictActive
-    val stateLabel = when {
-        isPermanentBlock -> "Permanently blocked"
-        strictActive -> "Strict Mode active"
-        else -> "Locked"
-    }
-    val pillContainerColor = if (hardState) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surfaceContainerHighest
-    val pillContentColor = if (hardState) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onSurface
-
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background
-    ) { innerPadding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .padding(horizontal = 24.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-                    .padding(vertical = 24.dp)
-            ) {
-                // Header: app name / website domain + ONE state pill.
-                Text(
-                    text = appName,
-                    style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.SemiBold),
-                    color = MaterialTheme.colorScheme.onSurface,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                Surface(
-                    color = pillContainerColor,
-                    shape = RoundedCornerShape(50)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Lock,
-                            contentDescription = null,
-                            tint = pillContentColor,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Text(
-                            text = stateLabel,
-                            style = MaterialTheme.typography.labelMedium.copy(
-                                fontWeight = FontWeight.SemiBold,
-                                color = pillContentColor
-                            )
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(28.dp))
-
-                // Prominent stop & think line.
-                Text(
-                    text = STOP_THINK_MESSAGES[thinkIndex.coerceAtLeast(0)],
-                    style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.Medium),
-                    color = MaterialTheme.colorScheme.onSurface,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Stat line: attempts for apps, caption for websites (no count there).
-                val attempts = attemptsToday
-                when {
-                    isWebsite -> Text(
-                        text = "you tried to open $appName",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    attempts != null && attempts > 0 -> Text(
-                        text = "Attempted $attempts times today",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-
-                // Lockdown banner: compact single line (unlocks already gated in the actions).
-                if (strictActive) {
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Text(
-                        text = "Lockdown is on. Unlocks and emergency passes are unavailable.",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.error,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-
-                // Permanent notice: apps only (websites already say it in the pill).
-                if (isPermanentBlock && !isWebsite) {
-                    Spacer(modifier = Modifier.height(10.dp))
-                    Text(
-                        text = "Permanently blocked on this device. This block has no expiry or in-app unlock.",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.outline,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(28.dp))
-
-                if (isWebsite) {
-                    // Website: continue to the browser for 90s unless the site is permanent.
-                    if (!isPermanentBlock && !strictActive) {
-                        Button(
-                            onClick = onContinueToChrome,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.primary,
-                                contentColor = MaterialTheme.colorScheme.onPrimary
-                            ),
-                            shape = MaterialTheme.shapes.large,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(min = 56.dp)
-                        ) {
-                            Icon(
-                                Icons.Default.OpenInNew,
-                                contentDescription = null,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "Continue to Chrome",
-                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.height(12.dp))
-
-                        FilledTonalButton(
-                            onClick = onGoHome,
-                            colors = ButtonDefaults.filledTonalButtonColors(
-                                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                                contentColor = MaterialTheme.colorScheme.onSurface
-                            ),
-                            shape = MaterialTheme.shapes.large,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(52.dp)
-                        ) {
-                            Icon(
-                                Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Back to Home", style = MaterialTheme.typography.labelLarge)
-                        }
-                    } else {
-                        // Permanent website: Back to Home + Open FocusLock only.
-                        Button(
-                            onClick = onGoHome,
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.primary,
-                                contentColor = MaterialTheme.colorScheme.onPrimary
-                            ),
-                            shape = MaterialTheme.shapes.large,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(min = 56.dp)
-                        ) {
-                            Icon(
-                                Icons.AutoMirrored.Filled.ArrowBack,
-                                contentDescription = null,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "Back to Home",
-                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
-                            )
-                        }
-                    }
-                } else {
-                    // App: Back to Home is the primary exit.
-                    Button(
-                        onClick = onGoHome,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.primary,
-                            contentColor = MaterialTheme.colorScheme.onPrimary
-                        ),
-                        shape = MaterialTheme.shapes.large,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 56.dp)
-                    ) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = null,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = "Back to Home",
-                            style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    // Secondary: existing TickTick work CTA.
-                    FilledTonalButton(
-                        onClick = onOpenTickTick,
-                        colors = ButtonDefaults.filledTonalButtonColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                            contentColor = MaterialTheme.colorScheme.onSurface
-                        ),
-                        shape = MaterialTheme.shapes.large,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(52.dp)
-                    ) {
-                        Icon(
-                            Icons.Outlined.CheckCircle,
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text("Open TickTick", style = MaterialTheme.typography.labelLarge)
-                    }
-
-                    Spacer(modifier = Modifier.height(4.dp))
-
-                    // Verify stays disabled for permanent blocks (existing gating semantics).
-                    TextButton(
-                        onClick = onVerifySync,
-                        enabled = !strictActive && !isPermanentBlock
-                    ) {
-                        Icon(
-                            if (strictActive || isPermanentBlock) Icons.Default.Lock else Icons.Default.Refresh,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Verify completed work", style = MaterialTheme.typography.labelLarge)
-                    }
-                }
-
-                // Emergency pass: compact text button. Apps only — website blocks already
-                // have the explicit "Continue to Chrome" escape, no need for two exits.
-                if (!isPermanentBlock && !strictActive && !isWebsite) {
-                    EmergencyUnlockButton(
-                        cooldownDeadlineMillis = emergencyCooldownDeadline,
-                        onEmergencyUnlock = onEmergencyUnlock
-                    )
-                }
-
-                // Compact escape into FocusLock itself (adjust boundaries instead of fighting the lock).
-                TextButton(
-                    onClick = onOpenFocusLock,
-                    shape = MaterialTheme.shapes.medium
-                ) {
-                    Icon(
-                        Icons.Default.OpenInNew,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        "Open FocusLock",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.labelLarge
-                    )
-                }
-            }
-        }
-    }
-}
-
-/**
- * Leaf emergency button: owns the 1s cooldown ticker and derives the remaining seconds from a
- * deadline, so a tick recomposes only this button instead of the whole lock screen.
- */
-@Composable
-private fun EmergencyUnlockButton(
-    cooldownDeadlineMillis: Long,
-    onEmergencyUnlock: () -> Unit
-) {
-    var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(cooldownDeadlineMillis) {
-        while (true) {
-            delay(1000L)
-            nowMs = System.currentTimeMillis()
-            if (nowMs >= cooldownDeadlineMillis) break
-        }
-    }
-    val emergencyCooldown by remember(cooldownDeadlineMillis) {
-        derivedStateOf {
-            val millisLeft = cooldownDeadlineMillis - nowMs
-            ((millisLeft + 999L) / 1000L).coerceAtLeast(0L).toInt()
-        }
-    }
-    TextButton(
-        onClick = onEmergencyUnlock,
-        enabled = emergencyCooldown == 0
-    ) {
-        Text(
-            text = if (emergencyCooldown > 0) {
-                "Emergency unlock in ${emergencyCooldown}s..."
-            } else {
-                "Emergency 2-min Pass"
-            },
-            color = if (emergencyCooldown == 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outline,
-            style = MaterialTheme.typography.labelSmall
-        )
-    }
-}
-
-/**
- * Fullscreen hard lock for [FrogCoordinator.REASON_FROG]. Same visual language as
- * [PixelBlockerScreen] (charcoal background, muted-rose error surfaces, the same
- * typography/spacing), but the only ways out are:
- *  - tick today's frog off AND track the required focus minutes (auto-finish below),
- *  - "Back to Home" (the accessibility monitor re-blocks on the next boundary open).
- * There is deliberately no emergency pass, credit unlock or TickTick verify path.
- */
-@Composable
-fun FrogBlockerScreen(
-    elapsedSeconds: Long,
-    sessionRunning: Boolean,
-    onStartFocus: () -> Unit,
-    onStopFocus: () -> Unit,
-    onGoHome: () -> Unit,
-    onComplete: () -> Unit,
-    onOpenFocusLock: () -> Unit = {},
-    onStaleDismiss: () -> Unit = {},
-) {
-    val scope = rememberCoroutineScope()
-    val frogRepo = FocusLockApplication.instance.frogRepository
-    val state by frogRepo.frogStateFlow.collectAsStateWithLifecycle(initialValue = null)
-
-    // Auto-dismiss the lock the moment the frog completes (ticked + enough tracked),
-    // or when the gate is no longer active at all (feature off, day rolled over, not
-    // armed): a stale frog screen must not stick after the wake-hour rollover (F6).
-    LaunchedEffect(state?.phase, state?.locked) {
-        when {
-            state?.phase == FrogPhase.COMPLETE -> onComplete()
-            state?.locked == false -> onStaleDismiss()
-        }
-    }
-
-    var changingFrog by remember { mutableStateOf(false) }
-
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background
-    ) { innerPadding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .padding(horizontal = 24.dp),
-            contentAlignment = Alignment.Center
-        ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-                    .padding(vertical = 24.dp)
-            ) {
-                // Header: same title treatment as the standard blocker + one state pill.
-                Text(
-                    text = "Eat the frog",
-                    style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.SemiBold),
-                    color = MaterialTheme.colorScheme.onSurface,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth()
-                )
-
-                Spacer(modifier = Modifier.height(10.dp))
-
-                Surface(
-                    color = MaterialTheme.colorScheme.errorContainer,
-                    shape = RoundedCornerShape(50)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Lock,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onErrorContainer,
-                            modifier = Modifier.size(14.dp)
-                        )
-                        Text(
-                            text = "Hard lock",
-                            style = MaterialTheme.typography.labelMedium.copy(
-                                fontWeight = FontWeight.SemiBold,
-                                color = MaterialTheme.colorScheme.onErrorContainer
-                            )
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(18.dp))
-
-                val frogState = state
-                if (frogState == null) {
-                    Text(
-                        text = "Loading today's frog…",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                } else {
-                    val requiredSeconds = frogState.requiredSeconds
-                    val trackedSeconds = frogState.trackedSeconds
-                    val requiredMinutes = requiredSeconds / 60
-                    val progress = if (requiredSeconds > 0) {
-                        (trackedSeconds / requiredSeconds.toFloat()).coerceIn(0f, 1f)
-                    } else {
-                        0f
-                    }
-                    val frog = frogState.frog
-
-                    Text(
-                        text = "Every boundary app stays locked until today's frog is " +
-                            "ticked off and $requiredMinutes minutes of focus are tracked " +
-                            "on it. The lock resets at the next wake hour.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-
-                    Spacer(modifier = Modifier.height(24.dp))
-
-                    FrogConditionRow(
-                        label = "Frog ticked off",
-                        detail = frog?.title ?: "No frog selected yet",
-                        checked = frogState.tickedOff
-                    )
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    FrogConditionRow(
-                        label = "$requiredMinutes minutes tracked",
-                        detail = "${formatBlockerClock(trackedSeconds.toLong())} / " +
-                            formatBlockerClock(requiredSeconds.toLong()),
-                        checked = requiredSeconds > 0 && trackedSeconds >= requiredSeconds
-                    )
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    LinearProgressIndicator(
-                        progress = { progress },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(MaterialTheme.shapes.small)
-                    )
-
-                    Spacer(modifier = Modifier.height(28.dp))
-
-                    if (frog != null && !changingFrog) {
-                        FrogTitleCard(frog = frog)
-                        TextButton(onClick = { changingFrog = true }) {
-                            Text("Change frog", style = MaterialTheme.typography.labelLarge)
-                        }
-                    } else {
-                        Text(
-                            text = if (changingFrog && frog != null) {
-                                "Change today's frog"
-                            } else {
-                                "Pick today's frog"
-                            },
-                            style = MaterialTheme.typography.titleMedium.copy(
-                                fontWeight = FontWeight.SemiBold
-                            ),
-                            color = MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        FrogPickerBody(
-                            openTasks = frogState.openTasks,
-                            onPick = { task ->
-                                changingFrog = false
-                                scope.launch { frogRepo.selectFrog(task) }
-                            },
-                            onManual = { title ->
-                                if (title.isNotBlank()) {
-                                    changingFrog = false
-                                    scope.launch {
-                                        frogRepo.selectFrog(FrogCoordinator.manualFrog(title))
-                                    }
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        if (changingFrog && frog != null) {
-                            TextButton(onClick = { changingFrog = false }) {
-                                Text("Keep current frog", style = MaterialTheme.typography.labelLarge)
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(28.dp))
-
-                    Button(
-                        onClick = { scope.launch { frogRepo.tickOffFrog(true) } },
-                        enabled = frog != null && !frogState.tickedOff,
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.primary,
-                            contentColor = MaterialTheme.colorScheme.onPrimary
-                        ),
-                        shape = MaterialTheme.shapes.large,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 56.dp)
-                    ) {
-                        Icon(
-                            Icons.Default.CheckCircle,
-                            contentDescription = null,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Text(
-                            text = if (frogState.tickedOff) "Frog ticked off" else "Tick off frog",
-                            style = MaterialTheme.typography.titleMedium.copy(
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(12.dp))
-
-                    if (sessionRunning) {
-                        Text(
-                            text = formatBlockerClock(elapsedSeconds),
-                            style = MaterialTheme.typography.headlineMedium.copy(
-                                fontWeight = FontWeight.SemiBold,
-                                fontFeatureSettings = "tnum"
-                            ),
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = "Tracking focus on this frog…",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        FilledTonalButton(
-                            onClick = onStopFocus,
-                            colors = ButtonDefaults.filledTonalButtonColors(
-                                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                                contentColor = MaterialTheme.colorScheme.onSurface
-                            ),
-                            shape = MaterialTheme.shapes.large,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(52.dp)
-                        ) {
-                            Text("Stop & log", style = MaterialTheme.typography.labelLarge)
-                        }
-                    } else {
-                        FilledTonalButton(
-                            onClick = onStartFocus,
-                            enabled = frog != null && frogState.phase != FrogPhase.COMPLETE,
-                            colors = ButtonDefaults.filledTonalButtonColors(
-                                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                                contentColor = MaterialTheme.colorScheme.onSurface
-                            ),
-                            shape = MaterialTheme.shapes.large,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(52.dp)
-                        ) {
-                            Icon(
-                                Icons.Default.PlayArrow,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text("Start 25 min focus", style = MaterialTheme.typography.labelLarge)
-                        }
-                    }
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                // Launcher escape only: never back into a boundary app, and the
-                // accessibility monitor re-blocks the next boundary-app foreground.
-                TextButton(
-                    onClick = onGoHome,
-                    shape = MaterialTheme.shapes.medium
-                ) {
-                    Icon(
-                        Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        "Back to Home",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.labelLarge
-                    )
-                }
-
-                // Self-app escape (F5), same affordance as PixelBlockerScreen: a blocked
-                // IME/launcher can never compound-brick the device. Does not weaken
-                // boundary blocking — the monitor re-blocks the next boundary open.
-                TextButton(
-                    onClick = onOpenFocusLock,
-                    shape = MaterialTheme.shapes.medium
-                ) {
-                    Icon(
-                        Icons.Default.OpenInNew,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        "Open FocusLock",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        style = MaterialTheme.typography.labelLarge
-                    )
-                }
-            }
-        }
-    }
-}
-
-/** One frog completion condition: filled check once satisfied, outline while pending. */
-@Composable
-private fun FrogConditionRow(
-    label: String,
-    detail: String,
-    checked: Boolean
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(
-            imageVector = if (checked) Icons.Default.CheckCircle else Icons.Outlined.CheckCircle,
-            contentDescription = if (checked) "Requirement met" else "Requirement pending",
-            tint = if (checked) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.outline,
-            modifier = Modifier.size(22.dp)
-        )
-        Spacer(modifier = Modifier.width(10.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = label,
-                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Text(
-                text = detail,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-    }
-}
-
-/** The selected frog, in the same tonal-surface idiom as the standard blocker's pill. */
-@Composable
-private fun FrogTitleCard(frog: FrogTask) {
-    Surface(
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        shape = RoundedCornerShape(20.dp),
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(2.dp)
-        ) {
-            Text(
-                text = "Today's frog",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Text(
-                text = frog.title,
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-            val meta = listOf(frog.projectName, frog.dueDate)
-                .filter { it.isNotBlank() }
-                .joinToString(" · ")
-            if (meta.isNotBlank()) {
-                Text(
-                    text = meta,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-        }
-    }
-}
-
-/** mm:ss clock for the frog lock's live tracked time. */
-private fun formatBlockerClock(seconds: Long): String {
-    val safe = seconds.coerceAtLeast(0L)
-    return "%02d:%02d".format(safe / 60, safe % 60)
 }

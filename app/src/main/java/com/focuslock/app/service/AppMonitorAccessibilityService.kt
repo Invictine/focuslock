@@ -12,12 +12,15 @@ import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
-import android.widget.Toast
+import android.os.SystemClock
+import com.focuslock.app.reminder.RemovalReminderController
+import com.focuslock.app.reminder.RemovalReminderStore
 import androidx.core.content.ContextCompat
 import com.focuslock.app.FocusLockApplication
 import com.focuslock.app.data.repository.FrogRepository
 import com.focuslock.app.data.repository.PermanentBlocksRepository
 import com.focuslock.app.data.repository.PermanentBlockPolicy
+import com.focuslock.app.data.repository.PermanentWebsitePolicy
 import com.focuslock.app.data.repository.SettingsRepository
 import com.focuslock.app.data.repository.frogCycleDate
 import com.focuslock.app.ui.blocker.BlockerActivity
@@ -33,6 +36,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -55,16 +59,22 @@ class AppMonitorAccessibilityService : AccessibilityService() {
 
     @Volatile
     private var countdownJob: Job? = null
+    @Volatile
+    private var policyActivityKey: String? = null
+    private var policyActivityRefreshJob: Job? = null
     private var tickTickSessionJob: Job? = null
-    private var lastBrowserCheckMs: Long = 0L
+    private var policyBoundaryJob: Job? = null
+    private val browserMonitor by lazy {
+        BrowserUrlMonitor(CoroutineScope(serviceScope.coroutineContext + Dispatchers.Main.immediate)) { browser ->
+            checkBrowserUrl(browser)
+        }
+    }
     private val TAG = "AppMonitorAccessibility"
 
-    // Device-admin state is cached: the DPM binder IPC must not run per foreground change.
-    @Volatile
-    private var adminActive: Boolean = false
-
-    @Volatile
-    private var adminStateCheckedAtMs: Long = 0L
+    private val removalReminderStore by lazy { RemovalReminderStore(applicationContext) }
+    private var lastRemovalScanMs = -1L
+    private var installerWindowClass: String? = null
+    private var removalScanJob: Job? = null
 
     // Block-log dedupe: at most one event per (package, reason) per app entry.
     private val blockLogLock = Any()
@@ -116,6 +126,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     // check reads memory only (never DataStore) while an app is opening.
     private var targetGroupsJob: Job? = null
     private var permanentBlocksJob: Job? = null
+    private var permanentWebsitesJob: Job? = null
 
     @Volatile
     private var permanentPackages: Set<String> = emptySet()
@@ -137,14 +148,6 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     // AccessibilityNodeInfo.recycle() is deprecated and a no-op from API 33; only older
     // builds need explicit recycling of child nodes acquired over binder.
     private val canRecycleNodes = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU
-
-    // Last time a content-changed event was processed per browser package (event
-    // coalescing, see onAccessibilityEvent). Bounded: only BROWSER_PACKAGES write here.
-    private val lastContentEventMs = java.util.concurrent.ConcurrentHashMap<String, Long>()
-
-    // One async DPM refresh at a time; the cached result stays synchronously readable.
-    @Volatile
-    private var adminRefreshInFlight: Boolean = false
 
     companion object {
         /** Additive extra passed to BlockerActivity explaining why blocking triggered. */
@@ -175,24 +178,13 @@ class AppMonitorAccessibilityService : AccessibilityService() {
 
         private const val SCHEDULE_REFRESH_INTERVAL_MS = 30_000L
         private const val STRICT_NUKE_ATTEMPTS = 5
-        private const val ADMIN_STATE_TTL_MS = 60_000L
+        private const val POLICY_ACTIVITY_REFRESH_INTERVAL_MS = 60_000L
 
         /** TickTick foreground is where the frog gets done — never frog-blocked. */
         private const val TICKTICK_PACKAGE = "com.ticktick.task"
         // Last-resort traversal for browsers whose URL bar matches none of the known view
         // IDs. Depth-capped to keep the binder-call count bounded.
         private const val MAX_URL_SEARCH_DEPTH = 6
-        private const val URL_CHECK_THROTTLE_MS = 1_500L
-
-        /**
-         * TYPE_WINDOW_CONTENT_CHANGED floods in from every foreground app (dozens/sec on
-         * busy UIs). Same-package content events inside this window are dropped before any
-         * node work — they would only re-run the throttled URL check with nothing new to
-         * see. Window-state-changed events are NEVER coalesced: foreground-change detection
-         * and enforcement must stay event-exact.
-         */
-        private const val CONTENT_EVENT_COALESCE_MS = 300L
-
         /**
          * Server-side text queries for the cheap fallback URL search — one binder IPC per
          * query instead of a recursive child walk. "http" first (omnibar text for real
@@ -202,11 +194,6 @@ class AppMonitorAccessibilityService : AccessibilityService() {
 
         /** Omnibar text is a single URL: reject long/spacey page-prose false positives. */
         private const val MAX_URL_TEXT_LENGTH = 2048
-
-        private val INSTALLER_PACKAGES = setOf(
-            "com.android.packageinstaller",
-            "com.google.android.packageinstaller"
-        )
 
         // Supported Android browsers for website blocking
         val BROWSER_PACKAGES = setOf(
@@ -219,7 +206,8 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             "com.opera.mini.native",
             "com.opera.touch",
             "com.vivaldi.browser",
-            "com.duckduckgo.mobile.android"
+            "com.duckduckgo.mobile.android",
+            BrowserUrlPolicy.GOOGLE_APP
         )
 
         /**
@@ -270,16 +258,12 @@ class AppMonitorAccessibilityService : AccessibilityService() {
          * binder calls (the old list ran up to 9 sequential searches per event).
          */
         fun urlBarIdsFor(browserPackage: String): List<String> {
-            val prefix = "$browserPackage:"
-            val specific = BROWSER_URL_IDS.filter { it.startsWith(prefix) }
-            val generic = GENERIC_URL_BAR_RESOURCE_NAMES.map { prefix + it }
-            return specific + generic
+            return BrowserUrlPolicy.urlBarIds(browserPackage, BROWSER_URL_IDS, GENERIC_URL_BAR_RESOURCE_NAMES)
         }
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        scheduleAdminRefresh()
         scheduleTickerJob?.cancel()
         scheduleTickerJob = serviceScope.launch {
             while (isActive) {
@@ -331,10 +315,31 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         targetGroupsJob?.cancel()
         targetGroupsJob = serviceScope.launch {
             try {
-                FocusLockApplication.instance.targetGroupsRepository.groups.collect { }
+                FocusLockApplication.instance.targetGroupsRepository.groups.collect {
+                    reevaluateCurrentPolicyActivity()
+                }
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 Log.w(TAG, "target-groups collector failed", e)
+            }
+        }
+        policyBoundaryJob?.cancel()
+        policyBoundaryJob = serviceScope.launch {
+            try {
+                val settings = FocusLockApplication.instance.settingsRepository
+                launch {
+                    settings.blockedAppsFlow.distinctUntilChanged().collect {
+                        reevaluateCurrentPolicyActivity()
+                    }
+                }
+                launch {
+                    settings.blockedWebsitesFlow.distinctUntilChanged().collect {
+                        reevaluateCurrentPolicyActivity()
+                    }
+                }
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                Log.w(TAG, "policy-boundary collector failed", e)
             }
         }
         permanentBlocksJob?.cancel()
@@ -357,6 +362,21 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 Log.w(TAG, "permanent-block collector failed", e)
             }
         }
+        permanentWebsitesJob?.cancel()
+        permanentWebsitesJob = serviceScope.launch {
+            try {
+                FocusLockApplication.instance.permanentBlocksRepository.domainsFlow.collect { domains ->
+                    val domain = currentActiveWebsite ?: return@collect
+                    if (domains.any { PermanentWebsitePolicy.matches(domain, it) }) {
+                        val browser = currentForegroundPackage
+                        if (browser in BROWSER_PACKAGES) handleDetectedBrowserUrl(browser!!, domain)
+                    }
+                }
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                Log.w(TAG, "permanent-website collector failed", e)
+            }
+        }
         // Runtime wake/unlock delivery: the manifest receiver covers boot/package
         // replace only (USER_PRESENT/SCREEN_ON are not reliably manifest-delivered).
         registerFrogWakeReceiver()
@@ -373,45 +393,13 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                     currentForegroundPackage = foreground
                     if (foreground != applicationContext.packageName) {
                         handleForegroundPackageChanged(foreground, null)
+                        if (foreground in BROWSER_PACKAGES) browserMonitor.watch(foreground)
                     }
                     return@launch
                 }
                 delay(250)
             }
         }
-    }
-
-    /**
-     * Refreshes the cached device-admin flag with ONE DPM binder call, off the main
-     * thread — the event path only ever schedules this, never waits for it.
-     */
-    private fun scheduleAdminRefresh() {
-        if (adminRefreshInFlight) return
-        adminRefreshInFlight = true
-        serviceScope.launch(Dispatchers.IO) {
-            try {
-                adminActive = try {
-                    PermissionHelper.isDeviceAdminActive(applicationContext)
-                } catch (_: Exception) {
-                    false
-                }
-                adminStateCheckedAtMs = System.currentTimeMillis()
-            } finally {
-                adminRefreshInFlight = false
-            }
-        }
-    }
-
-    /**
-     * Cached admin state, re-checked at most once per [ADMIN_STATE_TTL_MS]. The read is
-     * synchronous and fast (volatile field); the refresh itself is scheduled off-thread,
-     * so a decision may use the previous (≤TTL old) value while the fresh one lands.
-     */
-    private fun isAdminActiveCached(): Boolean {
-        if (System.currentTimeMillis() - adminStateCheckedAtMs >= ADMIN_STATE_TTL_MS) {
-            scheduleAdminRefresh()
-        }
-        return adminActive
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -426,6 +414,16 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         ) return
 
         val eventPackage = event.packageName?.toString() ?: return
+        val isInstallerEvent = eventPackage in RemovalAttemptPolicy.installerPackages
+        val isForegroundBrowserEvent = eventPackage in BROWSER_PACKAGES &&
+            eventPackage == currentForegroundPackage
+
+        // Content-change events are extremely noisy across ordinary apps. They are only
+        // actionable here for installer reminders and the currently monitored browser;
+        // discard all others before the remaining event-path work.
+        if (eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
+            !isInstallerEvent && !isForegroundBrowserEvent
+        ) return
 
         // Our own package (BlockerActivity/NukeActivity overlay) means the tracked app
         // was left. Without this, currentForegroundPackage never updates and the
@@ -442,59 +440,73 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             return
         }
 
+        // Installer dialogs often populate after the window event, so inspect bounded,
+        // throttled content changes too. This remains active after admin is disabled.
+        if (isInstallerEvent) {
+            if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                installerWindowClass = event.className?.toString()
+                lastRemovalScanMs = -1L
+            }
+            if (checkRemovalReminder(eventPackage)) return
+            if (removalReminderStore.enabled && removalScanJob?.isActive != true) {
+                removalScanJob = serviceScope.launch(Dispatchers.Main) {
+                    delay(550)
+                    checkRemovalReminder(eventPackage)
+                }
+            }
+        }
+
         if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             val previousPackage = currentForegroundPackage
             if (eventPackage != previousPackage) {
                 currentForegroundPackage = eventPackage
                 currentActiveWebsite = null
-                lastContentEventMs.remove(eventPackage)
                 handleForegroundPackageChanged(eventPackage, previousPackage)
             }
         }
 
-        // Real-time URL inspection for browsers. Only window state/content changes can
-        // alter the URL bar; skipping other event types avoids node work while typing
-        // and scrolling.
-        if (!BROWSER_PACKAGES.contains(eventPackage)) return
-
-        if (eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
-            // Coalesce the content-changed flood: drop same-package events inside the
-            // short window BEFORE any node work. The 1.5s URL-check throttle downstream
-            // is untouched — this only removes redundant retries of that same check.
-            val now = System.currentTimeMillis()
-            val last = lastContentEventMs[eventPackage] ?: 0L
-            if (now - last < CONTENT_EVENT_COALESCE_MS) return
-            lastContentEventMs[eventPackage] = now
+        // Keep checking while the browser is foreground. Chrome may emit its final
+        // navigation event before the URL is readable; dropping that event must not
+        // leave the page unchecked until another navigation.
+        // Window-state processing above may have just made this browser foreground.
+        // Re-evaluate here so its first event starts monitoring immediately.
+        if (eventPackage in BROWSER_PACKAGES && eventPackage == currentForegroundPackage) {
+            browserMonitor.watch(eventPackage)
         }
-        checkBrowserUrl(eventPackage)
     }
 
-    private fun checkUninstallProtection(packageName: String): Boolean {
-        // Fast path first: no DPM/binder/node work unless an installer is actually foreground.
-        if (packageName !in INSTALLER_PACKAGES) return false
-        if (!isAdminActiveCached()) return false
-
-        // Node query only for installer packages (rare); this is the one case where the
-        // result gates the handler synchronously, so it stays on the main thread.
+    private fun checkRemovalReminder(packageName: String): Boolean {
+        if (!removalReminderStore.enabled || RemovalReminderController.isSuppressed(this)) return false
+        val now = SystemClock.elapsedRealtime()
+        if (lastRemovalScanMs >= 0 && now - lastRemovalScanMs < 500L) return false
+        lastRemovalScanMs = now
         val root = rootInActiveWindow ?: return false
         try {
-            val nodes = root.findAccessibilityNodeInfosByText("FocusLock")
-            if (!nodes.isNullOrEmpty()) {
-                performGlobalAction(GLOBAL_ACTION_HOME)
-                serviceScope.launch(Dispatchers.Main) {
-                    Toast.makeText(
-                        applicationContext,
-                        "FocusLock uninstall is protected. Deactivate admin in FocusLock Settings first.",
-                        Toast.LENGTH_LONG
-                    ).show()
+            // Do not inspect a stale window from another app.
+            if (root.packageName?.toString() != packageName) return false
+            val texts = mutableListOf<String>()
+            var visited = 0
+            fun collect(node: AccessibilityNodeInfo, depth: Int) {
+                if (++visited > 60 || depth > 8) return
+                node.text?.toString()?.take(500)?.let(texts::add)
+                node.contentDescription?.toString()?.take(500)?.let(texts::add)
+                for (index in 0 until minOf(node.childCount, 20)) {
+                    if (visited >= 60) break
+                    val child = node.getChild(index) ?: continue
+                    try { collect(child, depth + 1) } finally {
+                        if (canRecycleNodes) child.recycle()
+                    }
                 }
-                return true
             }
-        } catch (_: Exception) {
+            collect(root, 0)
+            if (RemovalAttemptPolicy.matches(packageName, installerWindowClass, texts)) {
+                // A voluntary reminder: Continue returns to the untouched system dialog.
+                return RemovalReminderController.show(this, "uninstall", fromForeground = true)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not inspect uninstall dialog", e)
         } finally {
-            if (canRecycleNodes) {
-                try { root.recycle() } catch (_: Exception) {}
-            }
+            if (canRecycleNodes) root.recycle()
         }
         return false
     }
@@ -504,6 +516,8 @@ class AppMonitorAccessibilityService : AccessibilityService() {
      * switch or our blocker/UI taking over) and persists its batched scroll spend.
      */
     private fun stopTrackingForPreviousPackage(previousPackage: String?) {
+        browserMonitor.stop()
+        stopPolicyActivityRefresh()
         countdownJob?.cancel()
         countdownJob = null
         tickTickSessionJob?.cancel()
@@ -532,15 +546,15 @@ class AppMonitorAccessibilityService : AccessibilityService() {
 
         stopTrackingForPreviousPackage(previousPackage)
 
-        // Intercept uninstallation attempts if uninstall protection is active
-        if (checkUninstallProtection(packageName)) {
-            return
-        }
-
         serviceScope.launch {
             val app = FocusLockApplication.instance
             val settings = app.settingsRepository
             val bank = app.creditBankRepository
+
+            // This code runs off the accessibility callback. Refresh once on target
+            // transitions, then keep active policy targets on a bounded minute loop.
+            app.syncManager.requestPolicyRefresh()
+            updateAppPolicyActivity(app, packageName)
 
             // 0. NUKE MODE — block everything except the Nuke lock screen itself.
             // Phone + PC stay locked until 10-min reset + coach approval.
@@ -670,6 +684,89 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         }
     }
 
+    private suspend fun updateAppPolicyActivity(app: FocusLockApplication, packageName: String): Boolean {
+        if (packageName == applicationContext.packageName || packageName in BROWSER_PACKAGES) return false
+        val appLimit = try { app.appLimitsRepository.getLimit(packageName) } catch (_: Exception) { null }
+        val hasGroupPolicy = try {
+            app.targetGroupsRepository.groupsForTarget("app", packageName).any {
+                it.limitEnabled && (it.dailyLimitMinutes ?: 0) > 0
+            }
+        } catch (_: Exception) { false }
+        val selectedPolicy = try {
+            app.settingsRepository.isAppBlocked(packageName) || app.settingsRepository.isAppPermanent(packageName)
+        } catch (_: Exception) { false }
+        val hasAppLimit = appLimit?.enabled == true && appLimit.dailyMinutes > 0
+        if (selectedPolicy || hasAppLimit || hasGroupPolicy) {
+            startPolicyActivityRefresh("app:$packageName", packageName, website = null)
+        } else if (policyActivityKey == "app:$packageName") {
+            stopPolicyActivityRefresh()
+        }
+        return selectedPolicy || hasAppLimit || hasGroupPolicy
+    }
+
+    private fun reevaluateCurrentPolicyActivity() {
+        val packageName = currentForegroundPackage ?: return
+        val app = FocusLockApplication.instance
+        if (packageName in BROWSER_PACKAGES) {
+            val domain = currentActiveWebsite ?: return
+            serviceScope.launch {
+                val selected = try { app.settingsRepository.isWebsiteBlocked(domain) || app.settingsRepository.isWebsitePermanent(domain) }
+                    catch (_: Exception) { false }
+                val groupPolicy = try {
+                    app.targetGroupsRepository.groupsForWebsiteHost(domain).any {
+                        it.limitEnabled && (it.dailyLimitMinutes ?: 0) > 0
+                    }
+                } catch (_: Exception) { false }
+                if (selected || groupPolicy) {
+                    startPolicyActivityRefresh("website:$domain", packageName, domain)
+                } else if (policyActivityKey == "website:$domain") {
+                    stopPolicyActivityRefresh()
+                }
+            }
+        } else {
+            serviceScope.launch {
+                val alreadyActive = policyActivityKey == "app:$packageName"
+                if (updateAppPolicyActivity(app, packageName) && !alreadyActive &&
+                    currentForegroundPackage == packageName
+                ) {
+                    // A boundary or merged cap can arrive from another device while
+                    // this app stays foreground. Re-run the ordinary enforcement path
+                    // once on the transition into newly active policy.
+                    handleForegroundPackageChanged(packageName, previousPackage = null)
+                }
+            }
+        }
+    }
+
+    /** Keeps one background-safe refresh loop for the currently used policy target. */
+    private fun startPolicyActivityRefresh(key: String, packageName: String, website: String?) {
+        if (policyActivityKey == key && policyActivityRefreshJob?.isActive == true) {
+            FocusLockApplication.instance.syncManager.requestPolicyRefresh(activeTarget = true)
+            return
+        }
+        stopPolicyActivityRefresh()
+        policyActivityKey = key
+        val app = FocusLockApplication.instance
+        app.syncManager.requestPolicyRefresh(activeTarget = true)
+        policyActivityRefreshJob = serviceScope.launch {
+            while (isActive && policyActivityKey == key && currentForegroundPackage == packageName &&
+                (website == null || currentActiveWebsite == website)
+            ) {
+                delay(POLICY_ACTIVITY_REFRESH_INTERVAL_MS)
+                if (policyActivityKey != key || currentForegroundPackage != packageName ||
+                    (website != null && currentActiveWebsite != website)
+                ) break
+                if (isScreenInteractive()) app.syncManager.requestPolicyRefresh(activeTarget = true)
+            }
+        }
+    }
+
+    private fun stopPolicyActivityRefresh() {
+        policyActivityKey = null
+        policyActivityRefreshJob?.cancel()
+        policyActivityRefreshJob = null
+    }
+
     /**
      * Merged-group daily-limit enforcement for an app package or website host.
      *
@@ -683,8 +780,9 @@ class AppMonitorAccessibilityService : AccessibilityService() {
      *   app members; website members contribute 0 locally (browser time reaches the
      *   server from the extension, never from Android UsageStats).
      * - `serverSecondsToday` is the cached per-group total from the last
-     *   `usage:getUsageSummary` pull (FocusSyncManager, refreshed once per ~30s sync
-     *   cycle). It can lag one cycle and may not include another device's newest upload.
+     *   `usage:getUsageSummary` pull (FocusSyncManager, refreshed at most every minute
+     *   while this monitor is using a selected/group target, and every four hours idle).
+     *   It may lag one refresh and may not include another device's newest upload.
      *
      * max() avoids counting the phone's own uploaded app usage twice. Android browser
      * time is not measured per-domain locally, so website-only time needs a synced
@@ -976,31 +1074,20 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun checkBrowserUrl(browserPackage: String) {
-        // Throttle: accessibility events fire rapidly; checking more than ~1/sec wastes CPU
-        val now = System.currentTimeMillis()
-        if (now - lastBrowserCheckMs < URL_CHECK_THROTTLE_MS) return
-        lastBrowserCheckMs = now
-
-        // All node access (rootInActiveWindow + findAccessibilityNodeInfosByViewId + the
-        // bounded fallback scan) is binder IPC, so it runs off the main thread. Nodes are
-        // acquired and released inside this coroutine; only the extracted URL string
-        // leaves it, so no AccessibilityNodeInfo is shared across threads.
-        serviceScope.launch(Dispatchers.Default) {
-            // null = active window unreadable (mid-transition): transient, keep state.
-            // "" = window readable but NO url-bar text anywhere: the previous URL can no
-            // longer be confirmed, so stop tracking it — a stale currentActiveWebsite
-            // must never keep draining credits while the user is on other content.
-            val url = try {
-                extractBrowserUrl(browserPackage)
-            } catch (_: Exception) {
-                null
-            }
+    private suspend fun checkBrowserUrl(browserPackage: String) {
+        if (currentForegroundPackage != browserPackage || !isScreenInteractive()) return
+        try {
+            // Node IPC stays off Main; the monitor serializes scans and decisions.
+            val url = withContext(Dispatchers.Default) { extractBrowserUrl(browserPackage) }
+            if (currentForegroundPackage != browserPackage) return
             when {
-                url == null -> Unit
+                url == null -> Unit // Window transition: retry on the next monitor tick.
                 url.isBlank() -> clearActiveWebsite()
                 else -> handleDetectedBrowserUrl(browserPackage, url)
             }
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            Log.w(TAG, "Browser enforcement check failed", e)
         }
     }
 
@@ -1011,6 +1098,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             countdownJob?.cancel()
             countdownJob = null
         }
+        if (policyActivityKey?.startsWith("website:") == true) stopPolicyActivityRefresh()
     }
 
     /**
@@ -1025,6 +1113,8 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     private fun extractBrowserUrl(browserPackage: String): String? {
         val rootNode = rootInActiveWindow ?: return null
         try {
+            // A queued event may belong to a window that has already closed.
+            if (rootNode.packageName?.toString() != browserPackage) return null
             // Cheap first-hit pass over the well-known URL-bar view IDs only.
             val quickUrl = try {
                 extractUrlFromViewIds(rootNode, browserPackage)
@@ -1032,6 +1122,10 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 null
             }
             if (!quickUrl.isNullOrBlank()) return quickUrl
+
+            // Google search/Discover can contain many blocked-domain links. They are
+            // not evidence that the user opened any of those sites.
+            if (!BrowserUrlPolicy.allowsPageTextFallback(browserPackage)) return ""
 
             // Fallback: server-side text search (1 binder call per pattern).
             val textUrl = try {
@@ -1067,8 +1161,11 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             var nodes: List<AccessibilityNodeInfo>? = null
             try {
                 nodes = root.findAccessibilityNodeInfosByViewId(id)
-                val text = nodes?.firstOrNull()?.text?.toString()
-                if (!text.isNullOrBlank()) return text
+                for (node in nodes.orEmpty()) {
+                    if (!node.isVisibleToUser) continue
+                    val text = BrowserUrlPolicy.toolbarUrl(node.text, node.contentDescription)
+                    if (text != null) return text
+                }
             } catch (_: Exception) {
             } finally {
                 nodes?.forEach {
@@ -1133,81 +1230,69 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     }
 
     /** Domain check + block decision for a URL found by the fast or fallback scan. */
-    private fun handleDetectedBrowserUrl(browserPackage: String, url: String) {
+    private suspend fun handleDetectedBrowserUrl(browserPackage: String, url: String) {
         val cleanDomain = SettingsRepository.cleanDomain(url)
         if (cleanDomain.isBlank()) {
-            // Non-URL text (mid-typing, garbage node): same treatment as extraction
-            // failure — never keep draining credits off a stale site.
             clearActiveWebsite()
             return
         }
-
-        serviceScope.launch {
-            val app = FocusLockApplication.instance
-            val settings = app.settingsRepository
-            val bank = app.creditBankRepository
-
-            // A merged limit applies to every member, including a website that is
-            // otherwise allowed. Recheck on each URL event so an open tab is blocked
-            // as soon as its combined limit is reached.
-            val groupLimitExceeded = try {
-                isGroupLimitExceeded(app, "website", cleanDomain)
-            } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                false
-            }
-            if (groupLimitExceeded) {
-                currentActiveWebsite = cleanDomain
-                countdownJob?.cancel()
-                countdownJob = null
-                recordBlock(browserPackage, "limit")
-                triggerBlocker(browserPackage, website = cleanDomain, reason = "limit")
-                return@launch
-            }
-
-            val isBlocked = settings.isWebsiteBlocked(cleanDomain)
-            if (!isBlocked) {
-                if (currentActiveWebsite != null) {
-                    currentActiveWebsite = null
-                    countdownJob?.cancel()
-                }
-                return@launch
-            }
-
-            // User-granted temporary pass ("Continue to Chrome"): skip blocking
-            // and event recording until the suppression window expires.
-            val strictNow = try {
-                settings.isLockdownModeEnabled() || app.strictModeAutomationRepository.isActivationActiveNow()
-            } catch (_: Exception) { false }
-            if (!strictNow && isDomainSuppressed(cleanDomain)) return@launch
-
-            if (currentActiveWebsite != cleanDomain) {
-                currentActiveWebsite = cleanDomain
-
-                // Permanent block: cannot be bypassed by balance, schedule, or strict mode.
-                if (settings.isWebsitePermanent(cleanDomain)) {
-                    Log.w(TAG, "Permanently blocked website visited in $browserPackage: $cleanDomain")
-                    recordBlock(browserPackage, "permanent")
-                    triggerBlocker(browserPackage, website = cleanDomain, reason = "permanent")
-                    return@launch
-                }
-
-                val balanceSec = bank.getBalanceSeconds()
-                Log.d(TAG, "Blocked website visited in $browserPackage: $cleanDomain (balance: $balanceSec s)")
-
-                // STRICT MODE: block immediately even with a positive balance — skip
-                // the 2s doomscroll grace countdown entirely (see note above re:
-                // TickTickNotificationListener having no bypass).
-                if (strictNow) {
-                    recordBlock(browserPackage, "manual")
-                    triggerBlocker(browserPackage, website = cleanDomain, reason = "strict")
-                } else if (balanceSec <= 0L) {
-                    recordBlock(browserPackage, "manual")
-                    triggerBlocker(browserPackage, website = cleanDomain, reason = "manual")
-                } else {
-                    startDoomscrollCountdown(browserPackage, website = cleanDomain)
-                }
-            }
+        val app = FocusLockApplication.instance
+        val settings = app.settingsRepository
+        app.syncManager.requestPolicyRefresh()
+        val permanent = settings.isWebsitePermanent(cleanDomain)
+        val websiteGroups = try { app.targetGroupsRepository.groupsForWebsiteHost(cleanDomain) }
+        catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            emptyList()
+        }
+        val groupPolicy = websiteGroups.any { it.limitEnabled && (it.dailyLimitMinutes ?: 0) > 0 }
+        val groupLimitExceeded = if (permanent) false else try {
+            isGroupLimitExceeded(app, "website", cleanDomain)
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            false
+        }
+        val blocked = settings.isWebsiteBlocked(cleanDomain)
+        if (permanent || blocked || groupPolicy) {
+            currentActiveWebsite = cleanDomain
+            startPolicyActivityRefresh("website:$cleanDomain", browserPackage, cleanDomain)
+        } else if (policyActivityKey?.startsWith("website:") == true) {
+            stopPolicyActivityRefresh()
+        }
+        val strict = if (!blocked || permanent || groupLimitExceeded) false else try {
+            settings.isLockdownModeEnabled() || app.strictModeAutomationRepository.isActivationActiveNow()
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            false
+        }
+        val reason = WebsiteBlockPolicy.blockReason(
+            blocked = blocked,
+            permanent = permanent,
+            groupLimitExceeded = groupLimitExceeded,
+            strict = strict,
+            scheduleActive = blocked && scheduleActiveNow(),
+            suppressed = isDomainSuppressed(cleanDomain),
+            balanceSeconds = app.creditBankRepository.getBalanceSeconds(),
+        )
+        // Reads above can suspend. Never enforce a result after leaving this browser.
+        if (currentForegroundPackage != browserPackage || !isScreenInteractive()) return
+        if (reason != null) {
+            currentActiveWebsite = cleanDomain
+            countdownJob?.cancel()
+            countdownJob = null
+            recordBlock(browserPackage, reason)
+            triggerBlocker(browserPackage, website = cleanDomain, reason = reason)
+            return
+        }
+        if (!blocked || isDomainSuppressed(cleanDomain)) {
+            clearActiveWebsite()
+            return
+        }
+        // Re-evaluate rules even on the same site, but do not restart its spending
+        // timer on each scan: frequent page events must not postpone consumption.
+        if (currentActiveWebsite != cleanDomain || countdownJob?.isActive != true) {
+            currentActiveWebsite = cleanDomain
+            startDoomscrollCountdown(browserPackage, website = cleanDomain)
         }
     }
 
@@ -1319,12 +1404,17 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
+        browserMonitor.stop()
+        stopPolicyActivityRefresh()
+        policyBoundaryJob?.cancel()
+        policyBoundaryJob = null
         countdownJob?.cancel()
         tickTickSessionJob?.cancel()
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        browserMonitor.stop()
         scheduleTickerJob?.cancel()
         scheduleTickerJob = null
         permissionReturnJob?.cancel()
@@ -1335,6 +1425,11 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         targetGroupsJob = null
         permanentBlocksJob?.cancel()
         permanentBlocksJob = null
+        permanentWebsitesJob?.cancel()
+        permanentWebsitesJob = null
+        stopPolicyActivityRefresh()
+        policyBoundaryJob?.cancel()
+        policyBoundaryJob = null
         unregisterFrogWakeReceiver()
         countdownJob?.cancel()
         tickTickSessionJob?.cancel()

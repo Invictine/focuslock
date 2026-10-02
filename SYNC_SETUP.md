@@ -63,6 +63,63 @@ desktop package on the devices being tested; a build does not update a running i
 
 ## Operations and recovery
 
+### Storage and call budget changes (2026-09-30)
+
+Routine Android, Windows and Chrome background uploads use a four-hour cadence.
+Chrome refreshes policy every minute while a shared target is actively browsed;
+Android uses a minute cadence while its UI is visible. Cached policy enforcement
+continues offline. Active enforcement refreshes and merged-limit usage uploads
+are separate from the four-hour ordinary usage/heartbeat budget.
+Sign-in, account changes, local edits, reconnects where supported, and explicit
+Sync Now can add immediate calls. A boundary changed on another device may take
+up to the background interval to reach a device that has no live subscription.
+
+Usage sends only increased absolute counters. A usage batch can carry its device
+heartbeat in the same transaction. Android pulls groups, due today's usage, and
+due target catalogs with its conditional snapshot rather than three extra calls.
+Collection saves diff rows, preserving unchanged records. Windows subscribes to
+configuration, credit state and visible history separately. Stable device labels
+are separate from heartbeats so presence changes do not invalidate usage reports.
+New `recordWork` events use one canonical history row; session views derive the
+corresponding entry without creating a duplicate `focusSessions` document.
+
+The target catalog is materialized by installation/target, so normal picker reads
+do not rescan usage history. An existing account's first new upload schedules a
+bounded, idempotent catalog backfill. Legacy reads remain complete until backfill
+finishes. Catalog increments and per-source markers commit together, including
+when a backfill races an upload or archival transaction.
+
+Detailed cloud usage is kept for 30 days with a one-day UTC/timezone buffer.
+An indexed daily job compacts at most 100 expired rows per transaction into
+monthly target/device totals and daily chart totals, then schedules continuation
+pages. Archives and source removal commit atomically. All-time and complete-month
+totals remain available; historical partial-month per-target queries cannot be
+exact after compaction and return an explicit error instead of a misleading sum.
+Monthly totals remain indefinitely, so their storage still grows with time.
+
+Uploads dated before that retention window are acknowledged as `expired` without
+recreating retired counters, which would otherwise double-count archived totals.
+Clients keep their local data and report a nonfatal retention warning; offline
+usage that was never uploaded within the window cannot be restored to the cloud
+by replaying an old counter. Work records retain their separate durable replay.
+
+See [CONVEX_CAPACITY.md](CONVEX_CAPACITY.md) and run `npm run convex:capacity`.
+The estimate uses explicit activity/size assumptions and does not certify 1,000
+DAU under Free. Calls, stored indexes, cleanup I/O, reactive reruns, retries and
+other projects on the same team must all be included in a live capacity test.
+
+A fresh pre-retention snapshot is saved privately in the ignored local file
+`build/convex-before-storage-20260930.zip` (ZIP integrity verified, SHA-256
+`68ab41564c106d9ab8ed83f7cf4dc4916956f16dd313996a3f71b809c5ac5d38`).
+The primary development deployment (`earnest-quail-160`) was disabled by Free-plan
+limits on 2026-09-30. With the user's supplied backup deployment key, the backend
+was deployed temporarily to `brazen-fly-869`. The fresh snapshot above restored
+361 documents into the previously empty fallback, retaining account ownership.
+Live read-only checks of the restored account returned 15 app boundaries, four
+website boundaries, 13 work records, and seven registered devices. These used
+an administrative identity; they do not prove a real Clerk login or phone round
+trip. See [CONVEX_FALLBACK.md](CONVEX_FALLBACK.md) before switching back.
+
 Convex persists account data independently of installations. Cumulative usage is
 keyed by account, installation, date, and target. Retrying a bucket cannot double
 count it or reduce its stored counters. Collection versions retain intentional

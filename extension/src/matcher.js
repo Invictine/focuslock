@@ -28,9 +28,25 @@
   }
 
   function domainOf(urlStr) {
-    try { return new URL(urlStr).hostname.toLowerCase().replace(/^www\./, ''); }
+    try { return new URL(urlStr).hostname.toLowerCase().replace(/\.$/, '').replace(/^www\./, ''); }
     catch (e) { return ''; }
   }
+
+  // Shared by the Boundaries "Add website" dialog and the Permalock panel.
+  // Accepts a domain or URL, returns { value: host } or { error: message }.
+  function parseDomainInput(raw) {
+    let v = String(raw || '').trim().toLowerCase();
+    if (!v) return { error: 'Enter a website.' };
+    if (/^(chrome|chrome-extension|edge|about|javascript|data|file):/i.test(v)) return { error: 'That address cannot be blocked.' };
+    v = v.replace(/^https?:\/\//, '').replace(/^www\./, '');
+    const host = v.split('/')[0].split('?')[0].replace(/:\d+$/, '');
+    if (!host) return { error: 'Enter a valid domain.' };
+    if (!/^(\*\.)?[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*)+$/.test(host)) {
+      return { error: 'Use a domain like example.com — wildcards like *.example.com are allowed.' };
+    }
+    return { value: host };
+  }
+
 
   function escapeReg(s) {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -38,16 +54,20 @@
 
   // Compile a single user pattern to a test function
   function compilePattern(raw) {
-    let p = (raw || '').trim().toLowerCase();
+    if (typeof raw !== 'string' || raw.length > 2000) return null;
+    let p = raw.trim();
     if (!p || p.startsWith('#')) return null;
     // raw regex: /body/flags
     if (p.length > 2 && p.startsWith('/') && p.lastIndexOf('/') > 0) {
       const last = p.lastIndexOf('/');
       try {
         const re = new RegExp(p.slice(1, last), p.slice(last + 1) || 'i');
-        return { raw, test: (url) => re.test(url) };
+        // Global/sticky regexes mutate lastIndex. Every verdict must start at
+        // the same position, including repeated visits to the same URL.
+        return { raw, test: (url) => { re.lastIndex = 0; return re.test(url); } };
       } catch (e) { return null; }
     }
+    p = p.toLowerCase();
     // keyword: *word*  (both stars, no dots/slashes inside fear -> treat as substring)
     if (p.startsWith('*') && p.endsWith('*') && p.length > 2 && !p.slice(1, -1).includes('/')) {
       const kw = p.slice(1, -1).replace(/^\*\.*/, '').replace(/\.*\*$/, '');
@@ -67,13 +87,15 @@
     const pathRe = pathPart
       ? escapeReg(pathPart).replace(/\\\*/g, '.*')
       : null;
+    const compiledHost = hostPart ? new RegExp(hostRe + '$', 'i') : null;
+    const compiledPath = pathRe !== null ? new RegExp('^/' + pathRe, 'i') : null;
     return {
       raw,
       test: (urlStr) => {
         const n = normalizeUrl(urlStr);
         if (!n.ok) return false;
-        if (hostPart && !(new RegExp(hostRe + '$', 'i')).test(n.host)) return false;
-        if (pathRe !== null && !(new RegExp('^/' + pathRe, 'i')).test('/' + n.path.replace(/^\//, ''))) return false;
+        if (compiledHost && !compiledHost.test(n.host)) return false;
+        if (compiledPath && !compiledPath.test('/' + n.path.replace(/^\//, ''))) return false;
         if (!hostPart && pathRe !== null) return n.full.includes(pathPart.replace(/\*/g, ''));
         return true;
       }
@@ -81,7 +103,7 @@
   }
 
   function compileList(patterns) {
-    return (patterns || []).map(compilePattern).filter(Boolean);
+    return (Array.isArray(patterns) ? patterns : []).map(compilePattern).filter(Boolean);
   }
 
   function matchesAny(urlStr, patterns) {
@@ -94,7 +116,7 @@
   }
 
   root.FocusLockMatcher = {
-    normalizeUrl, isInternalUrl, domainOf,
+    normalizeUrl, isInternalUrl, domainOf, parseDomainInput,
     compilePattern, compileList, matchesAny
   };
 })(typeof self !== 'undefined' ? self : globalThis);

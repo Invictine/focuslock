@@ -13,8 +13,9 @@ import "./blocker.css";
 //
 // Frozen IPC: get_blocker_state -> { visible, target, kind, reason };
 // `focuslock://blocker` events carry { target, kind, reason }; blocker_action
-// accepts "eat_frog" | "dismiss". Everything is guarded by tauriAvailable() so
-// a plain browser (#/blocked in web preview) renders a harmless message.
+// accepts "eat_frog" | "dismiss" — both are REFUSED by Rust while the active
+// reason is "permanent". Everything is guarded by tauriAvailable() so a plain
+// browser (#/blocked in web preview) renders a harmless message.
 // ---------------------------------------------------------------------------
 
 type BlockerPayload = {
@@ -82,6 +83,25 @@ function SiteGlyph({ size = 13 }: { size?: number }) {
     >
       <circle cx="12" cy="12" r="9" />
       <path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" />
+    </svg>
+  );
+}
+
+function ShieldGlyph({ size = 13 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M12 3l7 3v5c0 4.4-2.9 7.4-7 9-4.1-1.6-7-4.6-7-9V6Z" />
+      <path d="m9 12 2 2 4-4" />
     </svg>
   );
 }
@@ -266,6 +286,26 @@ export default function BlockerPage() {
               Back to work
             </button>
           </div>
+        </section>
+      </main>
+    );
+  }
+
+  if (reason === "permanent") {
+    // No `.blocker-actions` at all, on purpose: Rust also refuses
+    // blocker_action("dismiss"/"eat_frog") while the reason is permanent, so
+    // there is no removal, credit or emergency-pass path from here.
+    return (
+      <main className="blocker-page" role="dialog" aria-modal="true" aria-labelledby="blocker-title">
+        <section className="blocker-card">
+          <p className="blocker-pill permanent">
+            <ShieldGlyph /> Permanent
+          </p>
+          <h1 id="blocker-title">Permanently blocked</h1>
+          <p className="blocker-copy">
+            This app is permanently blocked in FocusLock. There is no removal, credits, or
+            emergency pass.
+          </p>
         </section>
       </main>
     );

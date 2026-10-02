@@ -45,6 +45,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import com.focuslock.app.FocusLockApplication
 import com.focuslock.app.data.model.BlockedApp
 import com.focuslock.app.data.model.BlockedWebsite
@@ -170,6 +173,21 @@ private fun normalizedMemberKey(kind: String, rawKey: String): String? {
     if (normalizedKind.isEmpty() || key.isEmpty()) return null
     val normalized = if (normalizedKind == "website") key.removePrefix("www.") else key
     return normalized.ifEmpty { null }
+}
+
+/** Permanent targets stay in PermaLock's durable store and are omitted from boundaries. */
+internal fun isPermanentPackage(packageName: String, permanentPackages: Set<String>): Boolean {
+    val normalized = packageName.trim().lowercase()
+    return permanentPackages.any { it.trim().lowercase() == normalized }
+}
+
+/** A PermaLock domain covers its subdomains, matching browser enforcement semantics. */
+internal fun isPermanentDomain(domain: String, permanentDomains: Set<String>): Boolean {
+    val candidate = domain.trim().lowercase().removePrefix("www.")
+    return permanentDomains.any { raw ->
+        val permanent = raw.trim().lowercase().removePrefix("www.")
+        permanent.isNotEmpty() && (candidate == permanent || candidate.endsWith(".$permanent"))
+    }
 }
 
 /** "Pixel · Android" provenance label; unknown platforms keep just the device name. */
@@ -313,21 +331,30 @@ internal fun AppPickerScreen(
     val boundariesFrozen by settings.boundariesFrozenFlow.collectAsStateWithLifecycle(initialValue = false)
     val lockdownMode by settings.lockdownModeFlow.collectAsStateWithLifecycle(initialValue = false)
     val limits by appLimits.limitsFlow.collectAsStateWithLifecycle(initialValue = emptyMap())
-    val permanentPackages by permanentBlocks.packagesFlow.collectAsStateWithLifecycle(initialValue = emptySet())
+    val permanentPackagesState by permanentBlocks.packagesFlow.collectAsStateWithLifecycle(initialValue = null)
+    val permanentDomainsState by permanentBlocks.domainsFlow.collectAsStateWithLifecycle(initialValue = null)
+    val permanentStoreLoaded = permanentPackagesState != null && permanentDomainsState != null
+    val permanentPackages = permanentPackagesState.orEmpty()
+    val permanentDomains = permanentDomainsState.orEmpty()
 
     // Live Strict Mode cooldown for accurate refusal copy; polls only while it is active.
     var lockdownRemainingMs by remember { mutableStateOf(0L) }
-    LaunchedEffect(lockdownMode) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(lockdownMode, lifecycleOwner) {
         if (!lockdownMode) {
             lockdownRemainingMs = 0L
         } else {
-            while (true) {
-                lockdownRemainingMs = try {
-                    settings.lockdownCooldownRemainingMs()
-                } catch (_: Exception) {
-                    0L
+            lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                while (true) {
+                    val remainingMs = try {
+                        settings.lockdownCooldownRemainingMs()
+                    } catch (_: Exception) {
+                        null
+                    }
+                    lockdownRemainingMs = remainingMs ?: 0L
+                    if (remainingMs == 0L) break
+                    delay(minOf(remainingMs ?: 30_000L, 30_000L))
                 }
-                delay(30_000)
             }
         }
     }
@@ -349,8 +376,15 @@ internal fun AppPickerScreen(
 
     val blockedApps = storedApps.orEmpty()
     val blockedWebsites = storedWebsites.orEmpty()
+    val effectivePermanentPackages = remember(blockedApps, permanentPackages) {
+        permanentPackages + blockedApps.filter { it.isPermanent }.map { it.packageName }
+    }
+    val effectivePermanentDomains = remember(blockedWebsites, permanentDomains) {
+        permanentDomains + blockedWebsites.filter { it.isPermanent }.map { it.domain }
+    }
     val appsStorageLoaded = storedApps != null
     val websitesStorageLoaded = storedWebsites != null
+    val permanentFilterReady = permanentStoreLoaded && appsStorageLoaded && websitesStorageLoaded
 
     // State object handed to SearchField: the text is only read inside that composable,
     // so keystrokes never invalidate this screen or the 300+ item list.
@@ -373,6 +407,20 @@ internal fun AppPickerScreen(
     val targetGroupsRepository = FocusLockApplication.instance.targetGroupsRepository
     val syncManager = FocusLockApplication.instance.syncManager
     val targetGroups by targetGroupsRepository.groups.collectAsStateWithLifecycle(initialValue = emptyList())
+    val boundaryTargetGroups = remember(
+        targetGroups, effectivePermanentPackages, effectivePermanentDomains, permanentFilterReady
+    ) {
+        if (!permanentFilterReady) emptyList() else targetGroups.mapNotNull { group ->
+            val visibleMembers = group.members.filterNot { member ->
+                if (member.targetKind.trim().equals("website", ignoreCase = true)) {
+                    isPermanentDomain(member.targetKey, effectivePermanentDomains)
+                } else {
+                    isPermanentPackage(member.targetKey, effectivePermanentPackages)
+                }
+            }
+            group.copy(members = visibleMembers).takeIf { visibleMembers.isNotEmpty() }
+        }
+    }
     val groupUsageToday by syncManager.groupUsageTodaySeconds
         .collectAsStateWithLifecycle(initialValue = emptyMap())
     // All-time, all-device catalog: adds targets that exist only on the Windows PC or
@@ -386,11 +434,18 @@ internal fun AppPickerScreen(
     // Cross-device "New bucket…" hand-off from a usage row: open the editor with that
     // single target pre-selected. Consumed immediately, so closing/cancelling the
     // editor (or backing out of the picker) can never reopen it.
-    LaunchedEffect(pendingMerge) {
+    LaunchedEffect(pendingMerge, permanentStoreLoaded, appsStorageLoaded, websitesStorageLoaded, effectivePermanentPackages, effectivePermanentDomains) {
         val target = pendingMerge ?: return@LaunchedEffect
+        if (!permanentFilterReady) return@LaunchedEffect
         val kind = if (target.targetKind.trim().lowercase() == "website") "website" else "app"
         val key = normalizedMemberKey(kind, target.targetKey)
-        if (key != null) {
+        val permanent = key != null && if (kind == "app") {
+            isPermanentPackage(key, effectivePermanentPackages) ||
+                blockedApps.any { it.packageName.equals(key, ignoreCase = true) && it.isPermanent }
+        } else {
+            isPermanentDomain(key, effectivePermanentDomains)
+        }
+        if (key != null && !permanent) {
             groupEditor = GroupEditorRequest(
                 initialMembers = listOf(
                     GroupMemberChoice(
@@ -612,7 +667,7 @@ internal fun AppPickerScreen(
     // Optimistic overrides are deliberately NOT merged here: toggling one switch must not
     // rebuild all 300+ rows. They are applied per item in the LazyColumn lambda below instead.
     val mergedAppRows: List<AppRowItem> = remember(
-        blockedApps, installedApps, usageMinutes, appsStorageLoaded, appsLoadState, permanentPackages
+        blockedApps, installedApps, usageMinutes, appsStorageLoaded, appsLoadState, effectivePermanentPackages
     ) {
         val blockedByPkg = blockedApps.associateBy { it.packageName }
         val installedByPkg = installedApps.associateBy { it.packageName }
@@ -632,7 +687,7 @@ internal fun AppPickerScreen(
                         ?: (if (appsStorageLoaded) defaultBlocked else false),
                     isInstalled = true,
                     todayMinutes = usageMinutes[inst.packageName] ?: 0L,
-                    isPermanent = inst.packageName.lowercase() in permanentPackages || stored?.isPermanent == true
+                    isPermanent = isPermanentPackage(inst.packageName, effectivePermanentPackages) || stored?.isPermanent == true
                 )
             )
         }
@@ -650,7 +705,7 @@ internal fun AppPickerScreen(
                             isBlocked = stored?.isBlocked ?: def.isBlocked,
                             isInstalled = false,
                             todayMinutes = 0L,
-                            isPermanent = def.packageName.lowercase() in permanentPackages || stored?.isPermanent == true
+                            isPermanent = isPermanentPackage(def.packageName, effectivePermanentPackages) || stored?.isPermanent == true
                         )
                     )
                 }
@@ -666,11 +721,14 @@ internal fun AppPickerScreen(
 
     // Stale blocked entries (uninstalled, not in defaults) are hidden from the main
     // list — surfaced only as a count note so they never show as installed.
-    val staleUninstalledBlockedCount = remember(blockedApps, installedApps, appsLoadState, appsStorageLoaded) {
+    val staleUninstalledBlockedCount = remember(blockedApps, installedApps, appsLoadState, appsStorageLoaded, effectivePermanentPackages) {
         if (!appsStorageLoaded || appsLoadState !is AppsLoadState.Ready) 0 else {
             val installedSet = installedApps.map { it.packageName }.toSet()
             val defaultPkgs = DEFAULT_DOOMSCROLL_BY_PACKAGE.keys
-            blockedApps.count { it.isBlocked && it.packageName !in installedSet && it.packageName !in defaultPkgs }
+            blockedApps.count {
+                it.isBlocked && !it.isPermanent && !isPermanentPackage(it.packageName, effectivePermanentPackages) &&
+                    it.packageName !in installedSet && it.packageName !in defaultPkgs
+            }
         }
     }
 
@@ -678,16 +736,21 @@ internal fun AppPickerScreen(
     val systemSet = remember(installedApps) {
         installedApps.filter { it.isSystem }.map { it.packageName }.toSet()
     }
+    val boundaryAppCount = remember(mergedAppRows, effectivePermanentPackages, permanentFilterReady) {
+        if (!permanentFilterReady) 0 else mergedAppRows.count {
+            !it.isPermanent && !isPermanentPackage(it.packageName, effectivePermanentPackages)
+        }
+    }
 
     // Search ranking: exact > startsWith > word-start > contains, then installed-first,
     // then alphabetical. derivedStateOf so the list recomputes only when inputs change.
     val rankedApps: List<AppRowItem> by remember(
-        mergedAppRows, debouncedQuery, showSystemApps, systemSet
+        mergedAppRows, debouncedQuery, showSystemApps, systemSet, effectivePermanentPackages, permanentFilterReady
     ) {
         derivedStateOf {
             val query = debouncedQuery.trim()
-            mergedAppRows
-                .asSequence()
+            if (!permanentFilterReady) emptyList() else mergedAppRows.asSequence()
+                .filterNot { it.isPermanent || isPermanentPackage(it.packageName, effectivePermanentPackages) }
                 .filter { row ->
                     showSystemApps || row.packageName !in systemSet || row.isBlocked
                 }
@@ -708,8 +771,10 @@ internal fun AppPickerScreen(
     }
 
     // Per-category totals ignoring the search query (so headers can say "12 of 34").
-    val totalByCategory = remember(mergedAppRows, showSystemApps, systemSet) {
+    val totalByCategory = remember(mergedAppRows, showSystemApps, systemSet, effectivePermanentPackages, permanentFilterReady) {
         mergedAppRows
+            .takeIf { permanentFilterReady }.orEmpty()
+            .filterNot { it.isPermanent || isPermanentPackage(it.packageName, effectivePermanentPackages) }
             .filter { showSystemApps || it.packageName !in systemSet || it.isBlocked }
             .groupingBy { it.category }
             .eachCount()
@@ -748,9 +813,11 @@ internal fun AppPickerScreen(
     // same merged rows and system-app filter as the category list — no new plumbing.
     // Rendered only when idle (never while searching) and hidden entirely when there
     // is no usage data (permission missing or every row at 0m): no placeholders.
-    val recommendedApps: List<AppRowItem> = remember(mergedAppRows, showSystemApps, systemSet) {
+    val recommendedApps: List<AppRowItem> = remember(mergedAppRows, showSystemApps, systemSet, effectivePermanentPackages, permanentFilterReady) {
         mergedAppRows
+            .takeIf { permanentFilterReady }.orEmpty()
             .asSequence()
+            .filterNot { it.isPermanent || isPermanentPackage(it.packageName, effectivePermanentPackages) }
             .filter { row ->
                 row.isInstalled &&
                     (showSystemApps || row.packageName !in systemSet) &&
@@ -768,9 +835,9 @@ internal fun AppPickerScreen(
     val websiteOverrideMap = websiteOverrides.value
     val websitePermanentOverrideMap = websitePermanentOverrides.value
     val visibleWebsites: List<BlockedWebsite> = remember(
-        blockedWebsites, websiteOverrideMap, websitePermanentOverrideMap
+        blockedWebsites, websiteOverrideMap, websitePermanentOverrideMap, effectivePermanentDomains
     ) {
-        if (websiteOverrideMap.isEmpty() && websitePermanentOverrideMap.isEmpty()) blockedWebsites
+        val withOverrides = if (websiteOverrideMap.isEmpty() && websitePermanentOverrideMap.isEmpty()) blockedWebsites
         else blockedWebsites.map { site ->
             val override = websiteOverrideMap[site.domain]
             val permanentOverride = websitePermanentOverrideMap[site.domain]
@@ -783,6 +850,8 @@ internal fun AppPickerScreen(
                 )
             } else site
         }
+        if (!permanentFilterReady) emptyList()
+        else withOverrides.filterNot { it.isPermanent || isPermanentDomain(it.domain, effectivePermanentDomains) }
     }
     val filteredWebsites: List<BlockedWebsite> by remember(visibleWebsites, debouncedQuery) {
         derivedStateOf {
@@ -813,9 +882,13 @@ internal fun AppPickerScreen(
                 "app" -> normalizedMemberKey("app", rawKey)?.let { key ->
                     val local = mergedAppRows
                         .firstOrNull { it.packageName.equals(rawKey, ignoreCase = true) }
+                    if (local?.isPermanent == true || isPermanentPackage(key, effectivePermanentPackages)) {
+                        return@let null
+                    }
                     GroupMemberChoice("app", key, local?.appName ?: rawKey)
                 }
                 "website" -> normalizedMemberKey("website", rawKey)?.let { key ->
+                    if (isPermanentDomain(key, effectivePermanentDomains)) return@let null
                     val local = visibleWebsites
                         .firstOrNull { it.domain.equals(rawKey, ignoreCase = true) }
                     GroupMemberChoice("website", key, local?.displayName ?: rawKey)
@@ -1169,7 +1242,7 @@ internal fun AppPickerScreen(
             if (selectionMode) {
                 StaggeredFadeSlide(visible = entered, index = 2, screenKey = "app_picker") {
                     SelectionActionBar(
-                        count = selectedKeys.value.size,
+                        count = selectedKeys.value.count { resolveMemberChoice(it) != null },
                         onCancel = exitSelection,
                         onMerge = mergeSelected,
                     )
@@ -1188,12 +1261,12 @@ internal fun AppPickerScreen(
             if (!selectionMode) {
                 StaggeredFadeSlide(visible = entered, index = 2, screenKey = "app_picker") {
                     MergedGroupsSection(
-                        groups = targetGroups,
+                        groups = boundaryTargetGroups,
                         usageByGroup = groupUsageToday,
                         localAppMinutes = usageMinutes,
                         onNew = openNewGroup,
-                        onEdit = openEditGroup,
-                        onDelete = requestDeleteGroup,
+                        onEdit = { shown -> targetGroups.firstOrNull { it.groupId == shown.groupId }?.let(openEditGroup) },
+                        onDelete = { shown -> targetGroups.firstOrNull { it.groupId == shown.groupId }?.let(requestDeleteGroup) },
                     )
                 }
                 Spacer(Modifier.height(4.dp))
@@ -1290,10 +1363,10 @@ internal fun AppPickerScreen(
                             text = when {
                                 loadState is AppsLoadState.Loading -> "Loading installed apps…"
                                 loadState is AppsLoadState.Error -> "Couldn't load installed apps"
-                                appsStorageLoaded -> if (rankedApps.size == mergedAppRows.size) {
-                                    "Showing ${mergedAppRows.size} apps"
+                                appsStorageLoaded -> if (rankedApps.size == boundaryAppCount) {
+                                    "Showing $boundaryAppCount apps"
                                 } else {
-                                    "Showing ${rankedApps.size} of ${mergedAppRows.size} apps"
+                                    "Showing ${rankedApps.size} of $boundaryAppCount apps"
                                 }
                                 else -> "Loading boundaries…"
                             },
@@ -1629,7 +1702,7 @@ internal fun AppPickerScreen(
                         // The dedicated write is the durable operation. Legacy Settings
                         // metadata is only a display mirror; its failure must not claim
                         // that a permanent block failed after it was already persisted.
-                        val ok = try { permanentBlocks.add(app.packageName) } catch (_: Exception) { false }
+                        val ok = try { permanentBlocks.add(app.packageName, app.appName) } catch (_: Exception) { false }
                         if (ok) {
                             try { settings.setAppPermanent(app.packageName, true) } catch (_: Exception) { }
                         }
@@ -1855,7 +1928,8 @@ internal fun AppPickerScreen(
         // "kind:key" identity the dialog uses. Remote-only targets (a Windows exe, an
         // extension-only domain) become selectable with their label and provenance;
         // local rows that also appear remotely inherit the device provenance.
-        val knownChoices: List<GroupMemberChoice> = remember(knownTargets) {
+        val knownChoices: List<GroupMemberChoice> = remember(knownTargets, effectivePermanentPackages, effectivePermanentDomains, permanentFilterReady) {
+            if (!permanentFilterReady) return@remember emptyList()
             knownTargets.mapNotNull { target ->
                 val kind = if (target.targetKind.trim().lowercase() == "website") "website" else "app"
                 val key = normalizedMemberKey(kind, target.targetKey) ?: return@mapNotNull null
@@ -1868,11 +1942,16 @@ internal fun AppPickerScreen(
                     label = target.targetLabel.trim().ifEmpty { key },
                     deviceLabels = if (labels.size > 3) labels.take(3) + "+${labels.size - 3} more" else labels,
                 )
+            }.filterNot { choice ->
+                if (choice.kind == "app") isPermanentPackage(choice.key, effectivePermanentPackages)
+                else isPermanentDomain(choice.key, effectivePermanentDomains)
             }.distinctBy { it.selectionKey }
         }
         val knownByKey = remember(knownChoices) { knownChoices.associateBy { it.selectionKey } }
-        val appChoices = remember(mergedAppRows, knownByKey) {
+        val appChoices = remember(mergedAppRows, knownByKey, effectivePermanentPackages, permanentFilterReady) {
+            if (!permanentFilterReady) return@remember emptyList()
             val local = mergedAppRows.mapNotNull { row ->
+                if (row.isPermanent || isPermanentPackage(row.packageName, effectivePermanentPackages)) return@mapNotNull null
                 normalizedMemberKey("app", row.packageName)?.let { key ->
                     GroupMemberChoice(
                         "app",
@@ -1884,8 +1963,10 @@ internal fun AppPickerScreen(
             }
             (local + knownByKey.values.filter { it.kind == "app" }).distinctBy { it.selectionKey }
         }
-        val websiteChoices = remember(visibleWebsites, knownByKey) {
+        val websiteChoices = remember(visibleWebsites, knownByKey, effectivePermanentDomains, permanentFilterReady) {
+            if (!permanentFilterReady) return@remember emptyList()
             val local = visibleWebsites.mapNotNull { site ->
+                if (site.isPermanent || isPermanentDomain(site.domain, effectivePermanentDomains)) return@mapNotNull null
                 normalizedMemberKey("website", site.domain)?.let { key ->
                     GroupMemberChoice(
                         "website",
@@ -1914,6 +1995,8 @@ internal fun AppPickerScreen(
             request = request,
             appChoices = appChoices,
             websiteChoices = websiteChoices,
+            permanentPackages = effectivePermanentPackages,
+            permanentDomains = effectivePermanentDomains,
             claimedBy = claimedBy,
             onDismiss = { groupEditor = null },
             onSave = { name, limitMinutes, limitEnabled, members ->
@@ -3318,6 +3401,8 @@ private fun GroupEditorDialog(
     request: GroupEditorRequest,
     appChoices: List<GroupMemberChoice>,
     websiteChoices: List<GroupMemberChoice>,
+    permanentPackages: Set<String>,
+    permanentDomains: Set<String>,
     claimedBy: Map<String, String>,
     onDismiss: () -> Unit,
     onSave: (name: String, limitMinutes: Int?, limitEnabled: Boolean, members: List<GroupMemberChoice>) -> Unit,
@@ -3334,15 +3419,30 @@ private fun GroupEditorDialog(
         mutableStateOf<Map<String, GroupMemberChoice>>(
             LinkedHashMap<String, GroupMemberChoice>().apply {
                 request.initialMembers.forEach { choice ->
-                    if (claimedBy[choice.selectionKey] == null) put(choice.selectionKey, choice)
+                    val permanent = if (choice.kind == "app") {
+                        isPermanentPackage(choice.key, permanentPackages)
+                    } else {
+                        isPermanentDomain(choice.key, permanentDomains)
+                    }
+                    if (!permanent && claimedBy[choice.selectionKey] == null) put(choice.selectionKey, choice)
                 }
             }
         )
     }
+    LaunchedEffect(permanentPackages, permanentDomains) {
+        selected.value = selected.value.filterValues { choice ->
+            if (choice.kind == "app") !isPermanentPackage(choice.key, permanentPackages)
+            else !isPermanentDomain(choice.key, permanentDomains)
+        }
+    }
 
     val parsedLimit = limitInput.trim().toIntOrNull()?.takeIf { it in 1..1440 }
     val limitTextInvalid = limitInput.isNotBlank() && parsedLimit == null
-    val canSave = name.isNotBlank() && selected.value.size >= 2 && (!limitEnabled || parsedLimit != null)
+    val activeSelectedCount = selected.value.values.count { choice ->
+        if (choice.kind == "app") !isPermanentPackage(choice.key, permanentPackages)
+        else !isPermanentDomain(choice.key, permanentDomains)
+    }
+    val canSave = name.isNotBlank() && activeSelectedCount >= 2 && (!limitEnabled || parsedLimit != null)
 
     val trimmedQuery = memberQuery.trim()
     val filteredApps = remember(appChoices, trimmedQuery) {
@@ -3445,7 +3545,7 @@ private fun GroupEditorDialog(
                 )
 
                 Text(
-                    text = "Members (${selected.value.size})",
+                    text = "Members ($activeSelectedCount)",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -3617,7 +3717,7 @@ private fun GroupEditorDialog(
                         }
                     }
                 }
-                if (selected.value.size < 2) {
+                if (activeSelectedCount < 2) {
                     Text(
                         text = "Pick at least 2 members to merge — you can mix apps and websites.",
                         style = MaterialTheme.typography.bodySmall,
@@ -3645,7 +3745,10 @@ private fun GroupEditorDialog(
                         name.trim(),
                         parsedLimit,
                         limitEnabled && parsedLimit != null,
-                        selected.value.values.toList(),
+                        selected.value.values.filter { choice ->
+                            if (choice.kind == "app") !isPermanentPackage(choice.key, permanentPackages)
+                            else !isPermanentDomain(choice.key, permanentDomains)
+                        },
                     )
                 },
                 enabled = canSave,

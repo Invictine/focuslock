@@ -2,8 +2,12 @@
 <data-extraction-rules>
     <cloud-backup>
         <include domain="sharedpref" path="." />
+        <exclude domain="sharedpref" path="removal_reminder_media.xml" />
+        <exclude domain="sharedpref" path="removal_reminder_launch_policy.xml" />
     </cloud-backup>
     <device-transfer>
         <include domain="sharedpref" path="." />
+        <exclude domain="sharedpref" path="removal_reminder_media.xml" />
+        <exclude domain="sharedpref" path="removal_reminder_launch_policy.xml" />
     </device-transfer>
 </data-extraction-rules>

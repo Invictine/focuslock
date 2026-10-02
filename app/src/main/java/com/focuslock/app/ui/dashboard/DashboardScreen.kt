@@ -39,6 +39,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.clerk.api.Clerk
 import com.focuslock.app.BuildConfig
@@ -46,12 +47,11 @@ import com.focuslock.app.FocusLockApplication
 import com.focuslock.app.ui.components.UiTokens
 import com.focuslock.app.auth.AuthViewModel
 import com.focuslock.app.data.model.TickTickWorkRecord
+import com.focuslock.app.data.model.BlockedApp
 import com.focuslock.app.data.model.WorkRecordSource
 import com.focuslock.app.data.repository.CreditBankRepository
 import com.focuslock.app.data.repository.SettingsRepository
 import com.focuslock.app.service.DailyUsageSummary
-import com.focuslock.app.service.TickTickApiClient
-import com.focuslock.app.service.TickTickAuthConfig
 import com.focuslock.app.service.UsageStatsRepository
 import com.focuslock.app.sync.ConvexSyncClient
 import com.focuslock.app.ui.dashboard.home.FocusHome
@@ -74,15 +74,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
-
-/** Load state for the dashboard TickTick tasks ring. */
-private enum class TickTickTasksState { Loading, NoAccount, Loaded, Error }
-
-/** Resume-driven TickTick refetch throttle; matches the client's display-only TTL window. */
-private const val TICKTICK_SOFT_REFETCH_MS = 3L * 60L * 1000L
-
-/** Pull-to-refresh spinner stays up at least this long for UX (real work may take longer). */
-private const val MIN_REFRESH_SPINNER_MS = 1_500L
 
 /**
  * Process-lifetime latch for the permission onboarding dialog. DashboardScreen leaves
@@ -140,15 +131,21 @@ fun DashboardScreen(
         .collectAsStateWithLifecycle(initialValue = SettingsRepository.DEFAULT_FOCUS_GOAL_MINUTES)
     val dailyTasksGoalSetting by settings.dailyTasksGoalFlow
         .collectAsStateWithLifecycle(initialValue = SettingsRepository.DEFAULT_DAILY_TASKS_GOAL)
+    // Leisure time is today's foreground use of apps currently selected in Boundaries.
+    // Null until settings and UsageStats have been read, then zero is a real empty result.
+    val boundaryApps by settings.blockedAppsFlow
+        .collectAsStateWithLifecycle<List<BlockedApp>?>(initialValue = null)
+    var boundaryLeisureSeconds by remember { mutableStateOf<Long?>(null) }
+    val workRatio by settings.workRatioFlow.collectAsStateWithLifecycle(initialValue = 4)
 
-    // Selected Focus-tab front page (see FocusHomeStyle; unknown keys fall back to rings).
+    // Selected Focus-tab front page (see FocusHomeStyle; unknown keys use its safe fallback).
     val homeStyleKey by settings.focusHomeStyleFlow
         .collectAsStateWithLifecycle(initialValue = SettingsRepository.DEFAULT_FOCUS_HOME_STYLE)
     val nukeActive by settings.nukeActiveFlow.collectAsStateWithLifecycle(initialValue = false)
-    val clerkUser by Clerk.userFlow.collectAsState(initial = null)
+    val clerkUser by Clerk.userFlow.collectAsStateWithLifecycle(initialValue = null)
 
     // Merged cross-device groups + today's synced per-group usage. Both come from the
-    // already-running 30s sync cycle (no network call on the Focus tab); the home styles
+    // already-running sync cycle (no network call on the Focus tab); the home styles
     // only read this snapshot.
     val targetGroups by app.targetGroupsRepository.groups
         .collectAsStateWithLifecycle(initialValue = emptyList())
@@ -157,39 +154,18 @@ fun DashboardScreen(
 
     // Refresh permission + usage state on every resume (fixes stale "Setup needed" pill)
     var permissionTick by remember { mutableIntStateOf(0) }
+    var usageRefreshTick by remember { mutableIntStateOf(0) }
 
-    // Tasks ring counts ONLY TickTick tasks actually completed today (never overdue, never focus records).
-    var tickTickTasksDone by remember { mutableIntStateOf(0) }
-    var tickTickTasksState by remember { mutableStateOf(TickTickTasksState.Loading) }
-    var tickTickFetchJob by remember { mutableStateOf<Job?>(null) }
-    var tickTickLastFetchMs by remember { mutableLongStateOf(0L) }
-
-    /**
-     * Fetches the completed-today TickTick count. [bypassCache] = true (pull-to-refresh,
-     * Retry) skips the client's 3-minute display TTL; resume refetches are throttled to
-     * one per TTL window, so a quick app switch costs zero network calls.
-     */
-    fun startTickTickFetch(bypassCache: Boolean): Job {
-        tickTickFetchJob?.cancel()
-        return scope.launch {
-            tickTickLastFetchMs = System.currentTimeMillis()
-            tickTickTasksState = TickTickTasksState.Loading
-            tickTickTasksState = try {
-                val token = TickTickAuthConfig.getValidAccessToken(settings)
-                if (token.isNullOrBlank()) {
-                    tickTickTasksDone = 0
-                    TickTickTasksState.NoAccount
-                } else {
-                    tickTickTasksDone = TickTickApiClient()
-                        .fetchCompletedTaskTitlesToday(token, bypassCache = bypassCache).size
-                    TickTickTasksState.Loaded
-                }
-            } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                TickTickTasksState.Error
-            }
-        }.also { tickTickFetchJob = it }
-    }
+    // Activity-owned task state stays warm across tab changes instead of restarting
+    // the network fan-out and showing a loading ring on every Focus return.
+    val tasksViewModel: DashboardTasksViewModel = viewModel()
+    val tasksSnapshot by tasksViewModel.tasks.collectAsStateWithLifecycle()
+    val tickTickTasksDone = tasksSnapshot.completed
+    val tickTickTasksState = tasksSnapshot.status
+    val nextTaskTitle = tasksSnapshot.nextTitle
+    val nextTaskDetail = tasksSnapshot.nextDetail
+    fun startTickTickFetch(bypassCache: Boolean): Job =
+        tasksViewModel.refresh(bypassCache)
 
     LaunchedEffect(Unit) { startTickTickFetch(bypassCache = false) }
 
@@ -197,14 +173,21 @@ fun DashboardScreen(
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 permissionTick++
-                // TickTick ring: refetch on resume at most once per TTL window.
-                if (System.currentTimeMillis() - tickTickLastFetchMs > TICKTICK_SOFT_REFETCH_MS) {
-                    startTickTickFetch(bypassCache = false)
-                }
+                startTickTickFetch(bypassCache = false)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // Re-read selected-app usage every 30 seconds only while the screen is resumed.
+    LaunchedEffect(lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            while (true) {
+                delay(30_000L)
+                usageRefreshTick++
+            }
+        }
     }
 
     // Binder-backed permission checks are computed off the main thread, only when the resume
@@ -280,10 +263,14 @@ fun DashboardScreen(
     // StayFree-style screen-time summary. Null until the first query resolves so the UI can
     // distinguish "loading" from a real empty result (no zero-state flash).
     var usageSummary by remember { mutableStateOf<DailyUsageSummary?>(null) }
-    LaunchedEffect(permissionTick) {
-        // UsageStats queries hit binder/PackageManager — keep them off Main.
+    LaunchedEffect(permissionTick, usageRefreshTick, boundaryApps) {
+        // Tab returns and boundary edits reuse the shared aggregate. Explicit refresh
+        // invalidates it; routine reads expire naturally after 30 seconds.
         usageSummary = withContext(Dispatchers.IO) {
             UsageStatsRepository.getTodaySummary(context, maxApps = 8)
+        }
+        boundaryLeisureSeconds = boundaryApps?.let { apps ->
+            UsageStatsRepository.getTodayBoundaryForegroundMillis(context, apps)?.div(1_000L)
         }
     }
 
@@ -297,7 +284,7 @@ fun DashboardScreen(
     var showManualLogDialog by rememberSaveable { mutableStateOf(false) }
     var showFocusTimerDialog by rememberSaveable { mutableStateOf(false) }
     var showAllHistory by rememberSaveable { mutableStateOf(false) }
-    var isRefreshing by rememberSaveable { mutableStateOf(false) }
+    var isRefreshing by remember { mutableStateOf(false) }
 
     // ---- Focus timer state, hoisted to screen level so a running countdown survives
     // tab switches (the dialog tears down with the Focus tab, but this state does not).
@@ -405,7 +392,11 @@ fun DashboardScreen(
         focusGoalMinutes,
         tickTickTasksDone,
         tickTickTasksState,
+        nextTaskTitle,
+        nextTaskDetail,
         dailyTasksGoalSetting,
+        boundaryLeisureSeconds,
+        workRatio,
         usageSummary,
         topApp,
         showAllHistory,
@@ -437,6 +428,10 @@ fun DashboardScreen(
                 TickTickTasksState.Loaded -> FocusHomeTasksState.Loaded
                 TickTickTasksState.Error -> FocusHomeTasksState.Error
             },
+            leisureSeconds = boundaryLeisureSeconds,
+            targetFocusPerLeisure = workRatio.toDouble().coerceAtLeast(1.0),
+            nextTaskTitle = nextTaskTitle,
+            nextTaskDetail = nextTaskDetail,
             usageSummary = usageSummary,
             topApp = topApp,
             history = historySnapshot,
@@ -482,16 +477,22 @@ fun DashboardScreen(
         onRefresh = {
             if (!isRefreshing) {
                 isRefreshing = true
-                val startedAtMs = System.currentTimeMillis()
-                permissionTick++ // refresh permission checks + usage summary
-                // Force refetch bypasses the TickTick TTL cache; the spinner waits for the
-                // real fetch to settle (min 1.5s for UX) instead of a fixed 700ms timer.
-                val fetchJob = startTickTickFetch(bypassCache = true)
                 scope.launch {
-                    fetchJob.join()
-                    val elapsedMs = System.currentTimeMillis() - startedAtMs
-                    if (elapsedMs < MIN_REFRESH_SPINNER_MS) delay(MIN_REFRESH_SPINNER_MS - elapsedMs)
-                    isRefreshing = false
+                    try {
+                        UsageStatsRepository.invalidatePackageUsage()
+                        permissionTick++
+                        // Wait for real work, without a fixed spinner delay.
+                        startTickTickFetch(bypassCache = true).join()
+                        try {
+                            app.tickTickFocusSync.sync()
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (_: Exception) {
+                            Toast.makeText(context, "TickTick focus sync failed. Try again in Settings.", Toast.LENGTH_LONG).show()
+                        }
+                    } finally {
+                        isRefreshing = false
+                    }
                 }
             }
         },

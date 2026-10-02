@@ -34,6 +34,35 @@ describe("account sync durability", () => {
     expect(await t.query(api.focus.getDashboard, {})).toMatchObject({ sites: [], sitesUpdatedAt: 200 });
   });
 
+  it("returns browser sync data only when its version changes, including deletion", async () => {
+    const t = convexTest(schema, modules).withIdentity({ subject: "alice" });
+    expect(await t.query(api.focus.getSyncPulse, { sitesUpdatedAt: -1, prefsUpdatedAt: -1 }))
+      .toMatchObject({ sitesUpdatedAt: 0, prefsUpdatedAt: 0, sites: [], prefs: null });
+    await t.mutation(api.focus.saveBlockedWebsites, { sites: [site], updatedAt: 100 });
+    expect((await t.query(api.focus.getSyncPulse, { sitesUpdatedAt: 0, prefsUpdatedAt: 0 })).sites)
+      .toEqual([{ domain: "example.com", isBlocked: true }]);
+    expect((await t.query(api.focus.getSyncPulse, { sitesUpdatedAt: 100, prefsUpdatedAt: 0 })).sites)
+      .toBeUndefined();
+    await t.mutation(api.focus.saveBlockedWebsites, { sites: [], updatedAt: 200 });
+    expect(await t.query(api.focus.getSyncPulse, { sitesUpdatedAt: 100, prefsUpdatedAt: 0 }))
+      .toMatchObject({ sitesUpdatedAt: 200, sites: [] });
+  });
+
+  it("omits unchanged Android snapshot history and returns it after an edit", async () => {
+    const t = convexTest(schema, modules).withIdentity({ subject: "alice" });
+    const first = await t.query(api.focus.getSnapshot, {});
+    expect(first.unchanged).toBe(false);
+    expect(await t.query(api.focus.getSnapshot, { knownVersion: first.version }))
+      .toEqual({ unchanged: true, version: first.version });
+    await t.mutation(api.focus.saveBlockedWebsites, { sites: [site], updatedAt: 100 });
+    const changed = await t.query(api.focus.getSnapshot, { knownVersion: first.version });
+    expect(changed.unchanged).toBe(false);
+    expect(changed.partial).toBe(true);
+    expect(changed.sites).toHaveLength(1);
+    expect(changed.records).toBeUndefined();
+    expect(changed.apps).toBeUndefined();
+  });
+
   it("merges different website edits from two devices", async () => {
     const t = convexTest(schema, modules).withIdentity({ subject: "alice" });
     await t.mutation(api.focus.setBlockedWebsite, { ...site, updatedAt: 100 });
@@ -76,12 +105,14 @@ describe("account sync durability", () => {
   it("retries usage idempotently and never erases durable counters after local reset", async () => {
     const t = convexTest(schema, modules);
     const alice = t.withIdentity({ subject: "alice" });
-    for (let i = 0; i < 2; i++) {
-      await alice.mutation(api.usage.recordUsageBatch, { deviceId: "browser", buckets: [bucket] });
-    }
-    await alice.mutation(api.usage.recordUsageBatch, { deviceId: "browser", buckets: [
+    expect(await alice.mutation(api.usage.recordUsageBatch, { deviceId: "browser", buckets: [bucket] }))
+      .toEqual({ written: 1 });
+    expect(await alice.mutation(api.usage.recordUsageBatch, { deviceId: "browser", buckets: [
+      { ...bucket, updatedAt: 150 },
+    ] })).toEqual({ written: 0 });
+    expect(await alice.mutation(api.usage.recordUsageBatch, { deviceId: "browser", buckets: [
       { ...bucket, trackedSeconds: 10, blockedSeconds: 0, launchCount: 1, updatedAt: 200 },
-    ] });
+    ] })).toEqual({ written: 0 });
     await alice.mutation(api.usage.recordUsageBatch, { deviceId: "phone", buckets: [bucket] });
     expect(await alice.query(api.usage.getUsageSummary, {})).toMatchObject({ totalTrackedSeconds: 240 });
     expect(await t.withIdentity({ subject: "bob" }).query(api.usage.getUsageSummary, {}))

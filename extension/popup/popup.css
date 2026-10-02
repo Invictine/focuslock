@@ -5,6 +5,7 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; width: 396px; min-height: 520px; background: var(--fl-background,#0d0d0f); color: var(--fl-on-surface,#eee9e7); font-size: 15px; }
+html { min-width: 320px; }
 body { overflow-x: hidden; }
 button { font: inherit; color: inherit; }
 button:focus-visible { outline: 2px solid var(--fl-primary,#dfbdb6); outline-offset: 2px; }
@@ -70,5 +71,16 @@ footer .icon-button { margin-left: auto; }
 .boot, .fatal { min-height: 520px; padding: 30px; display: grid; place-content: center; justify-items: center; text-align: center; color: var(--fl-on-surface-variant,#bbb4b1); }
 .spinner { width: 28px; height: 28px; border: 3px solid var(--fl-surface-container-high,#232326); border-top-color: var(--fl-primary,#dfbdb6); border-radius: 50%; animation: spin .8s linear infinite; }
 .fatal h1 { color: var(--fl-on-surface,#eee9e7); }
+@media (max-width: 360px) {
+  html, body { width: 320px; }
+  .topbar { padding-inline: 14px; }
+  .summary, .current-site, .signin-card { margin-inline: 12px; }
+  .summary { padding: 18px; gap: 10px; }
+  .summary h1 { font-size: 36px; }
+  .connections, .feedback, .error { margin-inline: 12px; }
+  .connection { grid-template-columns: 34px minmax(0, 1fr); }
+  .connection .state { grid-column: 2; justify-self: start; }
+  .site-actions { align-items: stretch; flex-direction: column; }
+}
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }

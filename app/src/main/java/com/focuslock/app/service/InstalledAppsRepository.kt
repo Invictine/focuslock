@@ -11,6 +11,8 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.core.graphics.drawable.toBitmap
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 data class InstalledApp(
@@ -27,7 +29,9 @@ object InstalledAppsRepository {
     private var cachedApps: List<InstalledApp>? = null
     private var cachedLabelMap: Map<String, String> = emptyMap()
     private var cachedAppsAt: Long = 0L
+    private var appsRefreshGeneration: Long = 0L
     private val appsCacheLock = Any()
+    private val appsRefreshMutex = Mutex()
 
     /** Labels resolved outside the apps-list cache (e.g. usage rows); process-wide and durable. */
     private val fallbackLabels = java.util.concurrent.ConcurrentHashMap<String, String>()
@@ -114,23 +118,42 @@ object InstalledAppsRepository {
         context: Context,
         forceRefresh: Boolean = false
     ): List<InstalledApp> = withContext(Dispatchers.IO) {
-        if (!forceRefresh) {
+        val generationAtRequest = synchronized(appsCacheLock) {
+            val cached = cachedApps
+            if (!forceRefresh && cached != null &&
+                System.currentTimeMillis() - cachedAppsAt < APPS_CACHE_TTL_MS
+            ) {
+                return@withContext cached
+            }
+            appsRefreshGeneration
+        }
+
+        appsRefreshMutex.withLock {
             synchronized(appsCacheLock) {
                 val cached = cachedApps
-                if (cached != null && System.currentTimeMillis() - cachedAppsAt < APPS_CACHE_TTL_MS) {
-                    return@withContext cached
+                val refreshCompletedSinceRequest = appsRefreshGeneration != generationAtRequest
+                val cacheIsFresh = cached != null &&
+                    System.currentTimeMillis() - cachedAppsAt < APPS_CACHE_TTL_MS
+                // Ordinary callers reuse a fresh cache; force callers bypass it unless
+                // another refresh completed after their request began (single-flight).
+                if (cached != null &&
+                    ((!forceRefresh && cacheIsFresh) || (forceRefresh && refreshCompletedSinceRequest))
+                ) {
+                    return@withLock cached
                 }
             }
+
+            val fresh = queryInstalledLaunchableApps(context)
+            val labels = fresh.associate { it.packageName to it.appName }
+            for ((pkg, label) in labels) fallbackLabels[pkg] = label
+            synchronized(appsCacheLock) {
+                cachedApps = fresh
+                cachedLabelMap = labels
+                cachedAppsAt = System.currentTimeMillis()
+                appsRefreshGeneration++
+            }
+            fresh
         }
-        val fresh = queryInstalledLaunchableApps(context)
-        val labels = fresh.associate { it.packageName to it.appName }
-        for ((pkg, label) in labels) fallbackLabels[pkg] = label
-        synchronized(appsCacheLock) {
-            cachedApps = fresh
-            cachedLabelMap = labels
-            cachedAppsAt = System.currentTimeMillis()
-        }
-        fresh
     }
 
     fun invalidateAppsCache() {
@@ -251,7 +274,13 @@ object InstalledAppsRepository {
         packageName: String,
         load: kotlinx.coroutines.CompletableDeferred<ImageBitmap?>
     ): ImageBitmap? {
-        val awaited = try { load.await() } catch (_: Exception) { null }
+        val awaited = try {
+            load.await()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
         synchronized(iconCacheLock) { iconBitmapCache.get(packageName) }?.let { return it }
         return awaited
     }

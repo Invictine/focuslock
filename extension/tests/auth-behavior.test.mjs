@@ -25,10 +25,9 @@ class FakeElement {
   async click() { return this.listeners.get('click')?.({ currentTarget: this }); }
 }
 
-async function loadAuth({ browserSignInUrl = 'https://focuslock.example/sign-in' } = {}) {
+async function loadAuth({ browserSignInUrl = 'https://focuslock.example/sign-in', storage = new Map() } = {}) {
   const ids = ['accountTitle', 'accountDetail', 'accountState', 'accountSignIn', 'accountEmailSignIn', 'accountSync', 'accountSignOut', 'accountError', 'accountAuth', 'accountBadge', 'accountCloud', 'accountPitch', 'accountSignInPitch', 'accountDevicesCard', 'accountDeviceSummary', 'accountDevices'];
   const elements = Object.fromEntries(ids.map((id) => [id, new FakeElement(id)]));
-  const storage = new Map();
   const tabsCalls = [];
   const messages = [];
   const listeners = [];
@@ -52,6 +51,7 @@ async function loadAuth({ browserSignInUrl = 'https://focuslock.example/sign-in'
   };
   const context = {
     console,
+    URL,
     Date: class extends Date { static now() { return now; } },
     setInterval: (callback) => { const id = nextIntervalId++; intervals.set(id, callback); return id; },
     clearInterval: (id) => intervals.delete(id),
@@ -113,6 +113,16 @@ test('portal-only signed-out view cannot report a successful connection', async 
   assert.match(app.elements.accountTitle.textContent, /Finish signing in/);
 });
 
+test('insecure browser sign-in URL is rejected before opening a tab', async () => {
+  const app = await loadAuth({ browserSignInUrl: 'http://focuslock.example/sign-in' });
+  await app.elements.accountSignIn.click();
+  await app.flush();
+  assert.equal(app.tabsCalls.some((call) => call.type === 'create'), false);
+  assert.equal(app.storage.has('focuslock.browserAuthPending'), false);
+  assert.match(app.elements.accountError.textContent, /not configured/i);
+  assert.equal(app.elements.accountSignIn.disabled, false);
+});
+
 test('signed-in browser return refreshes the background tracker and restores the options tab', async () => {
   const app = await loadAuth();
   await app.elements.accountSignIn.click();
@@ -125,6 +135,27 @@ test('signed-in browser return refreshes the background tracker and restores the
   assert.deepEqual(JSON.parse(JSON.stringify(app.tabsCalls.filter((call) => call.type === 'update')[0].args)), [3, { active: true }]);
   assert.deepEqual(app.tabsCalls.filter((call) => call.type === 'remove')[0].args, [7]);
   assert.match(app.elements.accountTitle.textContent, /Connected as person@example.com/);
+});
+
+test('browser sign-in handoff resumes after the options page reloads', async () => {
+  const storage = new Map();
+  const firstPage = await loadAuth({ storage });
+  await firstPage.elements.accountSignIn.click();
+  await firstPage.flush();
+  assert.equal(storage.get('focuslock.browserAuthTabId'), '7');
+  assert.equal(storage.get('focuslock.browserAuthReturnTabId'), '3');
+
+  const reloadedPage = await loadAuth({ storage });
+  assert.equal(reloadedPage.elements.accountSignIn.disabled, true);
+  assert.match(reloadedPage.elements.accountTitle.textContent, /Finish signing in/);
+  assert.equal(reloadedPage.reloadCount, 1);
+  reloadedPage.setSignedIn(true);
+  reloadedPage.setBackgroundSignedIn(true);
+  await reloadedPage.runTimers();
+
+  assert.equal(storage.has('focuslock.browserAuthPending'), false);
+  assert.deepEqual(JSON.parse(JSON.stringify(reloadedPage.tabsCalls.find((call) => call.type === 'update').args)), [3, { active: true }]);
+  assert.deepEqual(reloadedPage.tabsCalls.find((call) => call.type === 'remove').args, [7]);
 });
 
 test('a session without a signed-in background tracker keeps polling', async () => {

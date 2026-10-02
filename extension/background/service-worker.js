@@ -1,19 +1,27 @@
 /* FocusLock service worker — tracking + blocking engine (Cold Turkey core). */
-importScripts('../src/matcher.js', '../src/store.js', '../dist/cloud-sync.js');
+importScripts('../src/matcher.js', '../src/store.js', '../src/policy.js', '../dist/cloud-sync.js');
 
 const M = self.FocusLockMatcher;
 const Store = self.FocusLockStore;
+const storageAccessReady = chrome.storage.local.setAccessLevel
+  ? chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' })
+  : Promise.resolve();
 
 let mem = {
   state: null,
   cur: { tabId: -1, url: '', since: 0 },
-  focused: true,
+  focused: false,
   lastEnforced: new Map(), // tabId -> last URL a verdict was delivered for
+  lastAttempt: new Map(), // tabId -> { url, at }, deduplicates duplicate browser events
   lastFlushedDay: null,    // JSON of today's stats map at the last persist
 };
 let syncInFlight = null;
+let stateLoading = null;
+let trackingQueue = Promise.resolve();
 let lastCloudRefreshAttemptAt = 0;
-const CLOUD_VERDICT_MAX_AGE_MS = 15 * 1000;
+const CLOUD_VERDICT_MAX_AGE_MS = 60 * 1000;
+const ACTIVE_POLICY_MAX_AGE_MS = 60 * 1000;
+const CURSOR_KEY = 'focuslock.sessionCursor';
 
 // ---------- helpers ----------
 function nowMs() { return Date.now(); }
@@ -29,12 +37,14 @@ function hhmmToMin(s) {
 
 function inRecurring(sch) {
   const d = new Date();
-  if (!sch.days || !sch.days.includes(d.getDay())) return false;
   const cur = d.getHours() * 60 + d.getMinutes();
   const a = hhmmToMin(sch.start), b = hhmmToMin(sch.end);
-  if (a === b) return true;
-  if (a < b) return cur >= a && cur < b;
-  return cur >= a || cur < b; // overnight
+  if (!Array.isArray(sch.days)) return false;
+  if (a === b) return sch.days.includes(d.getDay());
+  if (a < b) return sch.days.includes(d.getDay()) && cur >= a && cur < b;
+  // The after-midnight tail belongs to the day on which the overnight block began.
+  const previousDay = (d.getDay() + 6) % 7;
+  return cur >= a ? sch.days.includes(d.getDay()) : cur < b && sch.days.includes(previousDay);
 }
 
 function scheduleActive(sch, t) {
@@ -66,19 +76,37 @@ function domainAllowedBySnooze(state, domain, t) {
   return state.snoozes && state.snoozes[domain] && state.snoozes[domain] > (t || nowMs());
 }
 
-// Core verdict — mirrors Cold Turkey: nuclear > whitelist > blacklist > daily limits
+// Core verdict — mirrors Cold Turkey: Permalock > nuclear > whitelist > blacklist > daily limits
 function verdictFor(urlStr, state, t) {
   t = t || nowMs();
   if (!urlStr || M.isInternalUrl(urlStr)) return { blocked: false };
+  const authUrl = Boolean(self.FocusLockCloud && self.FocusLockCloud.isAuthUrl && self.FocusLockCloud.isAuthUrl(urlStr));
   let domain = '';
   try { domain = new URL(urlStr).hostname.toLowerCase(); } catch (e) { return { blocked: false }; }
-  const shortDomain = domain.replace(/^www\./, '');
+  const shortDomain = M.domainOf(urlStr);
+
+  // Permalock is the highest-priority verdict. It is device-local and
+  // unconditional: snoozes, exceptions, schedules, daily limits, Strict Mode,
+  // and Nuclear (local or shared) can never lift it.
+  if (M.matchesAny(urlStr, state.permanentSites || [])) {
+    return { blocked: true, mode: 'permanent', listId: '__permanent', listName: 'Permanent block', reason: 'permanent' };
+  }
+
+  // Held device commitments are separate from the active account's private data.
+  if (strictIsActive(state, t) && M.matchesAny(urlStr, state.strictHeldSites || [])) {
+    return { blocked: true, mode: 'strict', listId: '__commitment', listName: 'Strict Mode', reason: 'strict' };
+  }
+  if (state.cloudNuke?.isActive && !authUrl) {
+    return { blocked: true, mode: 'shared-nuke', listId: '__shared_nuclear', listName: 'Shared Nuclear Block', reason: 'shared-nuclear' };
+  }
 
   // Account boundaries are enforced even when they were edited on Android or
   // Windows. Keep local extension lists as additional browser-only rules.
   const sharedSite = (state.cloudSites || []).find((site) =>
     site.isBlocked && self.FocusLockMatcher.matchesAny(urlStr, [site.domain]));
-  if (sharedSite && (strictIsActive(state, t) || !domainAllowedBySnooze(state, shortDomain, t))) {
+  const policyVerdict = self.FocusLockPolicy?.verdict(urlStr, state, t);
+  if (policyVerdict) return policyVerdict;
+  if (!state.cloudPolicy && sharedSite && (strictIsActive(state, t) || !domainAllowedBySnooze(state, shortDomain, t))) {
     return { blocked: true, mode: 'blacklist', listId: '__shared', listName: 'Shared boundaries', reason: 'account' };
   }
 
@@ -87,9 +115,7 @@ function verdictFor(urlStr, state, t) {
   const day = state.stats[Store.todayKey(new Date(t))] || {};
 
   // Nuclear: block everything except allow-list
-  if (state.nuclear.active && state.nuclear.until > t) {
-    if (M.matchesAny(urlStr, state.nuclear.allow || [])) return { blocked: false };
-    if (!strictIsActive(state, t) && domainAllowedBySnooze(state, shortDomain, t)) return { blocked: false };
+  if (state.nuclear.active && state.nuclear.until > t && !authUrl && !M.matchesAny(urlStr, state.nuclear.allow || [])) {
     return { blocked: true, mode: 'nuclear', listId: '__nuclear', listName: 'Nuclear Block', reason: 'nuclear' };
   }
 
@@ -99,7 +125,7 @@ function verdictFor(urlStr, state, t) {
     if (state.cloudSitesLoaded && (list.id === 'list_social' || list.id === 'list_video')) continue;
     const st = listIsActive(list, state, t);
     if (!st.active) continue;
-    if (!strictIsActive(state, t) && domainAllowedBySnooze(state, shortDomain, t)) continue;
+    if (!strictIsActive(state, t) && !listIsLocked(list, t) && domainAllowedBySnooze(state, shortDomain, t)) continue;
 
     if (list.mode === 'whitelist') {
       // allow-only: block unless URL is in the allowed sites
@@ -110,16 +136,16 @@ function verdictFor(urlStr, state, t) {
       continue;
     }
     // blacklist
-    if (M.matchesAny(urlStr, list.sites) && !M.matchesAny(urlStr, list.exceptions || [])) {
-      // daily limit check is informational; pattern hit already blocks while active
-      return { blocked: true, mode: 'blacklist', listId: list.id, listName: list.name, reason: st.reason, schedule: st.schedule };
-    }
-    // daily time limit: block list domains once budget exhausted (even if schedule says on)
-    if (list.dailyLimitMin > 0 && M.matchesAny(urlStr, list.sites)) {
-      const used = minutesUsedForDay(day, list.sites);
-      if (used >= list.dailyLimitMin) {
-        return { blocked: true, mode: 'daily-limit', listId: list.id, listName: list.name, reason: 'daily-limit', schedule: st.schedule };
+    const matched = M.matchesAny(urlStr, list.sites);
+    if (matched && !M.matchesAny(urlStr, list.exceptions || [])) {
+      if (list.dailyLimitMin > 0 && !strictIsActive(state, t)) {
+        const used = minutesUsedForDay(day, list.sites);
+        if (used >= list.dailyLimitMin) {
+          return { blocked: true, mode: 'daily-limit', listId: list.id, listName: list.name, reason: 'daily-limit', schedule: st.schedule };
+        }
+        continue; // daily allowance permits the matched site until the budget is used
       }
+      return { blocked: true, mode: 'blacklist', listId: list.id, listName: list.name, reason: st.reason, schedule: st.schedule };
     }
   }
   return { blocked: false };
@@ -147,85 +173,223 @@ function minutesUsedToday(state, list, t) {
 
 // ---------- tracking ----------
 async function ensureState() {
-  if (!mem.state) {
+  if (stateLoading) return stateLoading;
+  if (mem.state) return mem.state;
+  stateLoading = (async () => {
+    await storageAccessReady;
     mem.state = await Store.load();
     mem.lastFlushedDay = null; // unknown what's on disk — force next flush to persist
-  }
-  return mem.state;
+    // storage.session survives MV3 worker restarts but is cleared at browser exit.
+    try {
+      const [saved, windowInfo, tabs] = await Promise.all([
+        chrome.storage.session.get(CURSOR_KEY), chrome.windows.getLastFocused(),
+        chrome.tabs.query({ active: true, lastFocusedWindow: true }),
+      ]);
+      const tab = tabs[0];
+      mem.focused = Boolean(windowInfo && windowInfo.focused === true);
+      if (tab) {
+        const cursor = saved && saved[CURSOR_KEY];
+        const canResume = mem.focused && cursor && cursor.focused === true && cursor.tabId === tab.id &&
+          cursor.url === (tab.url || '') && Number.isFinite(cursor.since) && cursor.since > 0;
+        const checkpoint = mem.state.trackingCheckpoint;
+        const accountedThrough = checkpoint?.tabId === tab.id && checkpoint.url === tab.url
+          ? Number(checkpoint.through) || 0 : 0;
+        mem.cur = { tabId: tab.id, url: tab.url || '',
+          since: canResume ? Math.min(nowMs(), Math.max(cursor.since, accountedThrough)) : nowMs() };
+      } else {
+        mem.cur = { tabId: -1, url: '', since: nowMs() };
+      }
+      await persistCursor();
+    } catch (e) { /* tab access may be unavailable during shutdown */ }
+    return mem.state;
+  })();
+  try { return await stateLoading; } finally { stateLoading = null; }
 }
 
-async function flushActiveSlice(t) {
+function trackSerial(task) {
+  const next = trackingQueue.then(task, task);
+  trackingQueue = next.catch(() => {});
+  return next;
+}
+
+function flushActiveSlice(t) { return trackSerial(() => flushActiveSliceNow(t)); }
+
+async function flushActiveSliceNow(t) {
+  const state = await ensureState();
   t = t || nowMs();
   const { url, since } = mem.cur;
-  if (!url || !since || !mem.focused) { mem.cur.since = t; return; }
+  if (!url || !since || !mem.focused) { mem.cur.since = t; await persistCursor(); return; }
   const idleOk = await new Promise(res => {
-    try { chrome.idle.queryState(Store.defaultState().settings.idleTimeoutSec || 60, res); }
+    try { chrome.idle.queryState(state.settings.idleTimeoutSec || 60, res); }
     catch (e) { res('active'); }
   });
-  const secs = Math.max(0, Math.round((t - since) / 1000));
-  mem.cur.since = t;
-  if (idleOk !== 'active' || secs <= 0 || secs > 3600) return;
-  if (M.isInternalUrl(url)) return;
+  const secs = Math.max(0, (t - since) / 1000);
   const domain = M.domainOf(url);
-  if (!domain) return;
-  const state = await ensureState();
-  const key = Store.todayKey();
-  state.stats[key] = state.stats[key] || {};
-  state.stats[key][domain] = (state.stats[key][domain] || 0) + secs;
-  // prune old days (keep 60)
-  const keys = Object.keys(state.stats).sort();
-  while (keys.length > 60) delete state.stats[keys.shift()];
-  // The whole state lives under one storage key, so every save rewrites all
-  // 60 days of stats + the 500-entry log. Only persist when today's slice
-  // actually moved since the last flush; flush() touches nothing else.
-  const dayJson = JSON.stringify(state.stats[key]);
-  if (dayJson !== mem.lastFlushedDay) {
-    await Store.save(state);
-    mem.lastFlushedDay = dayJson;
+  if (idleOk !== 'active' || secs <= 0 || secs > 3600 || !/^https?:/i.test(url) || !domain) {
+    mem.cur.since = t; await persistCursor(); return;
   }
-  mem.state = state;
+  // Split a slice crossing local midnight instead of charging yesterday to today.
+  const stats = structuredClone(state.stats);
+  const leisureStats = structuredClone(state.leisureStats || {});
+  const spendsCredit = !verdictFor(url, state, since).blocked && self.FocusLockPolicy?.isLeisure(url, state, since);
+  let from = since;
+  while (from < t) {
+    const nextMidnight = new Date(from);
+    nextMidnight.setHours(24, 0, 0, 0);
+    const until = Math.min(t, nextMidnight.getTime());
+    const key = Store.todayKey(new Date(from));
+    stats[key] = stats[key] || {};
+    stats[key][domain] = (stats[key][domain] || 0) + (until - from) / 1000;
+    if (spendsCredit) {
+      leisureStats[key] ||= {};
+      leisureStats[key][domain] = (leisureStats[key][domain] || 0) + (until - from) / 1000;
+    }
+    from = until;
+  }
+  // prune old days (keep 60)
+  const keys = Object.keys(stats).sort();
+  while (keys.length > 60) delete stats[keys.shift()];
+  for (const day of Object.keys(leisureStats)) if (!stats[day]) delete leisureStats[day];
+  const trackingCheckpoint = { tabId: mem.cur.tabId, url, through: t };
+  // Save the counter and checkpoint together before advancing the session cursor.
+  // A failed write can retry; a worker death between writes cannot double-count.
+  Object.assign(state, { stats, leisureStats, trackingCheckpoint });
+  const saved = await Store.save(state);
+  Object.assign(state, saved);
+  mem.cur.since = t;
+  await persistCursor();
 }
 
-async function syncCloud(reason) {
-  if (syncInFlight) return syncInFlight;
+async function persistCursor() {
+  try {
+    await chrome.storage.session.set({ [CURSOR_KEY]: {
+      tabId: mem.cur.tabId, url: mem.cur.url, since: mem.cur.since, focused: mem.focused,
+    } });
+  } catch (e) { /* session storage may be unavailable in tests or during shutdown */ }
+}
+
+async function syncCloud(reason, liveResult) {
+  if (syncInFlight) {
+    // Account preparation cannot be folded into the previous account's cycle:
+    // its subscription must see the new account's cache before accepting pushes.
+    if (!liveResult && reason !== 'account-change') return syncInFlight;
+    await syncInFlight;
+    return syncCloud(reason, liveResult);
+  }
   syncInFlight = (async () => {
   try {
     const state = await ensureState();
-    const result = await self.FocusLockCloud.syncUsage(state, reason || 'background');
-    if (result.ok && Array.isArray(result.sites)) {
-      const previousSites = JSON.stringify(state.cloudSites || []);
-      state.cloudSites = result.sites.map((site) => ({ domain: site.domain, isBlocked: Boolean(site.isBlocked) }));
-      state.cloudSitesLoaded = true;
+    if (liveResult && (state.cloudAccountId !== liveResult.userId || !await liveResult.isCurrent())) {
+      return { ok: false, signedIn: false };
+    }
+    const commitmentWasActive = strictIsActive(state);
+    const heldStrict = {
+      strictMode: state.strictMode, strictEndsAt: state.strictEndsAt,
+      strictNukeAfterFive: state.strictNukeAfterFive,
+    };
+    const previousSites = JSON.stringify(state.cloudSites || []);
+    const previousNuke = JSON.stringify(state.cloudNuke || null);
+    const previousPolicy = JSON.stringify(state.cloudPolicy || null);
+    if (commitmentWasActive) {
+      state.strictHeldSites = [...new Set([...(state.strictHeldSites || []),
+        ...(state.cloudSites || []).filter(site => site.isBlocked).map(site => site.domain)])];
+    } else {
+      state.strictHeldSites = [];
+    }
+    state.nukeCommitments = Array.isArray(state.nukeCommitments) ? state.nukeCommitments : [];
+    if (state.cloudNuke?.isActive && state.cloudAccountId && state.nukeCommitments.length === 0) {
+      state.nukeCommitments.push({ accountId: state.cloudAccountId, startedAt: state.cloudNuke.startedAt });
+    }
+    // Account preparation may replace account-owned data and persist it. Holds
+    // must exist before that operation, including if the network then fails.
+    const result = liveResult || await self.FocusLockCloud.syncUsage(state, reason || 'background');
+    if (result.ok) {
+      if (Array.isArray(result.sites)) {
+        const incoming = result.sites.filter(site => site && typeof site.domain === 'string' && site.domain.length <= 253)
+          .map(site => ({ domain: site.domain.toLowerCase(), isBlocked: Boolean(site.isBlocked),
+            ...(typeof site.category === 'string' ? { category: site.category } : {}) }));
+        state.cloudSites = incoming;
+        state.cloudSitesLoaded = true;
+      }
       state.cloudSitesSyncedAt = nowMs();
-      if (result.prefs) {
+      if (result.versions) {
+        state.cloudSitesVersion = result.versions.sites;
+        state.cloudPrefsVersion = result.versions.prefs;
+        state.cloudNukeVersion = result.versions.nuke;
+        state.cloudPolicyVersion = result.versions.policy;
+      }
+      if (result.policy !== undefined) state.cloudPolicy = result.policy;
+      if (result.usage !== undefined) {
+        state.cloudUsage = result.usage;
+        state.cloudUsageBaseline = result.usageBaseline || {};
+      }
+      if (result.leisureBaseline !== undefined) state.cloudLeisureBaseline = result.leisureBaseline;
+      if (result.nuke !== undefined) {
+        const nuke = result.nuke;
+        state.nukeCommitments = state.nukeCommitments.filter(hold => hold.accountId !== state.cloudAccountId);
+        if (nuke?.isActive === true) {
+          state.nukeCommitments.push({ accountId: state.cloudAccountId, startedAt: Number(nuke.startedAt) || nowMs() });
+        }
+        state.cloudNuke = { isActive: state.nukeCommitments.length > 0,
+          startedAt: state.nukeCommitments[0]?.startedAt || 0 };
+      }
+      if (result.prefs !== undefined) {
         const p = result.prefs;
-        const wasStrictActive = strictIsActive(state);
-        state.strictMode = Boolean(p.strictMode);
-        state.strictEndsAt = Number(p.strictEndsAt) || 0;
-        state.strictPreset = p.strictPreset || 'custom';
-        state.strictNukeAfterFive = Boolean(p.strictNukeAfterFive);
-        const key = `${state.strictMode ? 1 : 0}:${state.strictEndsAt}`;
-        if (!wasStrictActive && strictIsActive(state)) {
-          state.strictSessionKey = key;
-          state.strictAttempts = 0;
+        const oldPrefs = state.cloudPrefs;
+        state.cloudPrefs = p || null;
+        if (!p) {
+          if (!commitmentWasActive) {
+            state.strictMode = false;
+            state.strictEndsAt = 0;
+            state.strictPreset = 'custom';
+            state.strictNukeAfterFive = false;
+          }
+        } else {
+          const wasStrictActive = commitmentWasActive;
+          const remoteStrict = p.strictMode === true;
+          const remoteEnd = Number(p.strictEndsAt) || 0;
+          const approved = !result.accountChanged && p.strictApprovedSessionId
+            && p.strictApprovedSessionId === oldPrefs?.strictSessionId
+            && p.strictSessionId === oldPrefs?.strictSessionId
+            && Number(p.strictApprovedEndsAt) === Number(heldStrict.strictEndsAt)
+            && Number(p.strictApprovedAt) > 0;
+          if (commitmentWasActive && !approved) {
+            state.strictMode = true;
+            state.strictEndsAt = heldStrict.strictEndsAt === 0 || (remoteStrict && remoteEnd === 0)
+              ? 0 : Math.max(heldStrict.strictEndsAt, remoteStrict ? remoteEnd : 0);
+            state.strictNukeAfterFive = Boolean(heldStrict.strictNukeAfterFive || p.strictNukeAfterFive);
+          } else {
+            state.strictMode = remoteStrict;
+            state.strictEndsAt = remoteEnd;
+            state.strictPreset = p.strictPreset || 'custom';
+            state.strictNukeAfterFive = Boolean(p.strictNukeAfterFive);
+          }
+          const key = `${state.strictMode ? 1 : 0}:${state.strictEndsAt}`;
+          if (!wasStrictActive && strictIsActive(state)) {
+            state.strictSessionKey = key;
+            state.strictAttempts = 0;
+          }
         }
       }
+      if (strictIsActive(state)) {
+        state.strictHeldSites = [...new Set([...(state.strictHeldSites || []),
+          ...(state.cloudSites || []).filter(site => site.isBlocked).map(site => site.domain)])];
+      }
+      if (liveResult && !await liveResult.isCurrent()) return { ok: false, signedIn: false };
       await Store.save(state);
       mem.state = state;
+      void self.FocusLockCloud.ensureLivePolicy?.(state).catch(() => {});
       // A boundary can be added from Android or Windows while the matching
       // page is already open. Re-check visible tabs as soon as that account
       // state arrives instead of waiting for the user to navigate again.
-      if (previousSites !== JSON.stringify(state.cloudSites)) {
+      if (previousSites !== JSON.stringify(state.cloudSites) || previousNuke !== JSON.stringify(state.cloudNuke || null)
+          || previousPolicy !== JSON.stringify(state.cloudPolicy || null)
+          || commitmentWasActive !== strictIsActive(state)) {
         const tabs = await chrome.tabs.query({});
         await Promise.allSettled(tabs
           .filter((tab) => tab.id >= 0 && tab.url && !M.isInternalUrl(tab.url))
           .map((tab) => enforceTab(tab.id, tab.url)));
       }
-    } else if (!result.signedIn && state.cloudSitesLoaded) {
-      state.cloudSites = [];
-      state.cloudSitesLoaded = false;
-      await Store.save(state);
-      mem.state = state;
     }
     return result;
   } catch (error) {
@@ -240,46 +404,82 @@ async function syncCloud(reason) {
 
 async function refreshCloudBeforeVerdict() {
   const state = await ensureState();
+  const live = self.FocusLockCloud.livePolicyStatus?.();
+  if (live?.active) {
+    // Convex pushes policy changes and reconnects its socket automatically.
+    // A navigation during connection recovery uses the last durable rules.
+    return state;
+  }
   const now = nowMs();
   const lastSuccess = Number(state.cloudSitesSyncedAt) || 0;
-  // Navigation is the moment stale boundaries are most harmful. Keep the
-  // minute alarm as the baseline, but allow one lightweight refresh every
-  // fifteen seconds before deciding whether a page is allowed.
-  if (now - Math.max(lastSuccess, lastCloudRefreshAttemptAt) < CLOUD_VERDICT_MAX_AGE_MS) return state;
+  // Check on navigation when rules are stale; the query returns only changed
+  // boundaries or preferences. The alarm refreshes idle browser sessions.
+  const activeShared = hasActiveSharedTarget(state);
+  const maxAge = activeShared ? ACTIVE_POLICY_MAX_AGE_MS : CLOUD_VERDICT_MAX_AGE_MS;
+  if (now - Math.max(lastSuccess, lastCloudRefreshAttemptAt) < maxAge) return state;
   lastCloudRefreshAttemptAt = now;
-  await syncCloud('navigation');
+  await syncCloud(activeShared ? 'active' : 'navigation');
   return ensureState();
 }
 
-async function setActive(url, tabId) {
-  const t = nowMs();
-  await flushActiveSlice(t);
-  mem.cur = { tabId: tabId ?? -1, url: url || '', since: t };
+function hasActiveSharedTarget(state) {
+  if (!mem.focused || !mem.cur.url || !/^https?:/i.test(mem.cur.url)) return false;
+  return watchesSharedTarget(mem.cur.url, state);
+}
+
+function watchesSharedTarget(url, state) {
+  return (state.cloudSites || []).some(site => site.isBlocked && M.matchesAny(url, [site.domain]))
+    || (state.cloudPolicy?.groups || []).some(group => group.limitEnabled !== false && group.dailyLimitMinutes > 0
+      && (group.members || []).some(member => member.targetKind === 'website' && M.matchesAny(url, [member.targetKey])))
+    || (state.cloudPolicy?.limits || []).some(limit => ['website', 'site'].includes(limit.targetKind)
+      && M.matchesAny(url, [limit.targetKey]));
+}
+
+function setActive(url, tabId, focused = mem.focused) {
+  return trackSerial(async () => {
+    const t = nowMs();
+    await flushActiveSliceNow(t);
+    mem.focused = focused;
+    mem.cur = { tabId: tabId ?? -1, url: url || '', since: t };
+    await persistCursor();
+  });
 }
 
 async function enforceTab(tabId, url) {
   if (!url) return;
-  const state = await refreshCloudBeforeVerdict();
-  const v = verdictFor(url, state, nowMs());
+  let state = await ensureState();
+  let v = verdictFor(url, state, nowMs());
+  if (v.blocked) {
+    // Never make an already-known block wait on Clerk/Convex availability.
+    void refreshCloudBeforeVerdict().catch(() => {});
+  } else {
+    state = await refreshCloudBeforeVerdict();
+    v = verdictFor(url, state, nowMs());
+  }
   // Record that a verdict was delivered for this tab+URL so secondary
   // enforcement points (tabs.onUpdated) can skip duplicate work.
   mem.lastEnforced.set(tabId, url);
   if (!v.blocked) return;
   // log + redirect
   const domain = M.domainOf(url);
-  state.blockedLog.unshift({ ts: nowMs(), url: url.slice(0, 500), domain, listId: v.listId, listName: v.listName });
-  state.blockedLog = state.blockedLog.slice(0, 500);
-  state.blockedTotal = (state.blockedTotal || 0) + 1;
-  if (strictIsActive(state)) {
-    state.strictAttempts = (state.strictAttempts || 0) + 1;
-    if (state.strictNukeAfterFive && state.strictAttempts === 5) {
-      state.nuclear = { ...(state.nuclear || {}), active: true, until: nowMs() + 10 * 60 * 1000 };
-      self.FocusLockCloud.activateNuke().catch((error) =>
-        console.warn('[focuslock] shared nuke activation failed', error));
+  const previousAttempt = mem.lastAttempt.get(tabId);
+  const duplicateAttempt = previousAttempt && previousAttempt.url === url && nowMs() - previousAttempt.at < 1500;
+  if (!duplicateAttempt) {
+    mem.lastAttempt.set(tabId, { url, at: nowMs() });
+    state.blockedLog.unshift({ ts: nowMs(), url: url.slice(0, 500), domain, listId: v.listId, listName: v.listName });
+    state.blockedLog = state.blockedLog.slice(0, 500);
+    state.blockedTotal = (state.blockedTotal || 0) + 1;
+    if (strictIsActive(state)) {
+      state.strictAttempts = (state.strictAttempts || 0) + 1;
+      if (state.strictNukeAfterFive && state.strictAttempts === 5) {
+        state.nuclear = { ...(state.nuclear || {}), active: true, until: nowMs() + 10 * 60 * 1000 };
+        self.FocusLockCloud.activateNuke().then(() => syncCloud('edit')).catch((error) =>
+          console.warn('[focuslock] shared nuke activation failed', error));
+      }
     }
+    try { await Store.save(state); }
+    catch (error) { console.warn('[focuslock] block logging could not be saved', error); }
   }
-  await Store.save(state);
-  mem.state = state;
   const dest = chrome.runtime.getURL('blocked/blocked.html')
     + '?url=' + encodeURIComponent(url.slice(0, 800))
     + '&list=' + encodeURIComponent(v.listName || '')
@@ -301,15 +501,23 @@ async function enforceTabIfChanged(tabId, url) {
 // ---------- events ----------
 chrome.tabs.onActivated.addListener(async (info) => {
   try {
+    await ensureState();
+    const windowInfo = await chrome.windows.getLastFocused();
     const tab = await chrome.tabs.get(info.tabId);
-    await setActive(tab.url || '', info.tabId);
+    if (tab.windowId == null || windowInfo.id === tab.windowId) {
+      await setActive(tab.url || '', info.tabId, Boolean(windowInfo.focused));
+    }
     await enforceTab(info.tabId, tab.url || '');
   } catch (e) { /* ignore */ }
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
-  if (change.status === 'loading' && change.url) {
-    await setActive(change.url, tabId);
+  await ensureState();
+  if (tab.active && change.status === 'loading' && change.url) {
+    const focusedWindow = await chrome.windows.getLastFocused();
+    if (focusedWindow.focused && (tab.windowId == null || focusedWindow.id === tab.windowId)) {
+      await setActive(change.url, tabId, true);
+    }
     await enforceTabIfChanged(tabId, change.url);
   } else if (tab.active && tab.url && change.status === 'complete') {
     await enforceTabIfChanged(tabId, tab.url);
@@ -318,15 +526,22 @@ chrome.tabs.onUpdated.addListener(async (tabId, change, tab) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   mem.lastEnforced.delete(tabId);
+  mem.lastAttempt.delete(tabId);
 });
 
 chrome.windows.onFocusChanged.addListener(async (winId) => {
-  mem.focused = winId !== chrome.windows.WINDOW_ID_NONE;
-  if (!mem.focused) await flushActiveSlice(nowMs());
-  else {
+  await ensureState();
+  if (winId === chrome.windows.WINDOW_ID_NONE) {
+    await trackSerial(async () => {
+      await flushActiveSliceNow(nowMs());
+      mem.focused = false;
+      await persistCursor();
+    });
+  } else {
     try {
       const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-      if (tab) await setActive(tab.url || '', tab.id);
+      if (tab) await setActive(tab.url || '', tab.id, true);
+      else await persistCursor();
     } catch (e) { /* ignore */ }
   }
 });
@@ -338,7 +553,8 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
 });
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
-  // Cloud sync has its own cadence (focuslock-sync, 1 min); the
+  await ensureState();
+  // Cloud sync has its own cadence (focuslock-sync, 4 hours); the
   // maintenance alarm drives blocking decisions and stays at 1 minute.
   if (alarm.name === 'focuslock-sync') {
     await flushActiveSlice(nowMs()); // sync the freshest slice, like the old combined alarm
@@ -374,8 +590,22 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     }
   }
   await flushActiveSlice(t);
+  // Local timer/accounting maintenance also restores a terminated worker's
+  // subscription and rolls daily usage arguments forward. No policy poll.
+  await self.FocusLockCloud.ensureLivePolicy?.(await ensureState());
+  try {
+    const tabs = await chrome.tabs.query({ active: true });
+    await Promise.allSettled(tabs.filter(tab => tab.id >= 0 && tab.url && !M.isInternalUrl(tab.url))
+      .map(tab => enforceTab(tab.id, tab.url)));
+  } catch (e) { /* tabs may be unavailable during browser shutdown */ }
   if (dirty) { await Store.save(state); mem.state = state; }
   updateBadge(state);
+});
+chrome.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
+  if (details.frameId === 0) await enforceTab(details.tabId, details.url);
+});
+chrome.webNavigation.onReferenceFragmentUpdated.addListener(async (details) => {
+  if (details.frameId === 0) await enforceTab(details.tabId, details.url);
 });
 
 function notify(title, message) {
@@ -402,11 +632,30 @@ async function updateBadge(state) {
 
 // messages from popup / options / blocked page
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  const extensionPrefix = `chrome-extension://${chrome.runtime.id}/`;
+  const fromExtensionPage = typeof sender.url === 'string' && sender.url.startsWith(extensionPrefix);
+  const fromContentScript = !fromExtensionPage && Boolean(sender.tab && sender.id === chrome.runtime.id);
+  if (!msg || typeof msg.type !== 'string' || sender.id !== chrome.runtime.id ||
+      (msg.type === 'verdict' ? (!fromExtensionPage && !fromContentScript) : !fromExtensionPage)) {
+    sendResponse({ ok: false, error: 'Untrusted message sender.' });
+    return false;
+  }
+  if (msg.type === 'verdict' && (typeof msg.url !== 'string' || (fromContentScript && msg.url !== sender.url))) {
+    sendResponse({ ok: false, error: 'Invalid verdict request.' });
+    return false;
+  }
   (async () => {
     const state = await ensureState();
     if (msg.type === 'verdict') {
-      const freshState = await refreshCloudBeforeVerdict();
-      sendResponse(verdictFor(msg.url, freshState, nowMs()));
+      if (fromContentScript && sender.tab.id === mem.cur.tabId && mem.focused) await flushActiveSlice(nowMs());
+      const cached = verdictFor(msg.url, state, nowMs());
+      if (cached.blocked) {
+        sendResponse({ ...cached, watch: watchesSharedTarget(msg.url, state) });
+        void refreshCloudBeforeVerdict().catch(() => {});
+      } else {
+        const updated = await refreshCloudBeforeVerdict();
+        sendResponse({ ...verdictFor(msg.url, updated, nowMs()), watch: watchesSharedTarget(msg.url, updated) });
+      }
     } else if (msg.type === 'todayStats') {
       await flushActiveSlice(nowMs());
       const key = Store.todayKey();
@@ -419,26 +668,55 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse(await self.FocusLockCloud.getSnapshot(await ensureState(), false));
     } else if (msg.type === 'cloudSignOut') {
       const result = await self.FocusLockCloud.signOut();
-      state.cloudSites = [];
-      state.cloudSitesLoaded = false;
+      // Preserve cached rules and active strict commitments offline and across sign-out.
       await Store.save(state); mem.state = state;
       sendResponse(result);
     } else if (msg.type === 'setSharedSite') {
       try {
+        await syncCloud('edit');
+        if (strictIsActive(await ensureState())) {
+          sendResponse({ ok: false, error: 'Strict Mode is active. Boundaries are locked until it ends.' });
+          return;
+        }
         const result = await self.FocusLockCloud.setWebsiteBlocked(msg.domain, msg.isBlocked);
         if (result.ok) await syncCloud('boundary');
         sendResponse(result);
       } catch (e) { sendResponse({ ok: false, error: e?.message || 'Could not save website' }); }
     } else if (msg.type === 'getDashboard') {
+      await flushActiveSlice(nowMs());
+      await syncCloud('dashboard');
       sendResponse(await self.FocusLockCloud.getDashboard(msg.fromDate, msg.toDate));
+    } else if (msg.type === 'focusGroupsSave') {
+      await syncCloud('edit');
+      if (strictIsActive(await ensureState())) {
+        sendResponse({ ok: false, error: 'Merged boundaries cannot be edited during Strict Mode.' });
+      } else {
+        const result = await self.FocusLockCloud.saveGroups({ groups: msg.groups, updatedAt: msg.updatedAt });
+        if (result.ok) await syncCloud('edit');
+        sendResponse(result);
+      }
+    } else if (msg.type === 'frogStatus') {
+      sendResponse({ supported: false, frog: null });
     } else if (msg.type === 'savePrefs') {
-      try { sendResponse(await self.FocusLockCloud.savePrefs(msg.prefs || {})); }
+      try {
+        const result = await self.FocusLockCloud.savePrefs(msg.prefs || {});
+        if (result.ok) await syncCloud('edit');
+        sendResponse(result);
+      }
       catch (e) { sendResponse({ signedIn: true, ok: false, error: e && e.message ? e.message : 'Prefs save failed' }); }
     } else if (msg.type === 'addWorkRecord') {
-      try { sendResponse(await self.FocusLockCloud.addWorkRecord(msg.record || {})); }
+      try {
+        const result = await self.FocusLockCloud.addWorkRecord(msg.record || {});
+        if (result.ok) await syncCloud('edit');
+        sendResponse(result);
+      }
       catch (e) { sendResponse({ signedIn: true, ok: false, error: e && e.message ? e.message : 'Work log failed' }); }
     } else if (msg.type === 'logFocusSession') {
-      try { sendResponse(await self.FocusLockCloud.logFocusSession(msg.session || {})); }
+      try {
+        const result = await self.FocusLockCloud.logFocusSession(msg.session || {});
+        if (result.ok) await syncCloud('edit');
+        sendResponse(result);
+      }
       catch (e) { sendResponse({ signedIn: true, ok: false, error: e && e.message ? e.message : 'Focus session failed' }); }
     } else if (msg.type === 'protectionStatus') {
       const t = nowMs();
@@ -458,7 +736,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         idleTimeoutSec,
         listsActive,
         listsTotal: state.lists.length,
-        nuclearActive: Boolean(state.nuclear && state.nuclear.active && state.nuclear.until > t),
+        nuclearActive: Boolean(state.cloudNuke?.isActive || (state.nuclear.active && state.nuclear.until > t)),
+        sharedNukeActive: Boolean(state.cloudNuke?.isActive),
+        strictActive: strictIsActive(state, t),
         nuclearUntil: state.nuclear && state.nuclear.until ? state.nuclear.until : 0,
         signedIn: Boolean(cloudStatus.signedIn),
         lastSyncAt: Number(cloudStatus.lastSyncAt) || 0,
@@ -468,9 +748,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       });
     } else if (msg.type === 'snooze') {
       const domain = M.domainOf(msg.url);
-      state.snoozes[domain] = nowMs() + (msg.minutes || 5) * 60000;
-      await Store.save(state); mem.state = state;
-      sendResponse({ ok: true, until: state.snoozes[domain] });
+      const target = domain && state.lists.some(list => listIsLocked(list) && list.enabled
+        && (list.mode === 'whitelist' ? !M.matchesAny(msg.url, list.sites) : M.matchesAny(msg.url, list.sites))
+        && !M.matchesAny(msg.url, list.exceptions || []));
+      const sharedMode = self.FocusLockPolicy?.verdict(msg.url, state, nowMs())?.mode;
+      if (!/^https?:\/\//i.test(msg.url || '') || !domain || strictIsActive(state) || target
+          || ['group-limit', 'daily-limit', 'schedule', 'global-limit'].includes(sharedMode)
+          || M.matchesAny(msg.url, state.permanentSites || [])
+          || state.cloudNuke?.isActive || (state.nuclear.active && state.nuclear.until > nowMs())) {
+        sendResponse({ ok: false, error: ['daily-limit', 'group-limit', 'global-limit'].includes(sharedMode)
+          ? 'This shared daily limit cannot be paused.' : 'This block cannot be snoozed.' });
+      } else {
+        state.snoozes[domain] = nowMs() + 5 * 60000;
+        await Store.save(state); mem.state = state;
+        sendResponse({ ok: true, until: state.snoozes[domain] });
+      }
     } else if (msg.type === 'refresh') {
       mem.state = await Store.load();
       mem.lastFlushedDay = null;
@@ -479,27 +771,50 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     } else {
       sendResponse({ ok: false });
     }
-  })();
+  })().catch((error) => {
+    console.warn('[focuslock] message failed', error);
+    sendResponse({ ok: false, error: error?.message || 'FocusLock could not complete that request.' });
+  });
   return true;
 });
 
 chrome.runtime.onInstalled.addListener(async () => {
-  mem.state = await Store.load();
-  // Maintenance (expiry, badge, slice flush) must stay at 1 min — it drives
-  // verdict state. Cloud sync also refreshes cross-device boundaries.
+  mem.state = null;
+  await ensureState();
+  // Maintenance (expiry, badge, slice flush) stays at 1 min. Cloud rules are
+  // checked on navigation and periodically while the browser is idle.
   await chrome.alarms.create('focuslock-maint', { periodInMinutes: 1 });
-  await chrome.alarms.create('focuslock-sync', { periodInMinutes: 1 });
+  await chrome.alarms.create('focuslock-sync', { periodInMinutes: 4 * 60 });
   updateBadge(mem.state);
   await syncCloud('installed');
 });
 
 chrome.runtime.onStartup.addListener(async () => {
-  mem.state = await Store.load();
+  mem.state = null;
+  await ensureState();
   await chrome.alarms.create('focuslock-maint', { periodInMinutes: 1 });
-  await chrome.alarms.create('focuslock-sync', { periodInMinutes: 1 });
+  await chrome.alarms.create('focuslock-sync', { periodInMinutes: 4 * 60 });
   updateBadge(mem.state);
   await syncCloud('startup');
 });
 
+// Retry durable cloud work promptly when connectivity returns. All boundary
+// enforcement continues locally while the network is unavailable.
+if (typeof self.addEventListener === 'function') {
+  self.addEventListener('online', () => { void syncCloud('reconnect'); });
+}
+
 // expose for tests
-self.FocusLockEngine = { verdictFor, listIsActive, scheduleActive, minutesUsedToday };
+self.FocusLockEngine = { verdictFor, listIsActive, scheduleActive, minutesUsedToday, inRecurring, strictIsActive };
+
+// MV3 can create a fresh worker for any event, not only browser startup.
+// Rehydrate account caches before attaching the authenticated live query.
+if (self.FocusLockCloud.startLivePolicy) {
+  void (async () => {
+    await syncCloud('worker-start');
+    await self.FocusLockCloud.startLivePolicy({
+      onPolicy: result => syncCloud('live', result),
+      onIdentityChange: () => syncCloud('account-change'),
+    }, await ensureState());
+  })().catch(error => console.warn('[focuslock] live policy startup', error?.message || error));
+}

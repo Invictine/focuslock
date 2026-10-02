@@ -2,7 +2,9 @@ package com.focuslock.app.service
 
 import android.app.usage.UsageStatsManager
 import android.content.Context
+import com.focuslock.app.data.model.BlockedApp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -50,7 +52,9 @@ object UsageStatsRepository {
         val totalScreenMinutes: Long,
         val entries: List<AppUsageEntry>,
         val appCount: Int,
-        val rawPerPackageMillis: Map<String, UsageTrackerHelper.PackageUsage>
+        val rawPerPackageMillis: Map<String, UsageTrackerHelper.PackageUsage>,
+        val permissionGranted: Boolean,
+        val available: Boolean
     )
 
     @Volatile
@@ -67,7 +71,8 @@ object UsageStatsRepository {
     ): DailyUsageSummary = withContext(Dispatchers.IO) {
         val aggregate = try {
             getSummaryAggregate(context)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
             null
         } ?: return@withContext DailyUsageSummary(0L, emptyList(), 0)
         DailyUsageSummary(
@@ -77,13 +82,38 @@ object UsageStatsRepository {
         )
     }
 
+    /** Today's foreground time for boundary-selected apps, in raw milliseconds. */
+    suspend fun getTodayBoundaryForegroundMillis(
+        context: Context,
+        boundaryApps: Collection<BlockedApp>
+    ): Long? = withContext(Dispatchers.IO) {
+        val selected = BoundaryLeisureUsage.selectedPackageNames(boundaryApps)
+        if (selected.isEmpty()) return@withContext 0L
+        // A previously successful aggregate must not leak stale usage after permission revocation.
+        if (!UsageTrackerHelper.hasUsageStatsPermission(context)) return@withContext null
+        val aggregate = try {
+            getSummaryAggregate(context)
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            null
+        } ?: return@withContext null
+        if (!aggregate.available) return@withContext null
+        val rawMillis = aggregate.rawPerPackageMillis.mapValues { it.value.foregroundMillis }
+        BoundaryLeisureUsage.foregroundMillis(boundaryApps, rawMillis)
+    }
+
     /** Cached full-day aggregate; refreshed at most once per [SUMMARY_CACHE_TTL_MS]. */
-    private suspend fun getSummaryAggregate(context: Context): SummaryAggregate {
+    private suspend fun getSummaryAggregate(context: Context): SummaryAggregate = withContext(Dispatchers.IO) {
         val dayStart = UsageTrackerHelper.startOfTodayMillis()
-        summaryCache?.takeIf { isFresh(it, dayStart) }?.let { return it }
-        return summaryMutex.withLock {
+        // Permission can change while the process/cache survives a trip to Settings.
+        // This inexpensive IPC stays on IO, including callers that originate on Main.
+        val permissionGranted = UsageTrackerHelper.hasUsageStatsPermission(context)
+        summaryCache?.takeIf { isFresh(it, dayStart) && it.permissionGranted == permissionGranted }
+            ?.let { return@withContext it }
+        summaryMutex.withLock {
             // Re-check: another caller may have refreshed the cache while we waited.
-            summaryCache?.takeIf { isFresh(it, dayStart) }?.let { return it }
+            summaryCache?.takeIf { isFresh(it, dayStart) && it.permissionGranted == permissionGranted }
+                ?.let { return@withLock it }
             querySummaryAggregate(context, dayStart).also { summaryCache = it }
         }
     }
@@ -100,7 +130,9 @@ object UsageStatsRepository {
                 totalScreenMinutes = 0L,
                 entries = emptyList(),
                 appCount = 0,
-                rawPerPackageMillis = emptyMap()
+                rawPerPackageMillis = emptyMap(),
+                permissionGranted = false,
+                available = false
             )
         }
         return try {
@@ -142,7 +174,9 @@ object UsageStatsRepository {
                 totalScreenMinutes = totalMs / 60_000L,
                 entries = entries.sortedByDescending { it.foregroundMinutes },
                 appCount = entries.size,
-                rawPerPackageMillis = raw
+                rawPerPackageMillis = raw,
+                permissionGranted = true,
+                available = true
             )
         } catch (_: Exception) {
             SummaryAggregate(
@@ -151,7 +185,9 @@ object UsageStatsRepository {
                 totalScreenMinutes = 0L,
                 entries = emptyList(),
                 appCount = 0,
-                rawPerPackageMillis = emptyMap()
+                rawPerPackageMillis = emptyMap(),
+                permissionGranted = true,
+                available = false
             )
         }
     }
@@ -162,30 +198,32 @@ object UsageStatsRepository {
      * per-package query only when the aggregate path fails, still cached for
      * [PACKAGE_CACHE_TTL_MS].
      */
-    suspend fun getMinutesForPackage(context: Context, packageName: String): Long {
+    suspend fun getMinutesForPackage(context: Context, packageName: String): Long = withContext(Dispatchers.IO) {
         val aggregate = try {
             getSummaryAggregate(context)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
             null
         }
         if (aggregate != null && aggregate.dayStart == UsageTrackerHelper.startOfTodayMillis()) {
-            return aggregate.rawPerPackageMillis[packageName]?.foregroundMillis?.div(60_000L) ?: 0L
+            return@withContext aggregate.rawPerPackageMillis[packageName]?.foregroundMillis?.div(60_000L) ?: 0L
         }
         val cached = packageUsageMutex.withLock {
             packageUsageCache[packageName]
                 ?.takeIf { System.currentTimeMillis() - it.first < PACKAGE_CACHE_TTL_MS }
                 ?.second
         }
-        if (cached != null) return cached
+        if (cached != null) return@withContext cached
         val minutes = try {
             UsageTrackerHelper.getAppUsageTodayMinutes(context, packageName)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
             0L
         }
         packageUsageMutex.withLock {
             packageUsageCache[packageName] = System.currentTimeMillis() to minutes
         }
-        return minutes
+        minutes
     }
 
     /** Drops cached usage for [packageName], or the whole cache when null. */
@@ -193,7 +231,7 @@ object UsageStatsRepository {
         packageUsageMutex.withLock {
             if (packageName == null) packageUsageCache.clear() else packageUsageCache.remove(packageName)
         }
-        summaryCache = null
+        summaryMutex.withLock { summaryCache = null }
     }
 
     fun formatDuration(totalMinutes: Long): String {

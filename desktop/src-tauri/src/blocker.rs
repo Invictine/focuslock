@@ -82,6 +82,13 @@ impl BlockerRuntime {
         }
     }
 
+    /// True while the tracked block is a device-local permanent one. The window
+    /// close handler uses this so Alt+F4 / a programmatic close can never take
+    /// a permanent overlay down.
+    pub fn is_permanent_active(&self) -> bool {
+        self.state().reason.as_deref() == Some(crate::tracking::PERMANENT_REASON)
+    }
+
     /// Show (or re-target) the blocker for `matched`. Returns `false` when the
     /// blocker window cannot be shown, in which case the caller must fall back
     /// to minimizing the foreground window.
@@ -225,6 +232,13 @@ pub fn blocker_action(
     action: String,
     blocker: State<'_, BlockerRuntime>,
 ) -> Result<(), String> {
+    // A permanent block has no in-app escape hatch: the overlay renders no
+    // buttons, and any stray/queued `blocker_action` is refused here too and
+    // leaves the window visible. Only the tracker's normal hide-on-foreground
+    // change (switching to an unblocked app) takes the overlay down.
+    if blocker.is_permanent_active() {
+        return Err("Permanent blocks cannot be dismissed in FocusLock.".into());
+    }
     match action.as_str() {
         "dismiss" => {
             blocker.dismiss(&app);
@@ -250,6 +264,12 @@ pub fn blocker_action(
 
 /// Create the hidden blocker webview. Called once at setup and again if the
 /// window was destroyed while the app was running.
+///
+/// `closable(false)` (on top of the `CloseRequested` guard in `main.rs`) means
+/// the OS cannot close the overlay for ANY reason — required so a permanent
+/// block has no Alt+F4 escape. Frog/limit/boundary overlays were already
+/// unclosable through the event handler; this makes it absolute instead of
+/// letting a close briefly hide the window until the next tracker sample.
 pub fn build_blocker_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     WebviewWindowBuilder::new(app, BLOCKER_LABEL, WebviewUrl::App(BLOCKER_URL.into()))
         .title("FocusLock")
@@ -257,6 +277,7 @@ pub fn build_blocker_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .always_on_top(true)
         .skip_taskbar(true)
         .resizable(false)
+        .closable(false)
         .visible(false)
         .focused(false)
         .build()

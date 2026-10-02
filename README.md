@@ -43,6 +43,8 @@ This is a personal build: BuildConfig credentials are embedded in the APK and ca
 
 Official reference: https://developer.ticktick.com/docs/openapi.md
 
+Focus time is imported from completed Pomodoro and stopwatch records through TickTick's official `/open/v1/focus` endpoint. FocusLock syncs on app resume, every minute while the app is visible, on pull-to-refresh, and through **Settings → Sync focus now**. Only sessions ending today count toward today's focus time; repeated syncs do not award credit twice. Completed tasks and notification text do not earn focus credit. The importer accepts the documented seconds format and the milliseconds format observed in live stopwatch responses, validates the duration against the session timestamps, and floors it to whole minutes.
+
 ## UI
 
 Android is the reference for Focus, Boundaries, Settings, and Account across the Android app, Windows app, Chrome popup, and Chrome dashboard. All four use a fixed charcoal theme with a muted rose accent, native sans-serif typography, and matching control states. The palette stays dark regardless of OS appearance or Android wallpaper. Wide windows use a compact sidebar; compact screens adapt the navigation.
