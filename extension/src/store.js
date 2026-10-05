@@ -99,6 +99,12 @@
       strictNukeAfterFive: false,
       strictAttempts: 0,
       strictSessionKey: '',
+      browserFrog: { enabled: false, wakeHour: 5, requiredSeconds: 1800 },
+      focusTimer: null,
+      pendingFocusSessions: [],
+      strictPending: null,
+      strictOriginAccountId: '',
+      strictWeekly: null,
       security: { salt: '', hash: '', strict: true },
       settings: { idleTimeoutSec: 60, blockedDelayNote: true, quotes: true }
     };
@@ -189,6 +195,15 @@
       strictNukeAfterFive: s.strictNukeAfterFive === true,
       strictAttempts: Math.max(0, finite(s.strictAttempts)),
       strictSessionKey: typeof s.strictSessionKey === 'string' ? s.strictSessionKey : '',
+      browserFrog: root.FocusLockFeatures?.frogState(s.browserFrog) || d.browserFrog,
+      focusTimer: root.FocusLockFeatures?.timerState(s.focusTimer) || null,
+      pendingFocusSessions: Array.isArray(s.pendingFocusSessions) ? s.pendingFocusSessions.filter(row =>
+        row && typeof row.id === 'string' && typeof row.accountId === 'string' && row.session && typeof row.session === 'object').slice(-100) : [],
+      strictPending: s.strictPending && typeof s.strictPending.accountId === 'string' && s.strictPending.prefs
+        ? s.strictPending : null,
+      strictOriginAccountId: typeof s.strictOriginAccountId === 'string' ? s.strictOriginAccountId
+        : s.strictMode && typeof s.cloudAccountId === 'string' ? s.cloudAccountId : '',
+      strictWeekly: root.FocusLockFeatures?.weeklyState(s.strictWeekly) || null,
       security: { ...d.security, salt: typeof security.salt === 'string' ? security.salt : '', hash: typeof security.hash === 'string' ? security.hash : '', strict: security.strict !== false },
       settings: { ...d.settings, ...settings, idleTimeoutSec: Math.min(3600, Math.max(15, finite(settings.idleTimeoutSec, 60))) },
     };

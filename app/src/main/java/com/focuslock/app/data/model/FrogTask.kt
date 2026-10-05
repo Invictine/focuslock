@@ -36,6 +36,7 @@ data class FrogTask(
 enum class FrogPhase {
     NOT_ARMED,
     PICK_FROG,
+    PICK_TOOLS,
     WORKING,
     COMPLETE;
 
@@ -50,10 +51,12 @@ enum class FrogPhase {
             tickedOff: Boolean,
             trackedSeconds: Int,
             requiredSeconds: Int,
+            toolsConfirmed: Boolean = true,
         ): FrogPhase = when {
             !armed -> NOT_ARMED
             !selected -> PICK_FROG
             tickedOff && trackedSeconds >= requiredSeconds -> COMPLETE
+            !toolsConfirmed -> PICK_TOOLS
             else -> WORKING
         }
     }
@@ -75,4 +78,7 @@ data class FrogState(
     val requiredSeconds: Int,
     val locked: Boolean,
     val openTasks: List<FrogTask>,
+    val allowedToolPackages: Set<String> = emptySet(),
+    val toolsConfirmed: Boolean = false,
+    val essentialAppPackages: Set<String>? = null,
 )

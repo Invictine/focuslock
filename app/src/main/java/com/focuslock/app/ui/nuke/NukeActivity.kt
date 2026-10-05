@@ -30,12 +30,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import com.focuslock.app.FocusLockApplication
 import com.focuslock.app.auth.AuthViewModel
 import com.focuslock.app.ui.theme.FocusLockTheme
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 
 const val NUKE_MEDITATION_MS = 10 * 60 * 1000L
 
@@ -47,6 +49,7 @@ class NukeActivity : ComponentActivity() {
     // its viewModelScope is cancelled by the framework. The old code built a fresh
     // AuthViewModel() per coach message / unlock — each one leaked its scope.
     private val authViewModel: AuthViewModel by viewModels()
+    private var homeEnforcementAllowed by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -59,33 +62,58 @@ class NukeActivity : ComponentActivity() {
                 // Back stays disabled until the reset completes.
             }
         })
-        // Pin to screen: user asked for complete phone block until reset is done.
-        try {
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
-                startLockTask()
-            }
-        } catch (_: Exception) { }
-
         setContent {
             FocusLockTheme {
-                NukeLockScreen(
-                    authViewModel = authViewModel,
-                    onUnlocked = { plan ->
-                        lifecycleScope.launch {
-                            try { stopLockTask() } catch (_: Exception) { }
-                            Toast.makeText(this@NukeActivity, "Nuke lifted. Plan: $plan", Toast.LENGTH_LONG).show()
-                            finish()
+                if (homeEnforcementAllowed) {
+                    NukeLockScreen(
+                        authViewModel = authViewModel,
+                        onUnlocked = { plan ->
+                            lifecycleScope.launch {
+                                try { stopLockTask() } catch (_: Exception) { }
+                                Toast.makeText(this@NukeActivity, "Nuke lifted. Plan: $plan", Toast.LENGTH_LONG).show()
+                                finish()
+                            }
                         }
+                    )
+                }
+            }
+        }
+
+        // A home-only pause hides this screen and releases screen pinning without
+        // clearing the persisted Nuke commitment. Recheck on every foreground return
+        // and while visible so crossing the boundary takes effect promptly.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                while (true) {
+                    val enforce = try {
+                        FocusLockApplication.instance.homeLocationRepository.shouldEnforceNow()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        true // Unknown location state must not falsely release Nuke.
                     }
-                )
+                    if (!enforce) {
+                        homeEnforcementAllowed = false
+                        try { stopLockTask() } catch (_: Exception) { }
+                        finish()
+                        return@repeatOnLifecycle
+                    }
+                    if (!homeEnforcementAllowed) {
+                        homeEnforcementAllowed = true
+                        try {
+                            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) startLockTask()
+                        } catch (_: Exception) { }
+                    }
+                    delay(10_000L)
+                }
             }
         }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        // Re-pin if system tries to drop us.
-        try { startLockTask() } catch (_: Exception) { }
+        // Re-pin only after the lifecycle location gate has allowed the screen.
+        if (homeEnforcementAllowed) try { startLockTask() } catch (_: Exception) { }
     }
 }
 

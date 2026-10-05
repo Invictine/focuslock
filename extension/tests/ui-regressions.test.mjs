@@ -32,15 +32,21 @@ await context.addInitScript(() => {
   }));
   window.__messages = [];
   window.__snoozeError = 'This block cannot be snoozed.';
+  window.__frogResponse = null;
   window.chrome = {
     runtime: {
       lastError: null,
       getURL: (p) => new URL('/extension/' + p, location.origin).href,
       sendMessage: (msg, callback) => {
         window.__messages.push(msg);
-        const result = msg.type === 'getDashboard' ? { signedIn: false }
+        const current = JSON.parse(localStorage.getItem('focuslock.v1') || '{}');
+        const result = msg.type === 'featureStatus' ? { ok: true,
+          strictMode: current.strictMode === true && (!Number(current.strictEndsAt) || Number(current.strictEndsAt) > Date.now()),
+          strictEndsAt: current.strictEndsAt || 0,
+          frog: { enabled: false, phase: 'not-armed', frog: null, trackedSeconds: 0, requiredSeconds: 1800, locked: false }, timer: null }
+          : msg.type === 'getDashboard' ? { signedIn: false }
           : msg.type === 'protectionStatus' ? { engineRunning: true, focused: true, listsActive: 1, listsTotal: 1, signedIn: false }
-          : msg.type === 'frogStatus' ? { supported: false }
+          : msg.type === 'frogStatus' ? (window.__frogResponse || { supported: false })
           : msg.type === 'snooze' ? { ok: false, error: window.__snoozeError }
           : { ok: true };
         if (typeof callback === 'function') queueMicrotask(() => callback(result));
@@ -69,7 +75,8 @@ const options = await context.newPage();
 const pageErrors = [];
 options.on('pageerror', (error) => pageErrors.push(error.message));
 await options.goto('http://focuslock.test/extension/options/options.html?tab=blocks');
-await options.locator('details.advanced').evaluate(el => { el.open = true; });
+await options.locator('#boundaryHub [data-boundary-route="sites"]').click();
+await options.locator('#surface-sites > details.advanced').evaluate(el => { el.open = true; });
 await options.locator('#lists .card').first().waitFor();
 const frozen = options.locator('#lists .card').first();
 await frozen.locator('details.list-editor').evaluate((el) => { el.open = true; });
@@ -92,7 +99,8 @@ assert.equal(JSON.parse(await options.evaluate(() => localStorage.getItem('focus
 current.strictMode = true; current.strictEndsAt = Date.now() + 60000;
 await options.evaluate((state) => localStorage.setItem('focuslock.v1', JSON.stringify(state)), current);
 await options.reload();
-await options.locator('details.advanced').evaluate(el => { el.open = true; });
+await options.locator('#boundaryHub [data-boundary-route="sites"]').click();
+await options.locator('#surface-sites > details.advanced').evaluate(el => { el.open = true; });
 await options.locator('#lists .card').first().waitFor();
 assert.equal(await options.locator('#newList').isDisabled(), true, 'Strict Mode visibly disables list creation');
 // Even a stale/enabled control must hit the latest-state write guard.
@@ -104,7 +112,8 @@ assert.equal(await options.locator('#lists .card').count(), 1, 'Strict Mode does
 
 // Permalock: append-only under Strict Mode, duplicate/invalid input rejected,
 // no removal control, and a full reset keeps every permanent block.
-await options.locator('nav button[data-tab="permalock"]').click();
+await options.locator('[data-boundary-back]').click();
+await options.locator('#permalockHubTile').click();
 await options.locator('#permaInput').fill('https://www.Perma.example/path');
 await options.locator('#permaAdd').click();
 await options.waitForFunction(() => (JSON.parse(localStorage.getItem('focuslock.v1')).permanentSites || []).length === 1);
@@ -112,6 +121,14 @@ assert.deepEqual(JSON.parse(await options.evaluate(() => localStorage.getItem('f
   'Strict Mode still allows adding a permanent block');
 assert.equal(await options.locator('#permaRows [data-del]').count(), 0, 'Permanent rows offer no remove control');
 assert.equal(await options.locator('#permaRows .badge.lock').count(), 1, 'Permanent rows carry the Permanent badge');
+const withPermaOrdinaryEntry = JSON.parse(await options.evaluate(() => localStorage.getItem('focuslock.v1')));
+withPermaOrdinaryEntry.lists[0].sites.push('perma.example');
+await options.evaluate(state => localStorage.setItem('focuslock.v1', JSON.stringify(state)), withPermaOrdinaryEntry);
+await options.reload();
+await options.locator('#boundaryHub [data-boundary-route="sites"]').click();
+assert.equal(await options.locator('#siteRows').getByText('perma.example').count(), 0, 'Permanent domains are omitted from ordinary website rows');
+await options.locator('[data-boundary-back]').click();
+await options.locator('#permalockHubTile').click();
 
 await options.locator('#permaInput').fill('perma.example');
 await options.locator('#permaAdd').click();
@@ -133,7 +150,7 @@ await options.evaluate(() => {
   localStorage.setItem('focuslock.v1', JSON.stringify(snapshot));
 });
 await options.reload();
-await options.locator('nav button[data-tab="settings"]').click();
+await options.locator('.header-tools button[data-tab="settings"]').click();
 options.once('dialog', (dialog) => dialog.accept());
 await options.locator('#resetAll').click();
 await options.waitForFunction(() => {
@@ -146,7 +163,8 @@ assert.deepEqual(JSON.parse(await options.evaluate(() => localStorage.getItem('f
 // Import cannot remove a permanent block.
 const afterResetState = JSON.parse(await options.evaluate(() => localStorage.getItem('focuslock.v1')));
 await options.locator('nav button[data-tab="blocks"]').click();
-await options.locator('details.advanced').evaluate((el) => { el.open = true; });
+await options.locator('#boundaryHub [data-boundary-route="sites"]').click();
+await options.locator('#surface-sites > details.advanced').evaluate((el) => { el.open = true; });
 await options.locator('#importBtn').click();
 await options.locator('#importFile').setInputFiles({ name: 'no-permalock.json', mimeType: 'application/json',
   buffer: Buffer.from(JSON.stringify({ ...afterResetState, permanentSites: [] })) });
@@ -172,9 +190,23 @@ await blocked.addInitScript(() => {
   window.clearInterval = () => { window.__timerCallback = null; };
 });
 await blocked.goto('http://focuslock.test/extension/blocked/blocked.html?url=https%3A%2F%2Fexample.com%2Farticle&list=Test&mode=blacklist');
-await blocked.locator('#frogTitle').waitFor();
-assert.match(await blocked.locator('#frogTitle').textContent(), /on your phone/i, 'Unsupported phone-only Frog state is described honestly');
-assert.match(await blocked.locator('#frogMeta').textContent(), /on-device/i, 'Extension explains why it cannot show mobile Frog progress');
+await blocked.locator('#frogTitle').waitFor({ state: 'attached' });
+assert.equal(await blocked.locator('#frogCard').isHidden(), true, 'No unsupported Frog panel is shown when browser Frog is unavailable');
+assert.equal(await blocked.locator('#dashboard').textContent(), 'Open Focus', 'Blocked page has a direct Focus action');
+await blocked.addInitScript(() => { window.__frogResponse = { supported: true, enabled: true, frog: { title: 'Read a chapter' }, trackedSeconds: 300, requiredSeconds: 900, locked: true }; });
+await blocked.goto('http://focuslock.test/extension/blocked/blocked.html?url=https%3A%2F%2Fexample.com%2Farticle&list=Strict&mode=strict');
+await blocked.locator('#frogCta').waitFor({ state: 'visible' });
+assert.match(await blocked.locator('#frogTitle').textContent(), /Read a chapter/);
+assert.match(await blocked.locator('#frogCta').getAttribute('href'), /options\.html\?tab=stats&frog=1/);
+assert.equal(await blocked.locator('#snoozeBtn').isHidden(), true, 'Strict Mode hides snooze before interaction');
+await blocked.goto('http://focuslock.test/extension/blocked/blocked.html?url=https%3A%2F%2Fexample.com%2Farticle&list=Schedule&mode=schedule');
+assert.equal(await blocked.locator('#snoozeBtn').isHidden(), true, 'Scheduled block hides snooze before interaction');
+await blocked.goto('http://focuslock.test/extension/blocked/blocked.html?url=https%3A%2F%2Fexample.com%2Farticle&list=Eat%20the%20Frog&mode=frog');
+assert.equal(await blocked.locator('#snoozeBtn').isHidden(), true, 'Frog lock hides snooze before interaction');
+assert.match(await blocked.locator('.sub').textContent(), /Frog task and the required focused time/i, 'Frog lock explains its completion condition');
+await blocked.goto('http://focuslock.test/extension/blocked/blocked.html?url=https%3A%2F%2Fexample.com%2Farticle&list=Frozen&mode=blacklist&reason=frozen-lock');
+assert.equal(await blocked.locator('#snoozeBtn').isHidden(), true, 'Frozen-list lock hides snooze before interaction');
+await blocked.goto('http://focuslock.test/extension/blocked/blocked.html?url=https%3A%2F%2Fexample.com%2Farticle&list=Test&mode=blacklist');
 await blocked.locator('#snoozeBtn').click();
 const phrase = (await blocked.locator('#phrase').textContent()).replace(/[“”]/g, '').trim();
 await blocked.locator('#phraseInput').fill(phrase);

@@ -1,0 +1,767 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FocusLock — Earn your scroll</title>
+<meta name="description" content="FocusLock turns focused work into leisure time. Sixty minutes of focus buys fifteen minutes of feed. When it's spent, the door locks — on your phone, your PC and your browser.">
+<meta name="theme-color" content="#0d0d0f">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* Tokens mirror design/theme.json (FocusLock Charcoal) */
+:root{
+  --primary:#dfbdb6; --on-primary:#30201d; --primary-c:#40302d; --on-primary-c:#f4dcd6;
+  --tertiary:#b7cbbb; --tertiary-c:#29392e;
+  --bg:#0d0d0f; --ink:#eee9e7; --ink-2:#bbb4b1; --ink-3:#817977;
+  --s-lowest:#09090b; --s-low:#141416; --s:#1b1b1e; --s-high:#232326; --s-highest:#2d2d31;
+  --line:#353235; --warning:#e5c58f; --error:#f2b2ad;
+  --r-s:8px; --r-m:12px; --r-l:20px; --r-xl:24px;
+  --sans:"Segoe UI",Roboto,system-ui,-apple-system,BlinkMacSystemFont,sans-serif;
+  --serif:"Instrument Serif","Iowan Old Style",Georgia,serif;
+  --mono:"JetBrains Mono",ui-monospace,"Cascadia Mono",Consolas,monospace;
+  --wrap:min(1180px, 100% - 48px);
+  color-scheme:dark;
+}
+*{box-sizing:border-box;margin:0}
+html{scroll-behavior:smooth;-webkit-text-size-adjust:100%}
+body{background:var(--bg);color:var(--ink);font:400 17px/1.6 var(--sans);overflow-x:clip;-webkit-font-smoothing:antialiased}
+a{color:inherit}
+button,input{font:inherit;color:inherit}
+:focus-visible{outline:2px solid var(--primary);outline-offset:3px;border-radius:6px}
+.wrap{width:var(--wrap);margin-inline:auto}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums;letter-spacing:.02em}
+.eyebrow{font:500 12px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3);display:flex;align-items:center;gap:10px}
+.eyebrow::before{content:"";width:18px;height:1px;background:currentColor}
+h1,h2,h3{font-weight:400;letter-spacing:-.01em}
+h2{font:400 clamp(40px,5.4vw,72px)/1.02 var(--serif);letter-spacing:-.015em}
+h2 em,h1 em{font-style:italic;color:var(--primary)}
+.lede{color:var(--ink-2);font-size:clamp(17px,1.4vw,19px);max-width:56ch}
+
+/* Grain + vignette so the charcoal doesn't read flat */
+body::before{content:"";position:fixed;inset:0;pointer-events:none;z-index:100;opacity:.05;mix-blend-mode:overlay;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E")}
+
+/* ---------- Buttons ---------- */
+.btn{display:inline-flex;align-items:center;gap:10px;min-height:48px;padding:0 22px;border-radius:var(--r-m);border:1px solid transparent;text-decoration:none;font-weight:600;font-size:15px;cursor:pointer;transition:background .2s,border-color .2s,transform .2s}
+.btn:active{transform:translateY(1px)}
+.btn-primary{background:var(--primary);color:var(--on-primary)}
+.btn-primary:hover{background:var(--on-primary-c)}
+.btn-ghost{border-color:var(--line);color:var(--ink)}
+.btn-ghost:hover{border-color:var(--ink-3);background:var(--s-low)}
+.btn svg{width:16px;height:16px}
+
+/* ---------- Nav ---------- */
+.nav{position:sticky;top:0;z-index:50;backdrop-filter:blur(14px) saturate(1.2);-webkit-backdrop-filter:blur(14px) saturate(1.2);background:color-mix(in srgb,var(--bg) 72%,transparent);border-bottom:1px solid color-mix(in srgb,var(--line) 60%,transparent)}
+.nav .wrap{display:flex;align-items:center;justify-content:space-between;height:68px}
+.brand{display:flex;align-items:center;gap:10px;text-decoration:none;font-weight:600;letter-spacing:-.01em}
+.brand svg{width:26px;height:26px}
+.nav ul{display:flex;gap:30px;list-style:none;padding:0;font-size:14px;color:var(--ink-2)}
+.nav ul a{text-decoration:none;transition:color .2s}
+.nav ul a:hover{color:var(--ink)}
+.nav .btn{min-height:40px;padding:0 16px;font-size:14px}
+@media (max-width:860px){.nav ul{display:none}}
+
+/* ---------- Hero ---------- */
+.hero{position:relative;padding:clamp(56px,9vw,120px) 0 80px}
+.hero::after{content:"";position:absolute;inset:-20% -10% auto auto;width:780px;height:780px;pointer-events:none;z-index:-1;
+  background:radial-gradient(closest-side,color-mix(in srgb,var(--primary) 14%,transparent),transparent 70%)}
+.hero .wrap{display:grid;grid-template-columns:1.05fr .95fr;gap:56px;align-items:center}
+.hero h1{font:400 clamp(58px,8.6vw,124px)/.92 var(--serif);letter-spacing:-.025em;margin:22px 0 28px}
+.hero h1 .line{display:block}
+.hero .lede{margin-bottom:36px}
+.hero-ctas{display:flex;flex-wrap:wrap;gap:12px;align-items:center}
+.hero-meta{margin-top:40px;display:flex;flex-wrap:wrap;gap:8px}
+.chip{font:500 12px/1 var(--mono);letter-spacing:.06em;color:var(--ink-2);border:1px solid var(--line);border-radius:999px;padding:9px 12px;display:inline-flex;gap:8px;align-items:center}
+.chip i{width:6px;height:6px;border-radius:50%;background:var(--tertiary);font-style:normal}
+
+.dial{position:relative;width:min(100%,520px);aspect-ratio:1;justify-self:center}
+.dial svg{width:100%;height:100%;overflow:visible}
+.dial .ticks{transform-origin:200px 200px;transition:transform .1s linear}
+.dial .arc{fill:none;stroke-linecap:round;transform:rotate(-90deg);transform-origin:200px 200px;transition:stroke-dashoffset 2.2s cubic-bezier(.2,.8,.2,1)}
+.dial-center{position:absolute;inset:0;display:grid;place-content:center;text-align:center;pointer-events:none}
+.dial-center .k{font:500 11px/1 var(--mono);letter-spacing:.18em;color:var(--ink-3);text-transform:uppercase}
+.dial-center .v{font:400 clamp(56px,7.4vw,92px)/1 var(--mono);letter-spacing:-.04em;margin:14px 0 12px;font-variant-numeric:tabular-nums}
+.dial-center .s{font-size:13px;color:var(--ink-2)}
+.dial-center .live{display:inline-flex;align-items:center;gap:7px;margin-top:16px;font:500 11px/1 var(--mono);letter-spacing:.12em;color:var(--primary);text-transform:uppercase}
+.dial-center .live::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor;animation:pulse 1.6s infinite}
+@keyframes pulse{50%{opacity:.25}}
+.legend{position:absolute;font:500 11px/1.4 var(--mono);letter-spacing:.08em;color:var(--ink-3);text-transform:uppercase}
+.legend b{display:block;font-weight:500;color:var(--ink);font-size:13px;letter-spacing:.02em}
+.legend.l1{left:-4%;top:6%}
+.legend.l2{right:-4%;bottom:6%;text-align:right}
+.legend .sw{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:6px;vertical-align:1px}
+@media (max-width:960px){.hero .wrap{grid-template-columns:1fr}.dial{max-width:440px}.legend{display:none}}
+
+/* ---------- Ticker ---------- */
+.ticker{border-block:1px solid var(--line);overflow:hidden;background:var(--s-lowest)}
+.ticker-track{display:flex;gap:56px;width:max-content;padding:18px 0;animation:marquee 46s linear infinite;font:500 13px/1 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3)}
+.ticker-track span{display:inline-flex;gap:56px;align-items:center}
+.ticker-track span::after{content:"◦";color:var(--primary)}
+.ticker-track b{color:var(--ink);font-weight:500}
+@keyframes marquee{to{transform:translateX(-50%)}}
+
+/* ---------- Section scaffolding ---------- */
+section{position:relative}
+.sec{padding:clamp(96px,12vw,160px) 0}
+.sec-head{display:grid;grid-template-columns:1fr 1fr;gap:48px;align-items:end;margin-bottom:64px}
+.sec-head h2{margin-top:18px}
+@media (max-width:860px){.sec-head{grid-template-columns:1fr;gap:20px}}
+
+/* ---------- Exchange ---------- */
+.exchange{display:grid;grid-template-columns:1.1fr .9fr;gap:20px}
+.panel{background:var(--s-low);border:1px solid var(--line);border-radius:var(--r-l);padding:clamp(24px,3vw,40px)}
+.ex-controls label{display:flex;justify-content:space-between;align-items:baseline;font-size:14px;color:var(--ink-2);margin-bottom:18px}
+.ex-controls label output{font:400 44px/1 var(--mono);color:var(--ink);letter-spacing:-.03em}
+input[type=range]{width:100%;appearance:none;-webkit-appearance:none;background:transparent;height:48px;cursor:pointer;--p:25%}
+input[type=range]::-webkit-slider-runnable-track{height:6px;border-radius:6px;background:linear-gradient(90deg,var(--tertiary) var(--p),var(--s-highest) var(--p))}
+input[type=range]::-moz-range-track{height:6px;border-radius:6px;background:linear-gradient(90deg,var(--tertiary) var(--p),var(--s-highest) var(--p))}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:26px;height:26px;margin-top:-10px;border-radius:50%;background:var(--ink);border:6px solid var(--bg);box-shadow:0 0 0 1px var(--ink-3)}
+input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;background:var(--ink);border:6px solid var(--bg);box-shadow:0 0 0 1px var(--ink-3)}
+.scale{display:flex;justify-content:space-between;font:500 11px/1 var(--mono);color:var(--ink-3);letter-spacing:.06em;margin-top:2px}
+.ratios{margin-top:40px}
+.ratios p{font-size:14px;color:var(--ink-2);margin-bottom:14px}
+.seg{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;background:var(--s-lowest);border:1px solid var(--line);border-radius:var(--r-m);padding:5px}
+.seg button{min-height:44px;border:0;border-radius:8px;background:transparent;font:500 15px/1 var(--mono);color:var(--ink-2);cursor:pointer;transition:background .2s,color .2s}
+.seg button:hover{color:var(--ink)}
+.seg button[aria-pressed=true]{background:var(--primary-c);color:var(--on-primary-c)}
+.seg-note{font-size:13px;color:var(--ink-3);margin-top:12px}
+.bars{margin-top:40px;display:grid;gap:10px}
+.bar{display:grid;grid-template-columns:72px 1fr;align-items:center;gap:14px;font:500 11px/1 var(--mono);letter-spacing:.1em;color:var(--ink-3);text-transform:uppercase}
+.bar div{height:14px;border-radius:4px;background:var(--s-high);overflow:hidden}
+.bar div span{display:block;height:100%;border-radius:4px;transition:width .5s cubic-bezier(.2,.8,.2,1)}
+
+.receipt{background:var(--ink);color:#1b1718;border-radius:var(--r-l) var(--r-l) 0 0;padding:36px 32px 30px;margin-bottom:14px;position:relative;font-family:var(--mono);font-size:13px;letter-spacing:.04em}
+.receipt::after{content:"";position:absolute;left:0;right:0;top:100%;height:14px;
+  background:linear-gradient(135deg,var(--ink) 50%,transparent 50%) 0 0/14px 14px repeat-x,linear-gradient(225deg,var(--ink) 50%,transparent 50%) 0 0/14px 14px repeat-x}
+.receipt h3{font:400 30px/1 var(--serif);letter-spacing:0;margin-bottom:4px}
+.receipt .sub{color:#6d6264;font-size:11px;letter-spacing:.14em;text-transform:uppercase;margin-bottom:26px}
+.receipt .row{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px dashed #c9bfbc;text-transform:uppercase}
+.receipt .row span:last-child{font-variant-numeric:tabular-nums}
+.receipt .total{display:flex;justify-content:space-between;align-items:end;margin-top:26px}
+.receipt .total .k{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#6d6264}
+.receipt .total .v{font-size:64px;line-height:.9;letter-spacing:-.05em;color:#77534c}
+.receipt .foot{margin-top:28px;padding-bottom:12px;font-size:11px;color:#6d6264;line-height:1.7}
+@media (max-width:900px){.exchange{grid-template-columns:1fr}}
+
+/* ---------- The trap (signature scrolly) ---------- */
+.trap{height:340vh;background:linear-gradient(var(--bg),var(--s-lowest) 20%,var(--s-lowest) 80%,var(--bg))}
+.trap-stage{position:sticky;top:0;height:100vh;height:100svh;padding-top:68px;display:grid;align-items:center}
+.trap-stage .wrap{display:grid;grid-template-columns:1fr auto;gap:clamp(40px,8vw,120px);align-items:center}
+.steps{position:relative;display:grid}
+.step{grid-area:1/1;transition:opacity .5s,transform .5s;opacity:0;transform:translateY(16px);pointer-events:none}
+.step.on{opacity:1;transform:none;pointer-events:auto}
+.step .n{font:500 12px/1 var(--mono);letter-spacing:.16em;color:var(--primary);margin-bottom:22px;display:block}
+.step h2{margin-bottom:22px}
+.progress{display:flex;gap:6px;margin-top:44px}
+.progress i{height:3px;width:44px;border-radius:2px;background:var(--s-highest);overflow:hidden;position:relative}
+.progress i::after{content:"";position:absolute;inset:0;background:var(--ink);transform:scaleX(var(--f,0));transform-origin:left}
+
+.phone{width:min(320px,78vw);aspect-ratio:9/19.2;border-radius:46px;padding:10px;background:linear-gradient(145deg,#3a3638,#151416 40%,#262325);box-shadow:0 0 0 1px #000,0 40px 120px -20px #000,0 0 80px -30px color-mix(in srgb,var(--primary) 40%,transparent);position:relative}
+.screen{position:relative;height:100%;border-radius:37px;overflow:hidden;background:#fff;isolation:isolate}
+.status{position:absolute;top:0;inset-inline:0;height:40px;display:flex;justify-content:space-between;align-items:center;padding:0 24px;font:600 12px/1 var(--sans);color:#111;z-index:3;background:#fff}
+.status::after{content:"";position:absolute;left:50%;top:10px;width:84px;height:22px;border-radius:12px;background:#000;transform:translateX(-50%)}
+.app-bar{position:absolute;top:40px;inset-inline:0;height:44px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;z-index:3;background:#fff;border-bottom:1px solid #eee;color:#111;font:700 18px/1 var(--sans);letter-spacing:-.02em}
+.app-bar span{display:flex;gap:14px}
+.app-bar span i{width:20px;height:20px;border:2px solid #111;border-radius:6px}
+.app-bar span i:last-child{border-radius:50%}
+.feed{position:absolute;top:84px;inset-inline:0;will-change:transform}
+.post{padding:10px 0 14px;border-bottom:1px solid #f0f0f0;color:#111}
+.post header{display:flex;align-items:center;gap:8px;padding:0 12px 8px;font:600 12px/1 var(--sans)}
+.post header i{width:26px;height:26px;border-radius:50%;padding:2px;background:conic-gradient(#f7b267,#f25c54,#c13584,#f7b267)}
+.post header i::after{content:"";display:block;width:100%;height:100%;border-radius:50%;border:2px solid #fff;background:var(--a)}
+.post .img{aspect-ratio:1;background:var(--g)}
+.post .acts{display:flex;gap:12px;padding:10px 12px 6px}
+.post .acts i{width:20px;height:20px;border:2px solid #111;border-radius:50%}
+.post p{padding:0 12px;font:12px/1.4 var(--sans);color:#333}
+.post p b{font-weight:600}
+.meter{position:absolute;z-index:4;left:50%;top:94px;transform:translateX(-50%);display:flex;align-items:center;gap:8px;padding:8px 14px 8px 10px;border-radius:999px;background:rgba(13,13,15,.86);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);color:var(--ink);font:500 12px/1 var(--mono);letter-spacing:.04em;white-space:nowrap;box-shadow:0 6px 24px rgba(0,0,0,.25);transition:color .3s}
+.meter svg{width:16px;height:16px}
+.meter.low{color:var(--warning)}
+.meter.zero{color:var(--error)}
+.blocker{position:absolute;inset:0;z-index:5;background:var(--bg);color:var(--ink);display:flex;flex-direction:column;justify-content:center;align-items:center;text-align:center;padding:28px;transform:translateY(100%);transition:transform .7s cubic-bezier(.7,0,.2,1)}
+.blocker.on{transform:none}
+.blocker .ring{width:96px;height:96px;margin-bottom:26px}
+.blocker h3{font:400 34px/1 var(--serif);margin-bottom:12px}
+.blocker p{font-size:13px;color:var(--ink-2);line-height:1.5;margin-bottom:26px}
+.blocker p b{color:var(--ink);font-weight:600}
+.blocker .btn{width:100%;justify-content:center;min-height:46px;font-size:14px}
+.blocker .btn + .btn{margin-top:8px}
+.blocker small{position:absolute;bottom:22px;font:500 10px/1 var(--mono);letter-spacing:.12em;color:var(--ink-3);text-transform:uppercase}
+@media (max-width:860px){
+  .trap{height:300vh}
+  .trap-stage .wrap{grid-template-columns:1fr;gap:28px;justify-items:center;text-align:center}
+  .phone{width:min(230px,58vw);order:-1}
+  .step h2{font-size:34px;margin-bottom:10px}
+  .step .lede{font-size:15px;margin-inline:auto}
+  .step .n{margin-bottom:12px}
+  .progress{justify-content:center;margin-top:22px}
+  .blocker{padding:18px}
+  .blocker .ring{width:64px;height:64px;margin-bottom:16px}
+  .blocker h3{font-size:26px}
+  .blocker p{font-size:12px;margin-bottom:16px}
+  .blocker .btn{min-height:38px;font-size:12px}
+  .blocker small{display:none}
+}
+
+/* ---------- Loop ---------- */
+.loop{display:grid;grid-template-columns:repeat(4,1fr);border:1px solid var(--line);border-radius:var(--r-l);overflow:hidden;background:var(--s-low)}
+.loop article{padding:34px 28px 38px;position:relative;border-right:1px solid var(--line)}
+.loop article:last-child{border-right:0}
+.loop .idx{font:500 12px/1 var(--mono);letter-spacing:.14em;color:var(--ink-3);display:flex;justify-content:space-between}
+.loop .idx span:last-child{color:var(--c)}
+.loop .glyph{height:120px;display:grid;place-items:center;margin:28px 0 22px}
+.loop .glyph svg{width:96px;height:96px}
+.loop h3{font:400 38px/1 var(--serif);margin-bottom:12px}
+.loop p{font-size:15px;color:var(--ink-2)}
+.loop article:not(:last-child)::after{content:"→";position:absolute;right:-12px;top:50%;width:24px;height:24px;display:grid;place-items:center;background:var(--bg);border:1px solid var(--line);border-radius:50%;font-size:12px;color:var(--ink-3);z-index:1;transform:translateY(-50%)}
+@media (max-width:960px){.loop{grid-template-columns:1fr 1fr}.loop article:nth-child(2){border-right:0}.loop article:nth-child(-n+2){border-bottom:1px solid var(--line)}.loop article::after{display:none}}
+@media (max-width:560px){.loop{grid-template-columns:1fr}.loop article{border-right:0;border-bottom:1px solid var(--line)}}
+
+/* ---------- Statement ---------- */
+.statement{padding:clamp(80px,10vw,140px) 0;text-align:center}
+.statement blockquote{font:400 clamp(34px,4.6vw,64px)/1.1 var(--serif);letter-spacing:-.015em;max-width:20ch;margin:0 auto}
+.statement blockquote em{color:var(--primary)}
+.statement cite{display:block;margin-top:30px;font:500 12px/1 var(--mono);letter-spacing:.16em;color:var(--ink-3);font-style:normal;text-transform:uppercase}
+
+/* ---------- Ladder ---------- */
+.ladder{list-style:none;padding:0;border-top:1px solid var(--line)}
+.ladder li{display:grid;grid-template-columns:70px 1.1fr 1.6fr 180px;gap:28px;align-items:center;padding:28px 0;border-bottom:1px solid var(--line);transition:background .3s}
+.ladder li:hover{background:linear-gradient(90deg,transparent,var(--s-low) 20%,var(--s-low) 80%,transparent)}
+.ladder .no{font:500 13px/1 var(--mono);color:var(--ink-3);letter-spacing:.08em}
+.ladder h3{font:400 clamp(30px,3vw,40px)/1 var(--serif)}
+.ladder h3 small{display:block;font:500 11px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);margin-top:10px}
+.ladder p{color:var(--ink-2);font-size:15px}
+.firm{display:flex;gap:4px;justify-content:flex-end}
+.firm i{width:14px;height:28px;border-radius:3px;background:var(--s-high)}
+.firm i.f{background:var(--primary)}
+.ladder li:last-child .firm i.f{background:var(--error)}
+.ladder-axis{display:flex;justify-content:space-between;margin-top:18px;font:500 11px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3)}
+@media (max-width:860px){.ladder li{grid-template-columns:44px 1fr;gap:12px 16px}.ladder p,.firm{grid-column:2}.firm{justify-content:flex-start}.firm i{height:14px;width:20px}}
+
+/* ---------- Everywhere ---------- */
+.devices{display:grid;grid-template-columns:1fr auto 1fr;gap:0;align-items:center;position:relative}
+.dev-col{display:grid;gap:20px}
+.dev{background:var(--s-low);border:1px solid var(--line);border-radius:var(--r-l);padding:24px 26px;display:grid;grid-template-columns:auto 1fr auto;gap:18px;align-items:center}
+.dev svg{width:28px;height:28px;color:var(--ink-2)}
+.dev h3{font-size:16px;font-weight:600}
+.dev p{font-size:13px;color:var(--ink-2);line-height:1.5}
+.dev .bal{font:400 22px/1 var(--mono);color:var(--primary);letter-spacing:-.02em}
+.hub{width:min(340px,40vw);aspect-ratio:1;display:grid;place-items:center;position:relative;margin:0 -10px}
+.hub svg.wires{position:absolute;inset:0;width:100%;height:100%;overflow:visible}
+.hub-core{width:62%;aspect-ratio:1;border-radius:50%;background:radial-gradient(circle at 50% 35%,var(--s-high),var(--s-lowest));border:1px solid var(--line);display:grid;place-content:center;text-align:center;box-shadow:0 0 0 14px color-mix(in srgb,var(--s-low) 60%,transparent),0 0 0 15px var(--line);position:relative;z-index:1}
+.hub-core .k{font:500 10px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3)}
+.hub-core .v{font:400 44px/1 var(--mono);letter-spacing:-.04em;margin:10px 0 8px}
+.hub-core .s{font-size:12px;color:var(--ink-2)}
+.wire{stroke:var(--line);stroke-width:1;fill:none}
+.pulse-dot{fill:var(--primary)}
+@media (max-width:960px){.devices{grid-template-columns:1fr}.hub{margin:20px auto;width:260px;order:-1}.hub svg.wires{display:none}}
+
+/* ---------- CTA ---------- */
+.cta{padding:clamp(100px,12vw,170px) 0;text-align:center;position:relative;overflow:hidden}
+.cta::before{content:"";position:absolute;left:50%;top:50%;width:900px;height:900px;transform:translate(-50%,-50%);border-radius:50%;background:radial-gradient(closest-side,color-mix(in srgb,var(--primary) 12%,transparent),transparent);pointer-events:none}
+.cta h2{font-size:clamp(64px,10vw,150px);line-height:.9;letter-spacing:-.03em}
+.cta .lede{margin:28px auto 40px;text-align:center}
+.signup{display:flex;gap:8px;max-width:460px;margin:0 auto;padding:6px;border:1px solid var(--line);border-radius:calc(var(--r-m) + 6px);background:var(--s-low)}
+.signup input{flex:1;min-width:0;background:transparent;border:0;padding:0 14px;font-size:15px}
+.signup input:focus{outline:none}
+.signup:focus-within{border-color:var(--ink-3)}
+.signup-msg{margin-top:16px;font:500 12px/1.4 var(--mono);letter-spacing:.06em;color:var(--ink-3);min-height:1.4em}
+.platforms{display:flex;justify-content:center;gap:10px;flex-wrap:wrap;margin-top:44px}
+
+footer{border-top:1px solid var(--line);padding:36px 0 48px;color:var(--ink-3);font-size:13px}
+footer .wrap{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;align-items:center}
+
+/* ---------- Reveal (progressive enhancement, decorative only) ---------- */
+@supports ((animation-timeline: view()) and (animation-range: 0% 100%)){
+  @media (prefers-reduced-motion: no-preference){
+    .reveal{animation:rise linear both;animation-timeline:view();animation-range:entry 0% cover 28%}
+    @keyframes rise{from{opacity:0;transform:translateY(40px)}}
+  }
+}
+@media (prefers-reduced-motion: reduce){
+  html{scroll-behavior:auto}
+  .ticker-track{animation:none}
+  .dial .arc,.blocker,.step{transition:none}
+  .dial-center .live::before{animation:none}
+}
+</style>
+</head>
+<body>
+
+<!-- Reusable logo: a balance ring with a padlock shackle -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="logo" viewBox="0 0 32 32">
+    <path d="M10.5 11.5V8.5a5.5 5.5 0 0 1 11 0v3" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+    <circle cx="16" cy="20" r="9" fill="none" stroke="#353235" stroke-width="3"/>
+    <circle cx="16" cy="20" r="9" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" pathLength="100" stroke-dasharray="68 100" transform="rotate(-90 16 20)"/>
+    <circle cx="16" cy="20" r="2" fill="currentColor"/>
+  </symbol>
+</svg>
+
+<nav class="nav" aria-label="Primary">
+  <div class="wrap">
+    <a class="brand" href="#top"><svg style="color:var(--primary)"><use href="#logo"/></svg>FocusLock</a>
+    <ul>
+      <li><a href="#exchange">The rate</a></li>
+      <li><a href="#trap">The lock</a></li>
+      <li><a href="#ladder">Boundaries</a></li>
+      <li><a href="#everywhere">Everywhere</a></li>
+    </ul>
+    <a class="btn btn-primary" href="#join">Join the beta</a>
+  </div>
+</nav>
+
+<main id="top">
+
+<!-- HERO -->
+<section class="hero">
+  <div class="wrap">
+    <div>
+      <p class="eyebrow">Attention, on a budget</p>
+      <h1><span class="line">Earn your</span><span class="line"><em>scroll.</em></span></h1>
+      <p class="lede">FocusLock turns focused work into leisure time. An hour of focus buys fifteen minutes of feed. Spend it however you like&nbsp;— and when it's gone, the door locks. On your phone, your PC and your browser.</p>
+      <div class="hero-ctas">
+        <a class="btn btn-primary" href="#join">Join the beta
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 8h10M9 4l4 4-4 4"/></svg></a>
+        <a class="btn btn-ghost" href="#trap">See the lock</a>
+      </div>
+      <div class="hero-meta">
+        <span class="chip"><i></i>Android</span>
+        <span class="chip"><i></i>Windows</span>
+        <span class="chip"><i></i>Chrome</span>
+        <span class="chip">Works with TickTick</span>
+      </div>
+    </div>
+
+    <div class="dial" aria-label="Example balance: 58 minutes focused today, 14 minutes of leisure left">
+      <svg viewBox="0 0 400 400" aria-hidden="true">
+        <g class="ticks" id="ticks"></g>
+        <circle cx="200" cy="200" r="160" fill="none" stroke="#1b1b1e" stroke-width="16"/>
+        <circle cx="200" cy="200" r="132" fill="none" stroke="#1b1b1e" stroke-width="16"/>
+        <circle class="arc" id="arcFocus" cx="200" cy="200" r="160" stroke="var(--tertiary)" stroke-width="16" pathLength="100" stroke-dasharray="100" stroke-dashoffset="100"/>
+        <circle class="arc" id="arcLeisure" cx="200" cy="200" r="132" stroke="var(--primary)" stroke-width="16" pathLength="100" stroke-dasharray="100" stroke-dashoffset="100"/>
+        <circle cx="200" cy="200" r="108" fill="none" stroke="#232326" stroke-width="1" stroke-dasharray="2 6"/>
+      </svg>
+      <div class="dial-center">
+        <span class="k">Leisure left</span>
+        <span class="v" id="heroBal">14:32</span>
+        <span class="s">earned from <b class="mono" style="font-weight:500">58m</b> focus today</span>
+        <span class="live">metering · feed open</span>
+      </div>
+      <div class="legend l1"><span class="sw" style="background:var(--tertiary)"></span>Focus<b class="mono">58 / 120m</b></div>
+      <div class="legend l2"><span class="sw" style="background:var(--primary)"></span>Leisure<b class="mono">14.5 / 30m</b></div>
+    </div>
+  </div>
+</section>
+
+<div class="ticker" aria-hidden="true">
+  <div class="ticker-track">
+    <span><b>60 min</b> focus = <b>15 min</b> feed</span>
+    <span>credit counted to the <b>second</b></span>
+    <span>unspent balance <b>carries over</b></span>
+    <span><b>one</b> balance · <b>three</b> screens</span>
+    <span>strict commitments up to <b>30 days</b></span>
+    <span>focus synced from <b>TickTick</b></span>
+    <span><b>60 min</b> focus = <b>15 min</b> feed</span>
+    <span>credit counted to the <b>second</b></span>
+    <span>unspent balance <b>carries over</b></span>
+    <span><b>one</b> balance · <b>three</b> screens</span>
+    <span>strict commitments up to <b>30 days</b></span>
+    <span>focus synced from <b>TickTick</b></span>
+  </div>
+</div>
+
+<!-- EXCHANGE -->
+<section class="sec" id="exchange">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div>
+        <p class="eyebrow">01 — The exchange rate</p>
+        <h2>Not a timer.<br>An <em>economy.</em></h2>
+      </div>
+      <p class="lede">Screen-time limits ask for willpower at the worst possible moment. FocusLock moves the decision upstream: you set a rate once, then every focus session pays into a balance you're free to spend.</p>
+    </div>
+
+    <div class="exchange reveal">
+      <div class="panel ex-controls">
+        <label for="work">Focus logged today <output id="workOut" class="mono">1h 00m</output></label>
+        <input id="work" type="range" min="0" max="240" step="5" value="60" aria-describedby="workScale">
+        <div class="scale" id="workScale"><span>0</span><span>1h</span><span>2h</span><span>3h</span><span>4h</span></div>
+
+        <div class="ratios">
+          <p id="rateLabel">Your rate — focus : leisure</p>
+          <div class="seg" role="group" aria-labelledby="rateLabel">
+            <button type="button" data-r="2" aria-pressed="false">2:1</button>
+            <button type="button" data-r="3" aria-pressed="false">3:1</button>
+            <button type="button" data-r="4" aria-pressed="true">4:1</button>
+            <button type="button" data-r="6" aria-pressed="false">6:1</button>
+          </div>
+          <p class="seg-note">4:1 is the default. Make it stricter when exams are close.</p>
+        </div>
+
+        <div class="bars" aria-hidden="true">
+          <div class="bar">Focus<div><span id="barW" style="background:var(--tertiary)"></span></div></div>
+          <div class="bar">Leisure<div><span id="barL" style="background:var(--primary)"></span></div></div>
+        </div>
+      </div>
+
+      <div class="receipt" aria-live="polite">
+        <h3>Statement</h3>
+        <p class="sub" id="rDate">Today</p>
+        <div class="row"><span>Focus sessions</span><span id="rWork">60m 00s</span></div>
+        <div class="row"><span>Rate</span><span id="rRate">4 : 1</span></div>
+        <div class="row"><span>Carried over</span><span>2m 10s</span></div>
+        <div class="row"><span>Spent so far</span><span>− 0m 00s</span></div>
+        <div class="total"><span class="k">Leisure<br>available</span><span class="v" id="rTotal">17m</span></div>
+        <p class="foot">Focus is imported from completed TickTick pomodoro and stopwatch sessions. Each session is credited once, however many times it syncs.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- THE TRAP: signature scroll sequence -->
+<section class="trap" id="trap" aria-label="How the lock works">
+  <div class="trap-stage">
+    <div class="wrap">
+      <div>
+        <div class="steps">
+          <div class="step on" data-step="0">
+            <span class="n">02 — THE LOCK · i</span>
+            <h2>Open the feed.<br><em>Six minutes</em> left.</h2>
+            <p class="lede">You've earned it. Nothing nags you, nothing guilts you. The apps you chose just start drawing from your balance.</p>
+          </div>
+          <div class="step" data-step="1">
+            <span class="n">02 — THE LOCK · ii</span>
+            <h2>Every second<br>is <em>metered.</em></h2>
+            <p class="lede">Keep scrolling — this page is spending it right now. The balance only moves while a blocked app or site is actually in front of you.</p>
+          </div>
+          <div class="step" data-step="2">
+            <span class="n">02 — THE LOCK · iii</span>
+            <h2>At zero,<br>the door <em>locks.</em></h2>
+            <p class="lede">No “ignore for 15 minutes”. A full-screen lock tells you exactly how much focus buys the next stretch — and sends you back to work.</p>
+          </div>
+        </div>
+        <div class="progress" aria-hidden="true"><i id="pg0"></i><i id="pg1"></i><i id="pg2"></i></div>
+      </div>
+
+      <div class="phone" aria-hidden="true">
+        <div class="screen">
+          <div class="status"><span id="clock">9:41</span><span>●●● ▮</span></div>
+          <div class="app-bar">feed<span><i></i><i></i></span></div>
+          <div class="feed" id="feed"></div>
+          <div class="meter" id="meter">
+            <svg viewBox="0 0 32 32"><use href="#logo" style="color:var(--primary)"/></svg>
+            <span id="meterTxt">06:00 left</span>
+          </div>
+          <div class="blocker" id="blocker">
+            <svg class="ring" viewBox="0 0 32 32" style="color:var(--primary)"><use href="#logo"/></svg>
+            <h3>Leisure spent.</h3>
+            <p>Focus for <b>24 minutes</b> to earn <b>6 more</b>.<br>Your feed will be right here.</p>
+            <span class="btn btn-primary">Start focus in TickTick</span>
+            <span class="btn btn-ghost">Leave</span>
+            <small>balance 00:00 · synced</small>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- LOOP -->
+<section class="sec" id="loop">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div>
+        <p class="eyebrow">03 — The loop</p>
+        <h2>Work. Earn.<br>Spend. <em>Lock.</em></h2>
+      </div>
+      <p class="lede">Four verbs, one rule. Everything else in FocusLock — limits, schedules, commitments — exists to keep this loop honest.</p>
+    </div>
+
+    <div class="loop reveal">
+      <article style="--c:var(--tertiary)">
+        <div class="idx"><span>01</span><span>● focus</span></div>
+        <div class="glyph"><svg viewBox="0 0 96 96" fill="none" stroke-width="2"><circle cx="48" cy="48" r="38" stroke="#2d2d31"/><circle cx="48" cy="48" r="38" stroke="var(--tertiary)" stroke-linecap="round" pathLength="100" stroke-dasharray="62 100" transform="rotate(-90 48 48)"/><path d="M48 26v22l14 8" stroke="var(--ink)"/></svg></div>
+        <h3>Work</h3>
+        <p>Run a pomodoro or stopwatch in TickTick. Completed sessions sync in automatically — no logging, no honour system.</p>
+      </article>
+      <article style="--c:var(--tertiary)">
+        <div class="idx"><span>02</span><span>● credit</span></div>
+        <div class="glyph"><svg viewBox="0 0 96 96" fill="none" stroke-width="2"><rect x="14" y="58" width="14" height="24" rx="3" stroke="#2d2d31"/><rect x="34" y="46" width="14" height="36" rx="3" stroke="#2d2d31"/><rect x="54" y="32" width="14" height="50" rx="3" stroke="var(--tertiary)"/><rect x="74" y="16" width="8" height="66" rx="3" fill="var(--tertiary)" stroke="none"/></svg></div>
+        <h3>Earn</h3>
+        <p>Focus converts to leisure at your rate, tracked to the second. Unspent balance rolls into tomorrow.</p>
+      </article>
+      <article style="--c:var(--primary)">
+        <div class="idx"><span>03</span><span>● leisure</span></div>
+        <div class="glyph"><svg viewBox="0 0 96 96" fill="none" stroke-width="2"><rect x="28" y="10" width="40" height="76" rx="9" stroke="var(--ink)"/><rect x="34" y="24" width="28" height="18" rx="3" stroke="var(--primary)"/><rect x="34" y="48" width="28" height="18" rx="3" stroke="#2d2d31"/><path d="M42 78h12" stroke="var(--ink-3)"/></svg></div>
+        <h3>Spend</h3>
+        <p>Only the apps and sites you pick draw from it. Your maps, messages and music stay untouched.</p>
+      </article>
+      <article style="--c:var(--primary)">
+        <div class="idx"><span>04</span><span>● boundary</span></div>
+        <div class="glyph"><svg viewBox="0 0 96 96" fill="none" stroke-width="2.4"><path d="M32 42V30a16 16 0 0 1 32 0v12" stroke="var(--ink)" stroke-linecap="round"/><rect x="22" y="42" width="52" height="40" rx="10" stroke="var(--primary)"/><circle cx="48" cy="60" r="4" fill="var(--primary)" stroke="none"/><path d="M48 64v8" stroke="var(--primary)"/></svg></div>
+        <h3>Lock</h3>
+        <p>At zero, everything you chose locks at once — phone, desktop and browser — until you've earned more.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<section class="statement">
+  <div class="wrap reveal">
+    <blockquote>The feed was designed to have no bottom. <em>So we gave it a price.</em></blockquote>
+    <cite>— the whole idea</cite>
+  </div>
+</section>
+
+<!-- LADDER -->
+<section class="sec" id="ladder" style="padding-top:40px">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div>
+        <p class="eyebrow">04 — Boundaries</p>
+        <h2>Choose how hard<br>it <em>holds.</em></h2>
+      </div>
+      <p class="lede">Some days a gentle budget is enough. Some weeks you need a wall you can't talk your way past. Climb only as far as you need.</p>
+    </div>
+
+    <ol class="ladder reveal">
+      <li>
+        <span class="no">01</span>
+        <h3>Balance<small>always on</small></h3>
+        <p>Spend what you earned. When it's gone, chosen apps and sites lock until you focus again.</p>
+        <span class="firm" aria-label="Firmness 1 of 6"><i class="f"></i><i></i><i></i><i></i><i></i><i></i></span>
+      </li>
+      <li>
+        <span class="no">02</span>
+        <h3>Limits<small>per app · per site</small></h3>
+        <p>A daily cap on the worst offenders — even when you have balance to burn.</p>
+        <span class="firm" aria-label="Firmness 2 of 6"><i class="f"></i><i class="f"></i><i></i><i></i><i></i><i></i></span>
+      </li>
+      <li>
+        <span class="no">03</span>
+        <h3>Schedules<small>recurring windows</small></h3>
+        <p>Work hours, bedtime, Sunday mornings. Windows can wrap past midnight.</p>
+        <span class="firm" aria-label="Firmness 3 of 6"><i class="f"></i><i class="f"></i><i class="f"></i><i></i><i></i><i></i></span>
+      </li>
+      <li>
+        <span class="no">04</span>
+        <h3>Frog<small>mornings</small></h3>
+        <p>Eat the frog first. From wake time, distractions stay shut until your one priority task has its focus time.</p>
+        <span class="firm" aria-label="Firmness 4 of 6"><i class="f"></i><i class="f"></i><i class="f"></i><i class="f"></i><i></i><i></i></span>
+      </li>
+      <li>
+        <span class="no">05</span>
+        <h3>Strict<small>up to 30 days</small></h3>
+        <p>A commitment that can only be extended, never shortened. Early release needs a trusted person to approve it by email.</p>
+        <span class="firm" aria-label="Firmness 5 of 6"><i class="f"></i><i class="f"></i><i class="f"></i><i class="f"></i><i class="f"></i><i></i></span>
+      </li>
+      <li>
+        <span class="no">06</span>
+        <h3>Nuke<small>break glass</small></h3>
+        <p>Everything, everywhere, locked now. Coming back takes a ten-minute breathing cooldown and a concrete plan.</p>
+        <span class="firm" aria-label="Firmness 6 of 6"><i class="f"></i><i class="f"></i><i class="f"></i><i class="f"></i><i class="f"></i><i class="f"></i></span>
+      </li>
+    </ol>
+    <div class="ladder-axis" aria-hidden="true"><span>↑ nudge</span><span>wall ↓</span></div>
+  </div>
+</section>
+
+<!-- EVERYWHERE -->
+<section class="sec" id="everywhere">
+  <div class="wrap">
+    <div class="sec-head reveal">
+      <div>
+        <p class="eyebrow">05 — Everywhere</p>
+        <h2>One balance.<br><em>Every</em> screen.</h2>
+      </div>
+      <p class="lede">Closing the phone and opening the laptop isn't a loophole. Sign in once and your balance, block lists and focus history follow you across devices.</p>
+    </div>
+
+    <div class="devices reveal">
+      <div class="dev-col">
+        <div class="dev">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="6" y="2" width="12" height="20" rx="3"/><path d="M10 18h4"/></svg>
+          <div><h3>Android</h3><p>Locks apps and in-browser sites the moment they open.</p></div>
+          <span class="bal" data-bal>14:32</span>
+        </div>
+        <div class="dev">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+          <div><h3>Windows</h3><p>Tracks desktop apps and raises a lock you can't close.</p></div>
+          <span class="bal" data-bal>14:32</span>
+        </div>
+      </div>
+
+      <div class="hub" aria-hidden="true">
+        <svg class="wires" viewBox="0 0 340 340">
+          <path class="wire" id="w1" d="M-20 90 C 80 90, 90 170, 170 170"/>
+          <path class="wire" id="w2" d="M-20 250 C 80 250, 90 170, 170 170"/>
+          <path class="wire" id="w3" d="M360 170 L 170 170"/>
+          <circle class="pulse-dot" r="3"><animateMotion dur="2.8s" repeatCount="indefinite"><mpath href="#w1"/></animateMotion></circle>
+          <circle class="pulse-dot" r="3"><animateMotion dur="3.4s" repeatCount="indefinite" begin="-1s"><mpath href="#w2"/></animateMotion></circle>
+          <circle class="pulse-dot" r="3"><animateMotion dur="2.2s" repeatCount="indefinite" begin="-.5s"><mpath href="#w3"/></animateMotion></circle>
+        </svg>
+        <div class="hub-core">
+          <span class="k">Shared balance</span>
+          <span class="v" data-bal>14:32</span>
+          <span class="s">one account</span>
+        </div>
+      </div>
+
+      <div class="dev-col">
+        <div class="dev">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5"/><path d="M12 8.5h8.5M9 13.8 4.8 6.5M15 13.8 10.8 21"/></svg>
+          <div><h3>Chrome</h3><p>Meters the active tab, enforces site limits and schedules.</p></div>
+          <span class="bal" data-bal>14:32</span>
+        </div>
+        <div class="dev">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="3" width="16" height="18" rx="3"/><path d="m8.5 12 2.5 2.5 4.5-5"/></svg>
+          <div><h3>TickTick</h3><p>Where the work happens. Focus sessions flow in as credit.</p></div>
+          <span class="bal" style="color:var(--tertiary)">+58m</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- CTA -->
+<section class="cta" id="join">
+  <div class="wrap reveal">
+    <p class="eyebrow" style="justify-content:center">Private beta</p>
+    <h2 style="margin-top:22px">Earn your<br><em>scroll.</em></h2>
+    <p class="lede">FocusLock is in pre-1.0 testing on Android, Windows and Chrome. Leave your email and we'll send an invite when the next beta round opens.</p>
+    <form class="signup" id="signup">
+      <label for="email" class="sr" style="position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)">Email address</label>
+      <input id="email" type="email" name="email" placeholder="you@domain.com" autocomplete="email" required>
+      <button class="btn btn-primary" type="submit">Request invite</button>
+    </form>
+    <p class="signup-msg" id="signupMsg" role="status"></p>
+    <div class="platforms">
+      <span class="chip"><i></i>Android 8+</span>
+      <span class="chip"><i></i>Windows 10 / 11</span>
+      <span class="chip"><i></i>Chrome extension</span>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <a class="brand" href="#top"><svg style="color:var(--primary)"><use href="#logo"/></svg>FocusLock</a>
+    <span class="mono">© 2026 · work → earn → spend → lock</span>
+  </div>
+</footer>
+
+<script>
+(() => {
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const $ = s => document.querySelector(s);
+  const pad = n => String(n).padStart(2, '0');
+  const mmss = s => `${pad(Math.floor(s / 60))}:${pad(Math.floor(s % 60))}`;
+
+  /* ---------- Hero dial ---------- */
+  const ticks = $('#ticks');
+  let t = '';
+  for (let i = 0; i < 120; i++) {
+    const a = (i / 120) * Math.PI * 2, major = i % 10 === 0;
+    const r1 = major ? 180 : 184, r2 = 194;
+    t += `<line x1="${200 + r1 * Math.sin(a)}" y1="${200 - r1 * Math.cos(a)}" x2="${200 + r2 * Math.sin(a)}" y2="${200 - r2 * Math.cos(a)}" stroke="${major ? '#817977' : '#353235'}" stroke-width="${major ? 1.6 : 1}"/>`;
+  }
+  ticks.innerHTML = t;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    $('#arcFocus').style.strokeDashoffset = 100 - 48;   // 58 / 120 min
+    $('#arcLeisure').style.strokeDashoffset = 100 - 48; // 14.5 / 30 min
+  }));
+
+  // Shared demo balance: drains live, mirrored on every "device"
+  let bal = 14 * 60 + 32;
+  const balEls = [$('#heroBal'), ...document.querySelectorAll('[data-bal]')];
+  const paint = () => balEls.forEach(el => el.textContent = mmss(bal));
+  if (!reduce) setInterval(() => { bal = bal > 0 ? bal - 1 : 14 * 60 + 32; paint(); }, 1000);
+
+  /* ---------- Exchange calculator ---------- */
+  const work = $('#work'), segBtns = document.querySelectorAll('.seg button');
+  let ratio = 4;
+  const fmtH = m => `${Math.floor(m / 60)}h ${pad(m % 60)}m`;
+  const updateEx = () => {
+    const w = +work.value, earned = w / ratio, total = earned + 2 + 10 / 60;
+    work.style.setProperty('--p', (w / 240 * 100) + '%');
+    $('#workOut').textContent = fmtH(w);
+    $('#rWork').textContent = `${w}m 00s`;
+    $('#rRate').textContent = `${ratio} : 1`;
+    $('#rTotal').textContent = Math.floor(total) + 'm';
+    $('#barW').style.width = (w / 240 * 100) + '%';
+    $('#barL').style.width = (total / 240 * 100) + '%';
+  };
+  work.addEventListener('input', updateEx);
+  segBtns.forEach(b => b.addEventListener('click', () => {
+    segBtns.forEach(x => x.setAttribute('aria-pressed', x === b));
+    ratio = +b.dataset.r; updateEx();
+  }));
+  $('#rDate').textContent = new Date().toLocaleDateString(undefined, { weekday: 'long', day: 'numeric', month: 'long' });
+  updateEx();
+
+  /* ---------- The trap ---------- */
+  const tones = [
+    ['#e9c46a', '#f4a261'], ['#a8dadc', '#457b9d'], ['#ffb4a2', '#e5989b'], ['#cdb4db', '#ffafcc'],
+    ['#90be6d', '#43aa8b'], ['#f9c74f', '#f8961e'], ['#bde0fe', '#a2d2ff'], ['#ffcad4', '#f4acb7'],
+    ['#b8f2e6', '#5e6472'], ['#ffd6a5', '#fdffb6']
+  ];
+  const handles = ['soft.light', 'daily.drift', 'cafe_notes', 'nomad.frames', 'quiet.loops', 'golden.hr', 'tiny.rooms', 'morning.ritual', 'film.grain', 'citywalks'];
+  const captions = ['you won\u2019t believe #4', 'one more and then bed', 'saved for later (never)', 'part 7 of 12', 'wait for it\u2026', 'pov: it\u2019s 1 a.m.'];
+  const feed = $('#feed');
+  let fh = '';
+  for (let i = 0; i < 28; i++) {
+    const [a, b] = tones[i % tones.length], ang = (i * 47) % 360;
+    fh += `<div class="post"><header><i style="--a:${b}"></i>${handles[i % handles.length]}</header>
+      <div class="img" style="--g:linear-gradient(${ang}deg,${a},${b})"></div>
+      <div class="acts"><i></i><i></i><i></i></div>
+      <p><b>${handles[(i + 3) % handles.length]}</b> ${captions[i % captions.length]}</p></div>`;
+  }
+  feed.innerHTML = fh;
+
+  const trap = $('#trap'), steps = document.querySelectorAll('.step'), pgs = [$('#pg0'), $('#pg1'), $('#pg2')];
+  const meter = $('#meter'), meterTxt = $('#meterTxt'), blocker = $('#blocker');
+  const START = 360; let lastStep = -1;
+  const clamp = (v, a = 0, b = 1) => Math.min(b, Math.max(a, v));
+
+  const onScroll = () => {
+    const r = trap.getBoundingClientRect();
+    const p = clamp(-r.top / (r.height - innerHeight));
+    const drain = clamp((p - .04) / .66);           // 0 → 1 over the first ~70%
+    const secs = Math.round(START * (1 - drain));
+    const maxY = feed.scrollHeight - feed.parentElement.clientHeight;
+    feed.style.transform = `translateY(${-Math.min(drain, 1) * maxY * .9}px)`;
+    feed.style.filter = `saturate(${0.15 + 0.85 * (1 - drain)})`;
+    meterTxt.textContent = secs > 0 ? `${mmss(secs)} left` : 'balance spent';
+    meter.classList.toggle('low', secs > 0 && secs <= 60);
+    meter.classList.toggle('zero', secs === 0);
+    blocker.classList.toggle('on', p > .74);
+
+    const step = p < .3 ? 0 : p < .72 ? 1 : 2;
+    if (step !== lastStep) { steps.forEach((s, i) => s.classList.toggle('on', i === step)); lastStep = step; }
+    const bounds = [[0, .3], [.3, .72], [.72, .95]];
+    pgs.forEach((g, i) => g.style.setProperty('--f', clamp((p - bounds[i][0]) / (bounds[i][1] - bounds[i][0]))));
+
+    // Turn the hero dial like a combination lock as the page moves
+    if (!reduce) ticks.style.transform = `rotate(${scrollY * 0.06}deg)`;
+  };
+  let raf = 0;
+  addEventListener('scroll', () => { if (!raf) raf = requestAnimationFrame(() => { raf = 0; onScroll(); }); }, { passive: true });
+  addEventListener('resize', onScroll);
+  onScroll();
+
+  const d = new Date(); $('#clock').textContent = `${d.getHours() % 12 || 12}:${pad(d.getMinutes())}`;
+
+  /* ---------- Signup (placeholder — no backend wired) ---------- */
+  $('#signup').addEventListener('submit', e => {
+    e.preventDefault();
+    $('#signupMsg').textContent = 'Noted. Invite requests aren\u2019t connected to a backend yet.';
+  });
+})();
+</script>
+</body>
+</html>

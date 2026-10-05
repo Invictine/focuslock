@@ -106,7 +106,8 @@
 
   // ---- tabs ----
   function selectTab(tab) {
-    const titles = { stats: 'Focus', sched: 'Focus', blocks: 'Boundaries', permalock: 'Permalock', settings: 'Settings', account: 'Account' };
+    if (tab === 'permalock') { selectTab('blocks'); showBoundaryRoute('permalock'); return; }
+    const titles = { stats: 'Focus', sched: 'Focus', blocks: 'Boundaries', strict: 'Strict', settings: 'Settings', account: 'Account' };
     if (!titles[tab]) tab = 'stats';
     document.querySelectorAll('section.tab').forEach(section => section.classList.toggle('on', section.id === 'tab-' + tab));
     document.querySelectorAll('button[data-tab]').forEach(button => {
@@ -117,6 +118,7 @@
     });
     $('pageTitle').textContent = titles[tab];
     $('focusViews').hidden = tab !== 'stats' && tab !== 'sched';
+    if (tab === 'blocks') showBoundaryRoute('hub');
     if (tab === 'stats' || tab === 'sched' || tab === 'blocks') void refreshFocus();
     if (tab === 'settings' || tab === 'account') void refreshProtection();
   }
@@ -126,6 +128,7 @@
   $('focusConnect')?.addEventListener('click', () => selectTab('account'));
   const query = new URLSearchParams(location.search);
   selectTab(query.has('account') ? 'account' : query.get('tab') || 'stats');
+  if (query.has('permalock')) { selectTab('blocks'); showBoundaryRoute('permalock'); }
 
   // ---- block lists ----
   function lockInfo(l) {
@@ -157,7 +160,7 @@
         </summary>
         <div class="list-editor-body">
         <div class="grid2">
-          <div><label>Sites / patterns (one per line)</label><textarea data-f="sites" ${locked ? 'disabled' : ''}>${esc(l.sites.join('\n'))}</textarea></div>
+          <div><label>Sites / patterns (one per line)</label><textarea data-f="sites" ${locked ? 'disabled' : ''}>${esc(l.sites.filter(site => !isPermanentSite(site, state)).join('\n'))}</textarea></div>
           <div><label>Exceptions — never block (one per line)</label><textarea data-f="exceptions" ${locked ? 'disabled' : ''}>${esc((l.exceptions || []).join('\n'))}</textarea></div>
         </div>
         <div class="grid2">
@@ -743,12 +746,12 @@
     const focusPct = (workMin / 120) * 100;
     const taskPct = (taskCount / 7) * 100;
     const signedOut = focusError === 'signed-out';
-    for (const id of ['cloudWorkCard', 'cloudTimerCard', 'cloudBalanceCard', 'cloudGraphCard', 'cloudBankCard', 'cloudRecentCard']) {
+    for (const id of ['cloudWorkCard', 'cloudBalanceCard', 'cloudGraphCard', 'cloudBankCard', 'cloudRecentCard']) {
       const card = $(id); if (card) card.hidden = signedOut;
     }
     $('focusConnectNotice').hidden = !signedOut;
 
-    $('focusRatioBadge').textContent = 'Work : scroll 1:' + ratio;
+    $('focusRatioBadge').textContent = 'Work : scroll ' + ratio + ':1';
     setRing('focusRing', focusPct);
     setRing('taskRing', taskPct);
     $('focusPct').textContent = Math.round(Math.min(100, focusPct)) + '%';
@@ -765,7 +768,7 @@
         ? 'Sign in to see your scroll bank.'
         : 'Scroll bank unavailable.';
     } else {
-      $('balanceCaption').textContent = fmtMinSec(balanceSec) + ' of leisure banked at 1:' + ratio + '.';
+      $('balanceCaption').textContent = fmtMinSec(balanceSec) + ' of leisure banked at ' + ratio + ':1.';
       $('leisureDetail').textContent = st
         ? 'Worked ' + Math.round(workMin) + ' min · scrolled ' + Math.round(scrollSec / 60) + ' min today.'
         : 'No focus state yet today.';
@@ -852,79 +855,97 @@
     finally { $('workLog').disabled = false; }
   };
 
-  function resetTimerUI(stateText) {
-    $('timerClock').textContent = fmtClock(timer.targetMin * 60);
-    $('timerState').textContent = stateText || 'Ready';
+  // The worker owns session identity, timing and upload retries. Closing this
+  // page cannot discard a running session or create a second credit event.
+  let timerSnapshot = null;
+  let pendingTimerSessions = 0;
+  function renderDurableTimer() {
+    const elapsed = self.FocusLockFeatures.elapsed(timerSnapshot);
+    $('timerClock').textContent = fmtClock(timerSnapshot ? timerSnapshot.targetMinutes * 60 - elapsed : timer.targetMin * 60);
+    $('timerState').textContent = timerSnapshot ? (elapsed < 300 ? 'In focus · credit starts at 5 min' : 'In focus · safe to close this page') : pendingTimerSessions ? 'Session saved · account upload pending' : 'Ready';
+    $('timerStart').disabled = Boolean(timerSnapshot);
+    $('timerFinish').disabled = !timerSnapshot;
+    document.querySelectorAll('#timerPresets button').forEach(b => {
+      b.disabled = Boolean(timerSnapshot);
+      b.classList.toggle('on', Number(b.dataset.min) === (timerSnapshot?.targetMinutes || timer.targetMin));
+    });
   }
-  function timerElapsedSec() { return timer.startTs ? Math.floor((Date.now() - timer.startTs) / 1000) : 0; }
-  function stopTimerHandle() { if (timer.handle) { clearInterval(timer.handle); timer.handle = null; } }
-  function tickTimer() {
-    const remaining = timer.targetMin * 60 - timerElapsedSec();
-    $('timerClock').textContent = fmtClock(Math.max(0, remaining));
-    $('timerState').textContent = timerElapsedSec() < 300 ? 'Credit starts at 5 min…' : 'In focus';
-    if (remaining <= 0) void finishTimer(true);
-  }
-  function setTimerPreset(min) {
-    if (timer.startTs) { toast('Finish the running timer first.'); return; }
-    timer.targetMin = min;
-    document.querySelectorAll('#timerPresets button').forEach(b => b.classList.toggle('on', Number(b.dataset.min) === min));
-    resetTimerUI('Ready');
-  }
-  function startTimer() {
-    if (timer.startTs) return;
-    timer.startTs = Date.now();
-    stopTimerHandle();
-    timer.handle = setInterval(tickTimer, 1000);
-    $('timerStart').disabled = true;
-    $('timerFinish').disabled = false;
-    tickTimer();
-  }
-  async function finishTimer(completed) {
-    if (!timer.startTs) return;
-    const elapsedMin = Math.floor(timerElapsedSec() / 60);
-    const target = timer.targetMin;
-    stopTimerHandle();
-    timer.startTs = 0;
-    $('timerStart').disabled = false;
-    $('timerFinish').disabled = true;
-    if (!completed && elapsedMin < 5) {
-      resetTimerUI('Ready');
-      toast('Sessions under 5 minutes do not earn credit.');
-      return;
-    }
-    const minutes = completed ? target : Math.min(elapsedMin, target);
-    const earned = earnedLeisure(minutes, effectiveRatio(), 0);
+  async function restoreTimer() {
     try {
-      const res = await chrome.runtime.sendMessage({
-        type: 'logFocusSession',
-        session: { title: 'Chrome focus ' + target + 'm', durationMinutes: minutes, timestamp: Date.now(), source: 'chrome-extension', earnedMinutesCredited: earned },
-      });
-      if (res && res.ok) toast('Focus session logged: ' + minutes + ' min · +' + earned + ' min leisure.');
-      else toast(res && res.signedIn === false ? 'Sign in to save focus sessions.' : 'Could not log the focus session.');
-    } catch (e) { toast('Could not log the focus session.'); }
-    resetTimerUI('Ready');
-    await refreshFocus();
+      const result = await chrome.runtime.sendMessage({ type: 'featureStatus' });
+      if (result?.ok) {
+        timerSnapshot = result.timer || null;
+        pendingTimerSessions = result.pendingSessions || 0;
+      }
+    } catch (_) { /* saved worker session stays intact */ }
+    renderDurableTimer();
   }
-  document.querySelectorAll('#timerPresets button').forEach(b => { b.onclick = () => setTimerPreset(Number(b.dataset.min)); });
-  $('timerStart').onclick = startTimer;
-  $('timerFinish').onclick = () => finishTimer(false);
-  resetTimerUI('Ready');
-
+  document.querySelectorAll('#timerPresets button').forEach(b => { b.onclick = () => {
+    if (timerSnapshot) return;
+    timer.targetMin = Number(b.dataset.min); renderDurableTimer();
+  }; });
+  $('timerStart').onclick = async () => {
+    $('timerStart').disabled = true;
+    try {
+      const result = await chrome.runtime.sendMessage({ type: 'focusTimerStart', minutes: timer.targetMin, ratio: effectiveRatio() });
+      if (!result?.ok) throw new Error(result?.error || 'Could not start the session.');
+      timerSnapshot = result.timer; renderDurableTimer();
+    } catch (error) { toast(error.message); await restoreTimer(); }
+  };
+  $('timerFinish').onclick = async () => {
+    $('timerFinish').disabled = true;
+    try {
+      const result = await chrome.runtime.sendMessage({ type: 'focusTimerFinish' });
+      if (!result?.ok) throw new Error(result?.error || 'Could not finish the session.');
+      toast(result.minutes < 5 ? 'Session finished. Credit starts at 5 minutes.'
+        : result.localOnly ? 'Session finished on Chrome. Sign in before starting to earn shared credit.'
+        : result.pending ? 'Session saved. Account upload is pending.' : 'Focus session saved to your account.');
+      timerSnapshot = null; renderDurableTimer(); await refreshFocus();
+    } catch (error) { toast(error.message); await restoreTimer(); }
+  };
+  chrome.storage.onChanged?.addListener((changes, area) => {
+    if (area === 'local' && changes[S.KEY]) {
+      timerSnapshot = self.FocusLockFeatures.timerState(changes[S.KEY].newValue?.focusTimer);
+      pendingTimerSessions = changes[S.KEY].newValue?.pendingFocusSessions?.length || 0;
+      renderDurableTimer();
+    }
+  });
+  setInterval(() => { if (!document.hidden && timerSnapshot) { renderDurableTimer(); if (self.FocusLockFeatures.elapsed(timerSnapshot) >= timerSnapshot.targetMinutes * 60) void restoreTimer(); } }, 1000);
+  void restoreTimer();
   // ---- Boundaries: applications (synced, read-only) + editable websites ----
   function syncedApps() { return dashboard && Array.isArray(dashboard.apps) ? dashboard.apps : []; }
   function syncedSites() { return dashboard && Array.isArray(dashboard.sites) ? dashboard.sites : []; }
   function syncedGroups() { return dashboard && Array.isArray(dashboard.groups) ? dashboard.groups : []; }
 
+  var boundaryRoute = 'hub';
+  function showBoundaryRoute(route) {
+    const known = ['sites', 'apps', 'groups', 'permalock', 'location'];
+    boundaryRoute = known.includes(route) ? route : 'hub';
+    const isHub = boundaryRoute === 'hub';
+    $('boundaryHub').hidden = !isHub;
+    $('boundaryCommitmentsTitle').hidden = !isHub;
+    $('permalockHubTile').hidden = !isHub;
+    $('boundaryLocationTitle').hidden = !isHub;
+    document.querySelector('#tab-blocks > [data-boundary-route="location"]')?.toggleAttribute('hidden', !isHub);
+    $('boundaryDetail').hidden = isHub;
+    document.querySelectorAll('#surface-apps,#surface-sites,#surface-groups,#surface-permalock,#surface-location').forEach(section => {
+      section.hidden = isHub || section.id !== 'surface-' + boundaryRoute;
+    });
+    const titles = { sites: 'Everyday websites', apps: 'Applications', groups: 'Groups', permalock: 'Permanent commitments', location: 'Blocking location' };
+    $('boundaryDetailTitle').textContent = titles[boundaryRoute] || 'Boundaries';
+  }
   function setSurface(surface) {
     boundarySurface = ['apps', 'groups'].includes(surface) ? surface : 'sites';
-    document.querySelectorAll('#boundaryTabs button').forEach(b => {
-      const on = b.dataset.surface === boundarySurface;
-      b.classList.toggle('on', on);
-      b.setAttribute('aria-selected', on ? 'true' : 'false');
-    });
-    if ($('surface-apps')) $('surface-apps').hidden = boundarySurface !== 'apps';
-    if ($('surface-sites')) $('surface-sites').hidden = boundarySurface !== 'sites';
-    if ($('surface-groups')) $('surface-groups').hidden = boundarySurface !== 'groups';
+    showBoundaryRoute(boundarySurface);
+  }
+  document.querySelectorAll('[data-boundary-route]').forEach(button => button.addEventListener('click', () => showBoundaryRoute(button.dataset.boundaryRoute)));
+  document.querySelectorAll('[data-boundary-back]').forEach(button => button.addEventListener('click', () => showBoundaryRoute('hub')));
+  showBoundaryRoute('hub');
+
+  function isPermanentSite(site, candidate = state) {
+    const text = String(site || '').trim().toLowerCase().replace(/^\*\./, '');
+    const host = M.domainOf(/^https?:\/\//i.test(text) ? text : 'https://' + text) || text.split(/[\/*]/)[0];
+    return permanentSitesOf(candidate).some(domain => host === domain || host.endsWith('.' + domain));
   }
 
   function categoryFor(site, list) {
@@ -938,12 +959,13 @@
     const rows = [];
     if (!state) return rows;
     if (dashboard) {
-      return syncedSites().map(s => ({ site: s.domain, listId: '__shared', listName: 'Shared boundaries', enabled: Boolean(s.isBlocked), category: s.category || 'Web' }))
+      return syncedSites().filter(s => !isPermanentSite(s.domain)).map(s => ({ site: s.domain, listId: '__shared', listName: 'Shared boundaries', enabled: Boolean(s.isBlocked), category: s.category || 'Web' }))
         .sort((a, b) => a.site.localeCompare(b.site));
     }
     for (const l of state.lists) {
       const locked = l.lockedUntil > Date.now();
       for (const site of l.sites) {
+        if (isPermanentSite(site)) continue;
         rows.push({ site, listId: l.id, listName: l.name, enabled: Boolean(l.enabled) && !locked, category: categoryFor(site, l) });
       }
     }
@@ -965,9 +987,10 @@
     for (const id of ['newList', 'addPreset', 'presetSocial', 'presetVideo', 'presetUnblock', 'addSite', 'createGroup']) {
       const control = $(id); if (control) control.disabled = strict;
     }
-    $('appCount').textContent = String(apps.filter(a => a.isBlocked).length);
-    $('siteCount').textContent = String(rows.length);
-    $('groupCount').textContent = String(groups.length);
+    $('appCount').textContent = apps.filter(a => a.isBlocked).length + ' blocked';
+    $('siteCount').textContent = rows.filter(row => row.enabled).length + ' blocked';
+    $('groupCount').textContent = groups.length + (groups.length === 1 ? ' group' : ' groups');
+    $('permaCount').textContent = permanentSitesOf(state).length + ' permanent';
     renderApps(apps);
     renderGroups(groups);
     renderSiteChips(rows);
@@ -1234,7 +1257,7 @@
   }
 
   document.querySelectorAll('#boundaryTabs button').forEach(b => { b.onclick = () => setSurface(b.dataset.surface); });
-  setSurface(boundarySurface);
+  showBoundaryRoute('hub');
 
   $('siteSearch').addEventListener('input', (e) => {
     clearTimeout(searchHandle);
@@ -1344,6 +1367,7 @@
     const err = $('addSiteError');
     const parsed = validateSite($('addSiteInput').value);
     if (parsed.error) { err.textContent = parsed.error; err.hidden = false; return; }
+    if (isPermanentSite(parsed.value)) { err.textContent = 'This site is already permanently blocked. Manage it under Permanent commitments.'; err.hidden = false; return; }
     if (dashboard) {
       const result = await chrome.runtime.sendMessage({ type: 'setSharedSite', domain: parsed.value, isBlocked: true });
       if (!result?.ok) { err.textContent = result?.error || 'Could not sync website.'; err.hidden = false; return; }
@@ -1416,8 +1440,8 @@
   async function applyPreset(kind) {
     if (!state) return;
     if (dashboard) {
-      const sites = kind === 'unblock' ? syncedSites().filter(s => s.isBlocked).map(s => s.domain)
-        : kind === 'social' ? S.PRESETS.social : S.PRESETS.video;
+      const sites = kind === 'unblock' ? syncedSites().filter(s => s.isBlocked && !isPermanentSite(s.domain)).map(s => s.domain)
+        : (kind === 'social' ? S.PRESETS.social : S.PRESETS.video).filter(site => !isPermanentSite(site));
       for (const site of sites) {
         const result = await chrome.runtime.sendMessage({ type: 'setSharedSite', domain: site, isBlocked: kind !== 'unblock' });
         if (!result?.ok) return toast(result?.error || 'Could not sync websites.');
@@ -1438,7 +1462,7 @@
       await refresh(); toast('All lists unblocked.');
       return;
     }
-    const sites = kind === 'social' ? S.PRESETS.social : S.PRESETS.video;
+    const sites = (kind === 'social' ? S.PRESETS.social : S.PRESETS.video).filter(site => !isPermanentSite(site));
     const name = kind === 'social' ? 'Social Media' : 'Video & Streaming';
     const stableId = kind === 'social' ? 'list_social' : 'list_video';
     await S.update(async (st) => {

@@ -34,6 +34,7 @@ let changeIdentityDuringDashboard = false;
 let rejectMutationPath = '';
 let hangConvexRequest = false;
 let nukeState = null;
+let rulesConfig = null;
 let loseWorkResponseOnce = false;
 const serverWorkRecords = new Map();
 let pulseConfig = {
@@ -67,6 +68,7 @@ const context = {
   fetch: async (_url, init) => {
     const body = JSON.parse(init.body);
     calls.push(body);
+    if (body.path === 'focus:getConfiguration' && rulesConfig) return { ok: true, async json() { return { status: 'success', value: rulesConfig }; } };
     if (hangConvexRequest) return new Promise((_, reject) => init.signal.addEventListener('abort', () => {
       const error = new Error('aborted');
       error.name = 'AbortError';
@@ -522,4 +524,31 @@ clerk.session = { async getToken() { return 'live-token'; } };
 await cloud.startLivePolicy({ onPolicy: () => {} }, { cloudAccountId: 'A', cloudPolicy: { groups: [{ dailyLimitMinutes: 10 }], limits: [], schedules: [] } });
 assert.equal(liveClients.at(-1).args.usageDate, '2026-09-19');
 
-console.log('cloud-sync durability tests passed');
+// Collection edits preserve other devices' rows and carry the read version.
+rulesConfig = { prefs: { strictMode: false }, limitsUpdatedAt: 100, schedulesUpdatedAt: 200,
+  limits: [{ _id: 'native', targetKind: 'app', targetKey: 'native.test', dailyLimitMinutes: 45, sessionLimitMinutes: 10 }],
+  schedules: [{ _id: 'phone', scheduleId: 'phone', label: 'Phone', targetKind: 'app', targetKey: 'native.test', days: [1], startMinute: 540, endMinute: 600, isEnabled: true }] };
+await cloud.sharedRules({ type: 'sharedRuleSave', collection: 'limits', version: 100,
+  row: { targetKind: 'website', targetKey: 'site.test', dailyLimitMinutes: 30 } });
+let write = calls.filter(call => call.path === 'focus:saveAppLimits').at(-1);
+assert.equal(write.args.updatedAt, 100);
+assert.equal(write.args.limits.length, 2);
+assert.equal(write.args.limits[0].sessionLimitMinutes, 10);
+assert.equal(write.args.limits[0]._id, undefined, 'Server metadata never sent back as row data');
+await assert.rejects(cloud.sharedRules({ type: 'sharedRuleSave', collection: 'limits', version: 99,
+  row: { targetKind: 'website', targetKey: 'site.test', dailyLimitMinutes: 30 } }), /Another device/);
+await cloud.sharedRules({ type: 'sharedRuleSave', collection: 'schedules', version: 200,
+  row: { scheduleId: 'chrome', label: 'Study', targetKind: 'website', targetKey: 'site.test', days: [5], startMinute: 1380, endMinute: 60, isEnabled: true } });
+write = calls.filter(call => call.path === 'focus:saveSchedules').at(-1);
+assert.equal(write.args.schedules[0].scheduleId, 'phone');
+assert.equal(write.args.schedules[1].endMinute, 60);
+rulesConfig.prefs = { strictMode: true, strictEndsAt: Date.now() + 60000 };
+await assert.rejects(cloud.sharedRules({ type: 'sharedRuleSave', collection: 'limits', version: 100, row: {} }), /Strict Mode/);
+rulesConfig.prefs = { strictMode: false }; rejectMutationPath = 'focus:saveSchedules';
+await assert.rejects(cloud.sharedRules({ type: 'sharedRuleSave', collection: 'schedules', version: 200, row: rulesConfig.schedules[0] }), /Another device/);
+rejectMutationPath = '';
+const beforeWrongAccount = calls.length;
+assert.equal((await cloud.logFocusSession({ title: 'A-only' }, 'B')).ok, false);
+assert.equal((await cloud.savePrefs({ strictMode: true }, 'B')).ok, false);
+assert.equal(calls.length, beforeWrongAccount, 'Origin-account check precedes network writes');
+console.log('cloud-sync durability and shared-rule edit tests passed');

@@ -26,7 +26,10 @@ import com.focuslock.app.data.repository.frogCycleDate
 import com.focuslock.app.ui.blocker.BlockerActivity
 import com.focuslock.app.ui.permissions.PermissionHelper
 import com.focuslock.app.ui.permissions.PermissionReturnWatcher
+import java.io.FileDescriptor
+import java.io.PrintWriter
 import java.time.LocalTime
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -46,11 +49,39 @@ import kotlinx.coroutines.withContext
 
 class AppMonitorAccessibilityService : AccessibilityService() {
 
-    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    @Volatile
+    private var recentCoroutineErrorClass: String? = null
+
+    private val serviceScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Default + CoroutineExceptionHandler { _, error ->
+            if (error !is kotlinx.coroutines.CancellationException) {
+                val errorClass = error.javaClass.simpleName.take(80).ifBlank { "Throwable" }
+                recentCoroutineErrorClass = errorClass
+                // Intentionally omit exception messages and stack traces: they may contain
+                // package data, URLs, or other user state.
+                Log.w(TAG, "Uncaught service coroutine error: $errorClass")
+            }
+        }
+    )
 
     // Written from event callbacks and read from serviceScope (Default) coroutines.
     @Volatile
     private var currentForegroundPackage: String? = null
+
+    @Volatile
+    private var lastAccessibilityEventPackage: String? = null
+
+    @Volatile
+    private var lastAccessibilityEventType: Int = 0
+
+    @Volatile
+    private var lastAccessibilityEventTimeMs: Long = 0L
+
+    @Volatile
+    private var latestAppCheckTarget: String? = null
+
+    @Volatile
+    private var latestAppCheckDecision: String = "not_checked"
 
     // Written from the main-thread event callback and read/cancelled from serviceScope
     // (Default) countdown coroutines — volatile so a stale read can't keep a countdown alive.
@@ -90,6 +121,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     @Volatile
     private var lastScheduleRefreshMs: Long = 0L
     private var scheduleTickerJob: Job? = null
+    private var homeLocationJob: Job? = null
     private var permissionReturnJob: Job? = null
     private val scheduleRefreshMutex = Mutex()
 
@@ -100,6 +132,10 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     // decide whether to arm the day's frog in-memory (see maybeArmFrogOnForeground).
     @Volatile
     private var frogLocked: Boolean = false
+
+    @Volatile
+    private var frogStateCache: com.focuslock.app.data.model.FrogState? = null
+    private var frogPromptedCycle: String? = null
 
     @Volatile
     private var frogEnabled: Boolean = true
@@ -262,8 +298,70 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         }
     }
 
+    /** Read-only service diagnostics for adb dumpsys; performs no store or window reads. */
+    override fun dump(fd: FileDescriptor?, writer: PrintWriter?, args: Array<out String>?) {
+        super.dump(fd, writer, args)
+        val out = writer ?: return
+        val scopeJob = serviceScope.coroutineContext[Job]
+        val homeDiagnostics = try {
+            FocusLockApplication.instance.homeLocationRepository.diagnosticSnapshot().asDiagnosticLine()
+        } catch (error: Exception) {
+            "unavailable=diagnostic_snapshot_error:${error.javaClass.simpleName.take(80)}"
+        }
+        out.println("FocusLock AppMonitorAccessibilityService diagnostics:")
+        out.println("  lastEvent package=${lastAccessibilityEventPackage ?: "unknown"} type=${eventTypeName(lastAccessibilityEventType)}($lastAccessibilityEventType) timeMs=${lastAccessibilityEventTimeMs.takeIf { it > 0L } ?: "unknown"}")
+        out.println("  foregroundPackage=${currentForegroundPackage ?: "unknown"}")
+        out.println("  frog locked=$frogLocked phase=${frogStateCache?.phase} toolsConfirmed=${frogStateCache?.toolsConfirmed} allowedTools=${frogStateCache?.allowedToolPackages?.size ?: 0}")
+        out.println("  serviceScope active=${scopeJob?.isActive == true} cancelled=${scopeJob?.isCancelled == true}")
+        out.println("  jobs homeLocation=${homeLocationJob?.isActive == true} scheduleTicker=${scheduleTickerJob?.isActive == true} permissionReturn=${permissionReturnJob?.isActive == true} frogLock=${frogLockJob?.isActive == true} targetGroups=${targetGroupsJob?.isActive == true} permanentBlocks=${permanentBlocksJob?.isActive == true} permanentWebsites=${permanentWebsitesJob?.isActive == true} countdown=${countdownJob?.isActive == true} policyActivityRefresh=${policyActivityRefreshJob?.isActive == true} policyBoundary=${policyBoundaryJob?.isActive == true} tickTickSession=${tickTickSessionJob?.isActive == true} removalScan=${removalScanJob?.isActive == true}")
+        out.println("  latestAppCheck target=${latestAppCheckTarget ?: "unknown"} decision=$latestAppCheckDecision")
+        out.println("  recentCoroutineErrorClass=${recentCoroutineErrorClass ?: "none"}")
+        out.println("  homeLocation $homeDiagnostics")
+        out.flush()
+    }
+
+    private fun eventTypeName(type: Int): String = when (type) {
+        AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> "WINDOW_STATE_CHANGED"
+        AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> "WINDOW_CONTENT_CHANGED"
+        0 -> "NONE"
+        else -> "OTHER"
+    }
+
     override fun onServiceConnected() {
         super.onServiceConnected()
+        homeLocationJob?.cancel()
+        homeLocationJob = serviceScope.launch {
+            var previouslyAllowed: Boolean? = null
+            while (isActive) {
+                val app = FocusLockApplication.instance
+                if (app.homeLocationRepository.homeOnlyFlow.first() && isScreenInteractive()) {
+                    val allowed = app.homeLocationRepository.shouldEnforceNow()
+                    if (!allowed) {
+                        BlockerActivity.discardSavedFrogTimer(applicationContext)
+                        countdownJob?.cancel()
+                        countdownJob = null
+                        stopPolicyActivityRefresh()
+                    } else if (previouslyAllowed != true) {
+                        // Returning home or losing location must enforce even when Instagram never left
+                        // the foreground. Browsers keep their own URL recheck loop.
+                        val foreground = currentForegroundPackage
+                        if (foreground != null && foreground != applicationContext.packageName) {
+                            handleForegroundPackageChanged(foreground, null)
+                            if (foreground in BROWSER_PACKAGES) browserMonitor.watch(foreground)
+                        }
+                    }
+                    previouslyAllowed = allowed
+                } else if (!app.homeLocationRepository.homeOnlyFlow.first()) {
+                    if (previouslyAllowed == false) {
+                        currentForegroundPackage?.takeIf { it != applicationContext.packageName }?.let {
+                            handleForegroundPackageChanged(it, null)
+                        }
+                    }
+                    previouslyAllowed = true
+                }
+                delay(10_000L)
+            }
+        }
         scheduleTickerJob?.cancel()
         scheduleTickerJob = serviceScope.launch {
             while (isActive) {
@@ -274,6 +372,8 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 if (active && !wasActive) {
                     enforceScheduleOnCurrentForeground()
                 }
+                // Arm at the wake hour even when the screen stays on without an app switch.
+                armAndHandleFrog()
                 delay(SCHEDULE_REFRESH_INTERVAL_MS)
             }
         }
@@ -293,11 +393,18 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                     FocusLockApplication.instance.frogRepository.wakeHourFlow
                 ) { state, wakeHour -> state to wakeHour }
                     .collect { (state, wakeHour) ->
+                        val previousState = frogStateCache
+                        frogStateCache = state
                         frogLocked = state.locked
                         frogEnabled = state.enabled
                         frogArmed = state.armed
                         frogStoredCycleDate = state.cycleDate
                         frogWakeHour = wakeHour
+                        if (state.locked && (previousState?.locked != true ||
+                                previousState.allowedToolPackages != state.allowedToolPackages ||
+                                previousState.toolsConfirmed != state.toolsConfirmed)) {
+                            enforceFrogOnCurrentForeground()
+                        }
                     }
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
@@ -404,6 +511,10 @@ class AppMonitorAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
+
+        lastAccessibilityEventPackage = event.packageName?.toString()
+        lastAccessibilityEventType = event.eventType
+        lastAccessibilityEventTimeMs = System.currentTimeMillis()
 
         // Cheapest possible gate first: only these two event types are ever consumed.
         // Everything else (focus, text selection, scroll notifications from all apps)
@@ -538,6 +649,8 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     }
 
     private fun handleForegroundPackageChanged(packageName: String, previousPackage: String?) {
+        latestAppCheckTarget = packageName
+        latestAppCheckDecision = "checking"
         // In-memory-only arm check (F1): a user who keeps the screen on across the wake
         // hour never fires USER_PRESENT/SCREEN_ON, so the first app open after the wake
         // hour must be able to arm the day. This path only reads volatiles; the actual
@@ -551,6 +664,30 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             val settings = app.settingsRepository
             val bank = app.creditBankRepository
 
+            if (currentForegroundPackage != packageName) return@launch
+
+            // Permanent blocks do not depend on location or any normal enforcement
+            // policy. Preserve the protected-package recovery exemptions.
+            try { app.permanentBlocksRepository.warm() } catch (_: Exception) { }
+            val legacyPermanent = try { settings.isAppPermanent(packageName) } catch (_: Exception) { false }
+            val dedicatedPermanent = app.permanentBlocksRepository.isPermanentlyBlocked(packageName)
+            val protected = try {
+                PermanentBlocksRepository.isProtectedPackage(this@AppMonitorAccessibilityService, packageName)
+            } catch (_: Exception) { true }
+            if (PermanentBlockPolicy.shouldEnforce(dedicatedPermanent || legacyPermanent, protected)) {
+                latestAppCheckDecision = "permanent"
+                Log.w(TAG, "Permanently blocked app launched: $packageName")
+                recordBlock(packageName, "permanent")
+                triggerBlocker(packageName, website = null, reason = "permanent")
+                return@launch
+            }
+
+            if (!app.homeLocationRepository.shouldEnforceNow()) {
+                BlockerActivity.discardSavedFrogTimer(applicationContext)
+                latestAppCheckDecision = "location_paused"
+                return@launch
+            }
+
             // This code runs off the accessibility callback. Refresh once on target
             // transitions, then keep active policy targets on a bounded minute loop.
             app.syncManager.requestPolicyRefresh()
@@ -560,46 +697,31 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             // Phone + PC stay locked until 10-min reset + coach approval.
             try {
                 if (settings.isNukeActive()) {
+                    latestAppCheckDecision = "nuke"
                     recordBlock(packageName, "nuke")
                     triggerNuke()
                     return@launch
                 }
             } catch (_: Exception) { }
 
-            // Permanent blocks are the strongest app boundary: no credits, grace,
-            // emergency pass, schedule, or Strict Mode state can bypass them.
-            // Await the one-time DataStore warm-up so the first foreground event after
-            // service startup cannot slip through before the collector emits.
-            try { app.permanentBlocksRepository.warm() } catch (_: Exception) { }
-            val legacyPermanent = try { settings.isAppPermanent(packageName) } catch (_: Exception) { false }
-            val dedicatedPermanent = app.permanentBlocksRepository.isPermanentlyBlocked(packageName)
-            val protected = try {
-                PermanentBlocksRepository.isProtectedPackage(this@AppMonitorAccessibilityService, packageName)
-            } catch (_: Exception) { true }
-            if (PermanentBlockPolicy.shouldEnforce(dedicatedPermanent || legacyPermanent, protected)) {
-                Log.w(TAG, "Permanently blocked app launched: $packageName")
-                recordBlock(packageName, "permanent")
-                triggerBlocker(packageName, website = null, reason = "permanent")
-                return@launch
-            }
-
             // 1. TickTick active time tracking. It remains exempt only when it has
             // not itself been deliberately placed in the permanent store.
             if (packageName == TICKTICK_PACKAGE) {
+                latestAppCheckDecision = "ticktick_exempt"
                 startTickTickActiveTracking()
                 return@launch
             }
 
-            // 1a. FROG LOCK — hard gate before limits/schedule/permanent/grace: while
-            // today's frog is unfinished, a boundary app is blocked outright and never
-            // starts a doomscroll countdown (no credits earned for that day). TickTick,
-            // the default launcher and the current IME are exempt (see
-            // isFrogGateExemptPackage): blocking the launcher/IME can compound-brick
-            // the device (no way home, no keyboard for the lock screen itself).
-            if (isFrogLockActive() && !isFrogGateExemptPackage(packageName) && settings.isAppBlocked(packageName)) {
-                Log.w(TAG, "Frog lock active — blocking $packageName")
-                recordBlock(packageName, FrogCoordinator.REASON_FROG)
-                triggerBlocker(packageName, website = null, reason = FrogCoordinator.REASON_FROG)
+            if (isFrogLockActive()) {
+                val state = frogStateCache
+                if (state != null && FrogAppPolicy.shouldShowFocusScreen(this@AppMonitorAccessibilityService, packageName, state)) {
+                    latestAppCheckDecision = "frog"
+                    Log.w(TAG, "Frog lock active — blocking $packageName")
+                    recordBlock(packageName, FrogCoordinator.REASON_FROG)
+                    triggerBlocker(packageName, website = null, reason = FrogCoordinator.REASON_FROG)
+                    return@launch
+                }
+                latestAppCheckDecision = "frog_allowed_or_state_unavailable"
                 return@launch
             }
 
@@ -612,6 +734,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 false
             }
             if (limitExceeded) {
+                latestAppCheckDecision = "app_limit"
                 Log.w(TAG, "Daily limit reached for $packageName — blocking")
                 recordBlock(packageName, "limit")
                 triggerBlocker(packageName, website = null, reason = "limit")
@@ -627,6 +750,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 false
             }
             if (groupLimitExceeded) {
+                latestAppCheckDecision = "group_limit"
                 Log.w(TAG, "Group daily limit reached for $packageName — blocking")
                 recordBlock(packageName, "limit")
                 triggerBlocker(packageName, website = null, reason = "limit")
@@ -636,11 +760,13 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             // 3. Target doomscroll app check
             val isBlocked = settings.isAppBlocked(packageName)
             if (!isBlocked) {
+                latestAppCheckDecision = "not_selected"
                 return@launch
             }
 
             // 3a. Active block schedule: force blocking regardless of banked time.
             if (scheduleActiveNow()) {
+                latestAppCheckDecision = "schedule"
                 Log.w(TAG, "Active block schedule — blocking $packageName")
                 recordBlock(packageName, "schedule")
                 triggerBlocker(packageName, website = null, reason = "schedule")
@@ -664,6 +790,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                     app.strictModeAutomationRepository.isActivationActiveNow()
             } catch (_: Exception) { false }
             if (strict) {
+                latestAppCheckDecision = "strict"
                 recordBlock(packageName, "manual")
                 val attempt = try { settings.recordStrictBlockedAttempt(packageName) } catch (_: Exception) { 0 }
                 val nukeAfterFive = try { settings.lockdownNukeAfterFiveFlow.first() } catch (_: Exception) { false }
@@ -676,9 +803,11 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                     triggerBlocker(packageName, website = null, reason = "strict")
                 }
             } else if (balanceSec <= 0L) {
+                latestAppCheckDecision = "manual"
                 recordBlock(packageName, "manual")
                 triggerBlocker(packageName, website = null, reason = "manual")
             } else {
+                latestAppCheckDecision = "countdown"
                 startDoomscrollCountdown(packageName, website = null)
             }
         }
@@ -686,6 +815,10 @@ class AppMonitorAccessibilityService : AccessibilityService() {
 
     private suspend fun updateAppPolicyActivity(app: FocusLockApplication, packageName: String): Boolean {
         if (packageName == applicationContext.packageName || packageName in BROWSER_PACKAGES) return false
+        if (!app.homeLocationRepository.shouldEnforceNow()) {
+            stopPolicyActivityRefresh()
+            return false
+        }
         val appLimit = try { app.appLimitsRepository.getLimit(packageName) } catch (_: Exception) { null }
         val hasGroupPolicy = try {
             app.targetGroupsRepository.groupsForTarget("app", packageName).any {
@@ -793,34 +926,12 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         targetKind: String,
         targetKey: String,
     ): Boolean {
-        val groups = if (targetKind == "website") {
-            app.targetGroupsRepository.groupsForWebsiteHost(targetKey)
-        } else {
-            app.targetGroupsRepository.groupsForTarget(targetKind, targetKey)
-        }
-        if (groups.isEmpty()) return false
-        val serverUsage = app.syncManager.groupUsageTodaySeconds.value
-        for (group in groups) {
-            val limitMinutes = group.dailyLimitMinutes ?: continue
-            if (!group.limitEnabled || limitMinutes <= 0) continue
-            var localSeconds = 0L
-            for (member in group.members) {
-                if (member.targetKind != "app") continue
-                localSeconds += try {
-                    UsageStatsRepository.getMinutesForPackage(applicationContext, member.targetKey) * 60L
-                } catch (e: Exception) {
-                    if (e is kotlinx.coroutines.CancellationException) throw e
-                    0L
-                }
-            }
-            val combinedSeconds = maxOf(localSeconds, serverUsage[group.groupId] ?: 0L)
-            if (combinedSeconds >= limitMinutes * 60L) return true
-        }
-        return false
+        return GroupLimitPolicy.isExceeded(applicationContext, app, targetKind, targetKey)
     }
 
     /** Records one block event per (package, reason) for the current app entry. */
     private suspend fun recordBlock(packageName: String, reason: String) {
+        if (!FocusLockApplication.instance.homeLocationRepository.shouldEnforceNow(permanent = reason == "permanent")) return
         val key = packageName to reason
         val alreadyRecorded = synchronized(blockLogLock) {
             if (lastRecordedBlock == key) {
@@ -867,11 +978,26 @@ class AppMonitorAccessibilityService : AccessibilityService() {
      * same recordBlock dedupe as normal enforcement (reason "schedule").
      */
     private suspend fun enforceScheduleOnCurrentForeground() {
+        if (!FocusLockApplication.instance.homeLocationRepository.shouldEnforceNow()) return
         val packageName = currentForegroundPackage ?: return
         if (packageName == applicationContext.packageName) return
         try {
             val settings = FocusLockApplication.instance.settingsRepository
             if (!settings.isAppBlocked(packageName)) return
+            // The policy read above suspends. Discard its result if the user has moved
+            // to another app, and let the current Frog policy decide any active lock.
+            if (currentForegroundPackage != packageName) return
+            if (isFrogLockActive()) {
+                val state = frogStateCache ?: return
+                if (!FrogAppPolicy.shouldShowFocusScreen(this, packageName, state)) {
+                    latestAppCheckDecision = "schedule_skipped_frog_allowed"
+                    return
+                }
+                Log.w(TAG, "Frog lock active — blocking $packageName despite active schedule")
+                recordBlock(packageName, FrogCoordinator.REASON_FROG)
+                triggerBlocker(packageName, website = null, reason = FrogCoordinator.REASON_FROG)
+                return
+            }
             Log.w(TAG, "Active block schedule — blocking $packageName (already foreground)")
             recordBlock(packageName, "schedule")
             triggerBlocker(packageName, website = null, reason = "schedule")
@@ -968,11 +1094,12 @@ class AppMonitorAccessibilityService : AccessibilityService() {
 
     /** Fresh DataStore read of the frog lock; keeps the cached value on failure. */
     private suspend fun refreshFrogLock() {
-        frogLocked = try {
-            FocusLockApplication.instance.frogRepository.currentState().locked
+        try {
+            val state = FocusLockApplication.instance.frogRepository.currentState()
+            frogStateCache = state
+            frogLocked = state.locked
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
-            frogLocked
         }
     }
 
@@ -1039,6 +1166,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     private suspend fun handleFrogArmed() {
         refreshFrogLock()
         if (isFrogLockActive()) {
+            showMorningFrogPrompt()
             enforceFrogOnCurrentForeground()
         }
         val openTasksEmpty = try {
@@ -1057,14 +1185,15 @@ class AppMonitorAccessibilityService : AccessibilityService() {
      * (mirrors [enforceScheduleOnCurrentForeground], incl. the screen-state gate).
      */
     private suspend fun enforceFrogOnCurrentForeground() {
+        if (!FocusLockApplication.instance.homeLocationRepository.shouldEnforceNow()) return
+        val keyguard = getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
+        if (keyguard?.isKeyguardLocked == true) return
         val packageName = currentForegroundPackage ?: return
         if (packageName == applicationContext.packageName) return
-        // Same brick-mitigation exemptions as the per-package gate (TickTick, launcher, IME).
-        if (isFrogGateExemptPackage(packageName)) return
         if (!isScreenInteractive()) return
         try {
-            val settings = FocusLockApplication.instance.settingsRepository
-            if (!settings.isAppBlocked(packageName)) return
+            val state = frogStateCache ?: return
+            if (!FrogAppPolicy.shouldShowFocusScreen(this, packageName, state)) return
             Log.w(TAG, "Frog lock active — blocking $packageName (already foreground)")
             recordBlock(packageName, FrogCoordinator.REASON_FROG)
             triggerBlocker(packageName, website = null, reason = FrogCoordinator.REASON_FROG)
@@ -1072,6 +1201,19 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             if (e is kotlinx.coroutines.CancellationException) throw e
             Log.w(TAG, "Frog enforcement failed for $packageName", e)
         }
+    }
+
+    /** Morning UI waits for unlock; it never covers the keyguard or wakes the display. */
+    private suspend fun showMorningFrogPrompt() {
+        val state = frogStateCache ?: return
+        if (!state.locked || frogPromptedCycle == state.cycleDate || !isScreenInteractive()) return
+        val keyguard = getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
+        if (keyguard?.isKeyguardLocked == true) return
+        if (!FocusLockApplication.instance.homeLocationRepository.shouldEnforceNow()) return
+        val foreground = currentForegroundPackage ?: return
+        if (!FrogAppPolicy.shouldShowFocusScreen(this, foreground, state)) return
+        triggerBlocker(foreground, website = null, reason = FrogCoordinator.REASON_FROG)
+        frogPromptedCycle = state.cycleDate
     }
 
     private suspend fun checkBrowserUrl(browserPackage: String) {
@@ -1231,6 +1373,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
 
     /** Domain check + block decision for a URL found by the fast or fallback scan. */
     private suspend fun handleDetectedBrowserUrl(browserPackage: String, url: String) {
+        if (currentForegroundPackage != browserPackage) return
         val cleanDomain = SettingsRepository.cleanDomain(url)
         if (cleanDomain.isBlank()) {
             clearActiveWebsite()
@@ -1238,8 +1381,23 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         }
         val app = FocusLockApplication.instance
         val settings = app.settingsRepository
-        app.syncManager.requestPolicyRefresh()
         val permanent = settings.isWebsitePermanent(cleanDomain)
+        if (permanent) {
+            // Permanent websites bypass location, credits, schedules and group policy.
+            // Recheck foreground and screen after the suspending store lookup.
+            if (currentForegroundPackage != browserPackage || !isScreenInteractive()) return
+            currentActiveWebsite = cleanDomain
+            countdownJob?.cancel()
+            countdownJob = null
+            recordBlock(browserPackage, "permanent")
+            triggerBlocker(browserPackage, website = cleanDomain, reason = "permanent")
+            return
+        }
+        if (!app.homeLocationRepository.shouldEnforceNow()) {
+            clearActiveWebsite()
+            return
+        }
+        app.syncManager.requestPolicyRefresh()
         val websiteGroups = try { app.targetGroupsRepository.groupsForWebsiteHost(cleanDomain) }
         catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
@@ -1338,6 +1496,8 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 // back. Fail-open on any PowerManager error so a broken read can never
                 // under-enforce.
                 if (!isScreenInteractive()) continue
+                if (!FocusLockApplication.instance.homeLocationRepository.shouldEnforceNow()) break
+                if (currentForegroundPackage != packageName || (website != null && currentActiveWebsite != website)) break
                 val remaining = bank.consumeScrollTime(intervalSec)
                 Log.d(TAG, "Active scroll on ${website ?: packageName}. Remaining: $remaining s")
 
@@ -1367,6 +1527,8 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     }
 
     private suspend fun triggerBlocker(blockedPackage: String, website: String? = null, reason: String? = null) {
+        if (!FocusLockApplication.instance.homeLocationRepository.shouldEnforceNow(permanent = reason == "permanent")) return
+        if (currentForegroundPackage != blockedPackage || !isScreenInteractive()) return
         Log.w(TAG, "Lockout triggered for ${website ?: blockedPackage} (reason=${reason ?: "unknown"})")
         val intent = Intent(this, BlockerActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -1383,11 +1545,39 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         // Background-activity-start restrictions: posting to Main gives startActivity
         // the best chance of succeeding when called from serviceScope (Default).
         withContext(Dispatchers.Main) {
+            if (currentForegroundPackage != blockedPackage || !isScreenInteractive()) return@withContext
+            // A check begun before Frog armed may resume after a settings/store read.
+            // Apply the current policy at the actual launch boundary as well.
+            val enforceFrog = reason != "permanent" && (reason == FrogCoordinator.REASON_FROG || isFrogLockActive())
+            if (enforceFrog) {
+                val state = frogStateCache
+                if (state == null || !FrogAppPolicy.shouldShowFocusScreen(this@AppMonitorAccessibilityService, blockedPackage, state)) {
+                    latestAppCheckDecision = "frog_stale_policy"
+                    return@withContext
+                }
+                val root = runCatching { rootInActiveWindow }.getOrNull() ?: run {
+                    latestAppCheckDecision = "frog_missing_window"
+                    return@withContext
+                }
+                try {
+                    val rootPackage = root.packageName?.toString()
+                    if (rootPackage != blockedPackage || rootPackage == applicationContext.packageName) {
+                        latestAppCheckDecision = "frog_stale_window"
+                        return@withContext
+                    }
+                } finally {
+                    if (canRecycleNodes) runCatching { root?.recycle() }
+                }
+                intent.putExtra(EXTRA_BLOCK_REASON, FrogCoordinator.REASON_FROG)
+                intent.removeExtra(BlockerActivity.EXTRA_BLOCKED_WEBSITE)
+            }
             startActivity(intent)
         }
     }
 
     private suspend fun triggerNuke() {
+        if (!FocusLockApplication.instance.homeLocationRepository.shouldEnforceNow()) return
+        if (!isScreenInteractive()) return
         Log.w(TAG, "NUKE active — forcing reset screen")
         try {
             val intent = Intent(this, com.focuslock.app.ui.nuke.NukeActivity::class.java).apply {
@@ -1414,6 +1604,8 @@ class AppMonitorAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        homeLocationJob?.cancel()
+        homeLocationJob = null
         browserMonitor.stop()
         scheduleTickerJob?.cancel()
         scheduleTickerJob = null

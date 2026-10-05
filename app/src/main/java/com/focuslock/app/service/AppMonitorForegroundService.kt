@@ -5,19 +5,20 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.os.IBinder
-import android.os.SystemClock
 import android.app.NotificationManager
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.focuslock.app.FocusLockApplication
-import com.focuslock.app.R
 import com.focuslock.app.ui.MainActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 
 class AppMonitorForegroundService : Service() {
 
@@ -28,6 +29,7 @@ class AppMonitorForegroundService : Service() {
     // Only one collector may be alive at a time: onStartCommand can fire repeatedly
     // (every MainActivity.onCreate) and must not stack duplicate collectors.
     private var updateJob: Job? = null
+    private var tickTickSyncJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -43,37 +45,51 @@ class AppMonitorForegroundService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIFICATION_ID, buildNotification("FocusLock Active: Monitoring doomscroll apps"))
+        startForeground(NOTIFICATION_ID, buildNotification("Checking FocusLock status"))
 
-        updateJob?.cancel()
-        updateJob = scope.launch(Dispatchers.IO) {
-            var lastNotifiedMinuteBucket = Long.MIN_VALUE
-            var lastLockedState: Boolean? = null
-            var lastNotifyAt = 0L
-            FocusLockApplication.instance.creditBankRepository.liveBalanceSeconds.collectLatest { seconds ->
-                val now = SystemClock.elapsedRealtime()
-                val locked = seconds <= 0
-                // Throttle: notify only on minute-bucket change, locked/unlocked flip,
-                // or at most every 10s — never on every per-second tick.
-                val minuteBucket = if (locked) Long.MIN_VALUE else seconds / 60
-                val minuteChanged = minuteBucket != lastNotifiedMinuteBucket
-                val lockFlipped = lastLockedState == null || locked != lastLockedState
-                val timeElapsed = now - lastNotifyAt >= NOTIFY_THROTTLE_MS
-                if (!minuteChanged && !lockFlipped && !timeElapsed && lastNotifyAt != 0L) {
-                    return@collectLatest
+        if (updateJob?.isActive != true) {
+            updateJob = scope.launch(Dispatchers.IO) {
+                while (true) {
+                    val seconds = FocusLockApplication.instance.creditBankRepository.liveBalanceSeconds.first()
+                    // Null means the location check failed. Keep the ordinary status then;
+                    // do not claim the user is away when the device cannot tell.
+                    val homeEnforcementAllowed = try {
+                        FocusLockApplication.instance.homeLocationRepository.shouldEnforceNow()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        null
+                    }
+                    val locked = seconds <= 0
+                    val minutes = (seconds.coerceAtLeast(0)) / 60
+                    val secRem = (seconds.coerceAtLeast(0)) % 60
+                    val text = if (homeEnforcementAllowed == false) {
+                        "Home-only boundaries paused · Permanent blocks active"
+                    } else if (!locked) {
+                        "Available Screen Time: ${minutes}m ${secRem}s"
+                    } else {
+                        "Screen Time Locked! Complete work in TickTick to unlock."
+                    }
+                    val notification = buildNotification(text)
+                    notificationManager.notify(NOTIFICATION_ID, notification)
+                    delay(NOTIFY_THROTTLE_MS)
                 }
-                lastNotifiedMinuteBucket = minuteBucket
-                lastLockedState = locked
-                lastNotifyAt = now
-                val minutes = (seconds.coerceAtLeast(0)) / 60
-                val secRem = (seconds.coerceAtLeast(0)) % 60
-                val text = if (!locked) {
-                    "Available Screen Time: ${minutes}m ${secRem}s"
-                } else {
-                    "Screen Time Locked! Complete work in TickTick to unlock."
+            }
+        }
+
+        if (tickTickSyncJob?.isActive != true) {
+            tickTickSyncJob = scope.launch(Dispatchers.IO) {
+                while (true) {
+                    try {
+                        FocusLockApplication.instance.tickTickFocusSync.sync()
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (e: Exception) {
+                        // Keep diagnostics useful without logging request details or credentials.
+                        Log.w(TAG, "Periodic TickTick focus sync failed (${e.javaClass.simpleName})")
+                    }
+                    delay(TICKTICK_SYNC_INTERVAL_MS)
                 }
-                val notification = buildNotification(text)
-                notificationManager.notify(NOTIFICATION_ID, notification)
             }
         }
 
@@ -95,11 +111,15 @@ class AppMonitorForegroundService : Service() {
         super.onDestroy()
         updateJob?.cancel()
         updateJob = null
+        tickTickSyncJob?.cancel()
+        tickTickSyncJob = null
         scope.cancel()
     }
 
     companion object {
         private const val NOTIFICATION_ID = 1001
         private const val NOTIFY_THROTTLE_MS = 10_000L
+        private const val TICKTICK_SYNC_INTERVAL_MS = 60_000L
+        private const val TAG = "AppMonitorService"
     }
 }

@@ -138,6 +138,7 @@ try {
   });
   await page.bringToFront();
   await page.locator('nav button[data-tab="blocks"]').click();
+  await page.locator('[data-boundary-route="sites"]').click();
   await page.locator('#siteRows [data-del]').first().waitFor();
   // Simulate the incoming mobile prefs at the cloud boundary, using the real
   // packaged worker, storage events, dashboard, and HTTP enforcement.
@@ -177,16 +178,83 @@ try {
   checks.push('Real popup remains usable with network offline');
   await popup.close();
   await context.setOffline(false);
+  await worker.evaluate(async () => {
+    // End the synthetic incoming commitment before exercising independent Frog.
+    const state = await ensureState();
+    state.strictEndsAt = Date.now() - 1;
+    state.cloudPrefs = { strictMode: true, strictEndsAt: state.strictEndsAt };
+    await FocusLockStore.save(state); mem.state = state;
+  });
+  // Use the actual UI and worker for new browser-local features in this
+  // disposable profile. Synthetic elapsed time avoids a minute-long test wait.
+  await page.locator('nav button[data-tab="stats"]').click();
+  await page.locator('#browserFrogWake').fill('0');
+  await page.locator('#browserFrogMinutes').fill('1');
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#browserFrogEnable').click();
+  await page.locator('#browserFrogInput').fill('Read the chemistry chapter');
+  await page.locator('#browserFrogSelect').click();
+  await page.locator('#browserFrogFocus').waitFor({ state: 'visible' });
+  await page.locator('#browserFrogFocus').click();
+  await page.reload();
+  await page.locator('#timerFinish').waitFor({ state: 'visible' });
+  await page.waitForFunction(() => !document.getElementById('timerFinish').disabled);
+  assert.equal(await page.locator('#browserFrogTitle').textContent(), 'Read the chemistry chapter');
+  assert.equal(await page.locator('#browserFrogFocus').isDisabled(), true);
+  checks.push('Frog task and running timer survive a real dashboard reload');
+  await page.locator('#browserFrogTick').click();
+  const frogVerdict = await page.evaluate(() => chrome.runtime.sendMessage({ type: 'verdict', url: 'http://127.0.0.1/' }));
+  assert.equal(frogVerdict.mode, 'frog', 'Marking done without focus cannot release the website');
+  const frogWebsite = await context.newPage();
+  await frogWebsite.goto(site).catch(error => { if (!/ERR_ABORTED|interrupted/.test(error.message)) throw error; });
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try { await frogWebsite.waitForURL(`chrome-extension://${id}/blocked/blocked.html**`, { waitUntil: 'commit' }); break; }
+    catch (error) { if (attempt === 3 || !/ERR_ABORTED/.test(error.message)) throw error; }
+  }
+  await frogWebsite.locator('#frogTitle').waitFor();
+  await frogWebsite.waitForFunction(() => document.getElementById('frogTitle').textContent === 'Read the chemistry chapter');
+  assert.equal(await frogWebsite.locator('#snoozeBtn').isVisible(), false);
+  await frogWebsite.screenshot({ path: path.join(out, 'blocked-frog.png'), fullPage: true });
+  await frogWebsite.close();
+  await worker.evaluate(async () => {
+    await FocusLockStore.update(state => { state.focusTimer.startedAt = Date.now() - 61000; return state; });
+    mem.state = await FocusLockStore.load();
+    await maintainFeatures(false);
+  });
+  await page.waitForFunction(() => document.getElementById('browserFrogBadge').textContent === 'Complete');
+  assert.equal((await page.evaluate(() => chrome.runtime.sendMessage({ type: 'featureStatus' }))).timer, null);
+  checks.push('Real Frog enforcement requires both task completion and elapsed focus, and rejects snooze');
+  await page.locator('nav button[data-tab="strict"]').click();
+  await page.locator('[data-strict-choice="days"]').click();
+  assert.equal(await page.locator('[data-strict-input="hours"]').isVisible(), false);
+  assert.equal(await page.locator('[data-strict-input="days"]').isVisible(), true);
+  await page.locator('[data-strict-choice="date"]').click();
+  assert.equal(await page.locator('[data-strict-input="days"]').isVisible(), false);
+  assert.equal(await page.locator('[data-strict-input="date"]').isVisible(), true);
+  checks.push('Strict activation shows one duration panel at a time');
   for (const width of [1280, 840, 390]) {
     await page.setViewportSize({ width, height: 900 });
-    for (const tab of ['stats', 'blocks', 'permalock', 'settings', 'account']) {
-      await page.locator(`nav button[data-tab="${tab}"]`).click();
+    for (const tab of ['stats', 'blocks', 'strict', 'settings', 'account']) {
+      await page.locator(`header button[data-tab="${tab}"]`).click();
       if (tab === 'stats') await page.locator('#focusConnectNotice').waitFor({ state: 'visible' });
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false, `${tab} overflow at ${width}`);
       await page.screenshot({ path: path.join(out, `${tab}-${width}.png`), fullPage: true });
     }
   }
-  checks.push('All five dashboard destinations fit 1280, 840 and 390px viewports');
+  checks.push('Primary destinations and account/settings fit 1280, 840 and 390px viewports');
+  await page.locator('nav button[data-tab="strict"]').click();
+  await page.locator('[data-strict-choice="hours"]').click();
+  await page.locator('#strictHours').fill('1');
+  page.once('dialog', dialog => dialog.accept());
+  await page.locator('#strictCommit').click();
+  await page.waitForFunction(() => document.getElementById('strictBadge').textContent === 'Committed');
+  await page.reload();
+  await page.locator('nav button[data-tab="strict"]').click();
+  await page.waitForFunction(() => document.getElementById('strictCommit').textContent === 'Extend commitment');
+  assert.equal(await page.locator('#guardianSave').isDisabled(), true);
+  assert.equal((await page.evaluate(() => chrome.runtime.sendMessage({ type: 'snooze', url: 'http://127.0.0.1/' }))).ok, false);
+  await page.screenshot({ path: path.join(out, 'strict-active-390.png'), fullPage: true });
+  checks.push('Strict commitment starts through the actual UI, survives reload, locks guardian edits and rejects snoozes');
   assert.deepEqual(errors, [], 'Dashboard has no uncaught page errors');
   const report = { realExtension: true, signedIn: false, seededPolicy: true, extensionId: id, checks, pageErrors: errors,
     limitations: ['Real signed-in cross-device sync requires the user account and Android device.'] };

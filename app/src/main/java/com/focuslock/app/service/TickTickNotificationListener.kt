@@ -1,7 +1,23 @@
 package com.focuslock.app.service
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import androidx.core.content.ContextCompat
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
+import com.focuslock.app.FocusLockApplication
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import java.util.regex.Pattern
 
 /**
@@ -11,10 +27,74 @@ import java.util.regex.Pattern
  */
 class TickTickNotificationListener : NotificationListenerService() {
 
+    private var listenerScope: CoroutineScope? = null
+    private val refreshReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == ACTION_CREDIT_UPDATED) refreshBlockedNotifications()
+        }
+    }
+
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        listenerScope?.cancel()
+        runCatching { unregisterReceiver(refreshReceiver) }
+        listenerScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+        runCatching { ContextCompat.registerReceiver(this, refreshReceiver, IntentFilter(ACTION_CREDIT_UPDATED), ContextCompat.RECEIVER_NOT_EXPORTED) }
+        refreshBlockedNotifications()
+        val app = FocusLockApplication.instance
+        listenerScope!!.launch {
+            merge(
+                app.frogRepository.frogStateFlow.map { Unit },
+                app.settingsRepository.blockedAppsFlow.map { Unit },
+                app.settingsRepository.strictModeFlow.map { Unit },
+                app.blockSchedulesRepository.schedulesFlow.map { Unit },
+                app.permanentBlocksRepository.packagesFlow.map { Unit },
+                app.creditBankRepository.liveBalanceSeconds.map { Unit },
+                app.settingsRepository.nukeActiveFlow.map { Unit },
+                app.homeLocationRepository.homeOnlyFlow.map { Unit },
+                app.targetGroupsRepository.groups.map { Unit },
+            ).collect { refreshBlockedNotifications() }
+        }
+        listenerScope!!.launch {
+            while (isActive) { delay(30_000); refreshBlockedNotifications() }
+        }
+    }
+
+    override fun onListenerDisconnected() {
+        runCatching { unregisterReceiver(refreshReceiver) }
+        listenerScope?.cancel()
+        listenerScope = null
+        super.onListenerDisconnected()
+    }
+
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         super.onNotificationPosted(sbn)
+        if (sbn != null) listenerScope?.launch { cancelIfBlocked(sbn) }
         // Notification titles and bodies can describe reminders, tasks, timers, or
         // breaks. None of these prove that focus time was actually logged.
+    }
+
+    override fun onDestroy() {
+        runCatching { unregisterReceiver(refreshReceiver) }
+        listenerScope?.cancel()
+        listenerScope = null
+        super.onDestroy()
+    }
+
+    private fun refreshBlockedNotifications() {
+        listenerScope?.launch {
+            val state = runCatching { FocusLockApplication.instance.frogRepository.currentState() }.getOrNull() ?: return@launch
+            runCatching { activeNotifications.orEmpty() }.getOrDefault(emptyArray()).forEach { cancelIfBlocked(it, state) }
+        }
+    }
+
+    private suspend fun cancelIfBlocked(sbn: StatusBarNotification, state: com.focuslock.app.data.model.FrogState? = null) {
+        val frogState = state ?: runCatching { FocusLockApplication.instance.frogRepository.currentState() }.getOrNull() ?: return
+        if (BlockedNotificationPolicy.shouldCancel(this, sbn.packageName, frogState)) {
+            runCatching { cancelNotification(sbn.key) }.onSuccess {
+                android.util.Log.i("FocusLockNotifications", "Requested dismissal of blocked notification from ${sbn.packageName}")
+            }
+        }
     }
 
     companion object {

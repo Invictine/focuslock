@@ -2,6 +2,7 @@ package com.focuslock.app.data.repository
 
 import android.content.Context
 import android.util.Log
+import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -9,6 +10,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.focuslock.app.data.model.FrogPhase
@@ -103,6 +105,15 @@ fun canArmNow(
 fun shouldRolloverFrogCycle(storedCycleDate: String?, computedCycleDate: String): Boolean =
     storedCycleDate.orEmpty() < computedCycleDate
 
+/** Keep only canonical Android package names; picker input is persisted across cycles. */
+fun sanitizeFrogToolPackages(packages: Set<String>): Set<String> = packages
+    .asSequence()
+    .map(String::trim)
+    .filter { it.length <= 255 && FROG_PACKAGE_NAME.matches(it) }
+    .toSet()
+
+private val FROG_PACKAGE_NAME = Regex("[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)+")
+
 /**
  * "Eat the frog" repository backed by its own DataStore file (`focuslock_frog`),
  * following CreditBankRepository's idioms: corruption-hardened read/edit helpers,
@@ -117,7 +128,10 @@ fun shouldRolloverFrogCycle(storedCycleDate: String?, computedCycleDate: String)
  * logged and fall back to defaults, so a caller — including a broadcast receiver —
  * can never crash because of the frog store.
  */
-class FrogRepository(private val context: Context) {
+class FrogRepository(
+    private val context: Context,
+    private val frogStore: DataStore<Preferences> = context.frogDataStore,
+) {
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -143,6 +157,9 @@ class FrogRepository(private val context: Context) {
         val FROG_TRACKED_SECONDS = intPreferencesKey("frog_tracked_seconds")
         val FROG_OPEN_TASKS_JSON = stringPreferencesKey("frog_open_tasks_json")
         val FROG_OPEN_TASKS_FETCHED_AT = longPreferencesKey("frog_open_tasks_fetched_at")
+        val FROG_ALLOWED_TOOL_PACKAGES = stringSetPreferencesKey("frog_allowed_tool_packages")
+        val FROG_TOOLS_CONFIRMED = booleanPreferencesKey("frog_tools_confirmed")
+        val FROG_ESSENTIAL_APP_PACKAGES = stringSetPreferencesKey("frog_essential_app_packages")
     }
 
     companion object {
@@ -156,7 +173,7 @@ class FrogRepository(private val context: Context) {
     }
 
     /** Feature toggle; true by default. */
-    val enabledFlow: Flow<Boolean> = context.frogDataStore.data
+    val enabledFlow: Flow<Boolean> = frogStore.data
         .map { prefs -> prefs[Keys.FROG_ENABLED] ?: DEFAULT_ENABLED }
         .catch { e ->
             if (e is CancellationException) throw e
@@ -165,7 +182,7 @@ class FrogRepository(private val context: Context) {
         }
 
     /** Required tracked focus minutes for completion, clamped to 1..480. */
-    val requiredMinutesFlow: Flow<Int> = context.frogDataStore.data
+    val requiredMinutesFlow: Flow<Int> = frogStore.data
         .map { prefs -> requiredMinutes(prefs) }
         .catch { e ->
             if (e is CancellationException) throw e
@@ -174,12 +191,21 @@ class FrogRepository(private val context: Context) {
         }
 
     /** Local wake hour (0..23) that starts the frog cycle. */
-    val wakeHourFlow: Flow<Int> = context.frogDataStore.data
+    val wakeHourFlow: Flow<Int> = frogStore.data
         .map { prefs -> wakeHour(prefs) }
         .catch { e ->
             if (e is CancellationException) throw e
             Log.w(FROG_TAG, "wakeHourFlow failed; emitting default", e)
             emit(DEFAULT_WAKE_HOUR)
+        }
+
+    /** Null means use the seven default launch apps; an empty set is an explicit choice. */
+    val essentialAppPackagesFlow: Flow<Set<String>?> = frogStore.data
+        .map { prefs -> prefs[Keys.FROG_ESSENTIAL_APP_PACKAGES]?.let(::sanitizeFrogToolPackages) }
+        .catch { e ->
+            if (e is CancellationException) throw e
+            Log.w(FROG_TAG, "essentialAppPackagesFlow failed; emitting defaults", e)
+            emit(null)
         }
 
     /**
@@ -188,7 +214,7 @@ class FrogRepository(private val context: Context) {
      * and persists asynchronously (exactly like CreditBankRepository.statsFlow does for
      * daily stats), while the authoritative reset runs on the next suspend call.
      */
-    val frogStateFlow: Flow<FrogState> = context.frogDataStore.data
+    val frogStateFlow: Flow<FrogState> = frogStore.data
         .map { prefs ->
             val now = System.currentTimeMillis()
             val today = frogCycleDate(now, wakeHour(prefs))
@@ -207,7 +233,7 @@ class FrogRepository(private val context: Context) {
         }
 
     /** Last cached open-task picker list (survives the daily rollover). */
-    val openTasksFlow: Flow<List<FrogTask>> = context.frogDataStore.data
+    val openTasksFlow: Flow<List<FrogTask>> = frogStore.data
         .map { prefs -> decodeOpenTasks(prefs[Keys.FROG_OPEN_TASKS_JSON]) }
         .catch { e ->
             if (e is CancellationException) throw e
@@ -240,6 +266,14 @@ class FrogRepository(private val context: Context) {
         withFrogStore(Unit) {
             rolloverIfNeeded()
             editFrogPrefs { prefs -> prefs[Keys.FROG_WAKE_HOUR] = hour.coerceIn(MIN_WAKE_HOUR, MAX_WAKE_HOUR) }
+        }
+    }
+
+    /** Persist the optional essential launch apps; empty explicitly disables optional defaults. */
+    suspend fun setEssentialApps(packages: Set<String>): Boolean = withFrogStore(false) {
+        rolloverIfNeeded()
+        editFrogPrefs { prefs ->
+            prefs[Keys.FROG_ESSENTIAL_APP_PACKAGES] = sanitizeFrogToolPackages(packages)
         }
     }
 
@@ -282,10 +316,40 @@ class FrogRepository(private val context: Context) {
                 if (previous?.id != task.id) {
                     prefs[Keys.FROG_TICKED_OFF] = false
                     prefs[Keys.FROG_TRACKED_SECONDS] = 0
+                    prefs[Keys.FROG_TOOLS_CONFIRMED] = false
                 }
             }
         }
     }
+
+    /**
+     * Confirms the tools for the current working cycle. Package names are sanitized
+     * before persistence. Once confirmed, the selection cannot be changed until the
+     * next frog task/cycle is selected.
+     */
+    suspend fun confirmTools(packages: Set<String>, nowMillis: Long = System.currentTimeMillis()): Boolean =
+        withFrogStore(false) {
+            rolloverIfNeeded(nowMillis)
+            var confirmed = false
+            val committed = editFrogPrefs { prefs ->
+                val selected = !prefs[Keys.FROG_SELECTED_JSON].isNullOrBlank()
+                val armed = prefs[Keys.FROG_ARMED] ?: false
+                val phase = FrogPhase.from(
+                    armed = armed,
+                    selected = selected,
+                    tickedOff = prefs[Keys.FROG_TICKED_OFF] ?: false,
+                    trackedSeconds = (prefs[Keys.FROG_TRACKED_SECONDS] ?: 0).coerceAtLeast(0),
+                    requiredSeconds = requiredSeconds(prefs),
+                    toolsConfirmed = prefs[Keys.FROG_TOOLS_CONFIRMED] ?: false,
+                )
+                if (phase == FrogPhase.PICK_TOOLS) {
+                    prefs[Keys.FROG_ALLOWED_TOOL_PACKAGES] = sanitizeFrogToolPackages(packages)
+                    prefs[Keys.FROG_TOOLS_CONFIRMED] = true
+                    confirmed = true
+                }
+            }
+            committed && confirmed
+        }
 
     /**
      * Clears the selected frog and its progress (tracked seconds + tick), returning the
@@ -298,6 +362,7 @@ class FrogRepository(private val context: Context) {
                 prefs[Keys.FROG_SELECTED_JSON] = ""
                 prefs[Keys.FROG_TICKED_OFF] = false
                 prefs[Keys.FROG_TRACKED_SECONDS] = 0
+                prefs[Keys.FROG_TOOLS_CONFIRMED] = false
             }
         }
     }
@@ -332,6 +397,7 @@ class FrogRepository(private val context: Context) {
                     tickedOff = prefs[Keys.FROG_TICKED_OFF] ?: false,
                     trackedSeconds = tracked,
                     requiredSeconds = required,
+                    toolsConfirmed = prefs[Keys.FROG_TOOLS_CONFIRMED] ?: false,
                 )
                 if (phase != FrogPhase.COMPLETE) {
                     prefs[Keys.FROG_TRACKED_SECONDS] =
@@ -404,6 +470,7 @@ class FrogRepository(private val context: Context) {
                     stored[Keys.FROG_TICKED_OFF] = false
                     stored[Keys.FROG_TRACKED_SECONDS] = 0
                     stored[Keys.FROG_SELECTED_JSON] = ""
+                    stored[Keys.FROG_TOOLS_CONFIRMED] = false
                 }
             }
         } catch (e: CancellationException) {
@@ -418,7 +485,7 @@ class FrogRepository(private val context: Context) {
     // caller defaults missing keys) and writes are skipped with a log.
     private suspend fun readFrogPrefs(): Preferences =
         try {
-            context.frogDataStore.data.first()
+            frogStore.data.first()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -429,7 +496,7 @@ class FrogRepository(private val context: Context) {
     /** Returns true when the edit committed; false means it was skipped (failure logged). */
     private suspend fun editFrogPrefs(transform: (MutablePreferences) -> Unit): Boolean =
         try {
-            context.frogDataStore.edit(transform)
+            frogStore.edit(transform)
             true
         } catch (e: CancellationException) {
             throw e
@@ -472,13 +539,19 @@ class FrogRepository(private val context: Context) {
             cycleDate = cycleDate,
             enabled = enabled,
             armed = armed,
-            phase = FrogPhase.from(armed, frog != null, tickedOff, tracked, required),
+            phase = FrogPhase.from(
+                armed, frog != null, tickedOff, tracked, required,
+                prefs[Keys.FROG_TOOLS_CONFIRMED] ?: false,
+            ),
             frog = frog,
             tickedOff = tickedOff,
             trackedSeconds = tracked,
             requiredSeconds = required,
             locked = computeFrogLocked(enabled, armed, tickedOff, tracked, required),
             openTasks = decodeOpenTasks(prefs[Keys.FROG_OPEN_TASKS_JSON]),
+            allowedToolPackages = sanitizeFrogToolPackages(prefs[Keys.FROG_ALLOWED_TOOL_PACKAGES] ?: emptySet()),
+            toolsConfirmed = prefs[Keys.FROG_TOOLS_CONFIRMED] ?: false,
+            essentialAppPackages = decodeEssentialApps(prefs[Keys.FROG_ESSENTIAL_APP_PACKAGES]),
         )
     }
 
@@ -496,6 +569,7 @@ class FrogRepository(private val context: Context) {
                 tickedOff = false,
                 trackedSeconds = 0,
                 requiredSeconds = required,
+                toolsConfirmed = false,
             ),
             frog = null,
             tickedOff = false,
@@ -503,6 +577,9 @@ class FrogRepository(private val context: Context) {
             requiredSeconds = required,
             locked = false,
             openTasks = decodeOpenTasks(prefs[Keys.FROG_OPEN_TASKS_JSON]),
+            allowedToolPackages = sanitizeFrogToolPackages(prefs[Keys.FROG_ALLOWED_TOOL_PACKAGES] ?: emptySet()),
+            toolsConfirmed = false,
+            essentialAppPackages = decodeEssentialApps(prefs[Keys.FROG_ESSENTIAL_APP_PACKAGES]),
         )
     }
 
@@ -517,7 +594,13 @@ class FrogRepository(private val context: Context) {
         requiredSeconds = DEFAULT_REQUIRED_MINUTES * 60,
         locked = false,
         openTasks = emptyList(),
+        allowedToolPackages = emptySet(),
+        toolsConfirmed = false,
+        essentialAppPackages = null,
     )
+
+    private fun decodeEssentialApps(packages: Set<String>?): Set<String>? =
+        packages?.let(::sanitizeFrogToolPackages)
 
     private fun decodeFrog(raw: String?): FrogTask? {
         if (raw.isNullOrBlank()) return null

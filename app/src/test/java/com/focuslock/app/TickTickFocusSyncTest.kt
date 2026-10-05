@@ -17,6 +17,7 @@ import org.junit.Test
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.time.OffsetDateTime
 
 class TickTickFocusSyncTest {
     private val todayStart = Instant.now().atZone(ZoneId.systemDefault()).toLocalDate()
@@ -107,6 +108,69 @@ class TickTickFocusSyncTest {
     }
 
     @Test
+    fun fetchFocusSessionsIncludesDelayedPriorDaySessionsAndUsesInclusiveCompletionCutoff() = runBlocking {
+        val since = OffsetDateTime.parse("2026-10-03T00:00:00+05:30").toInstant().toEpochMilli()
+        val fixedNow = OffsetDateTime.parse("2026-10-04T12:00:00+05:30").toInstant().toEpochMilli()
+        val includedEnd = since + 12 * 60 * 60_000L
+        val todayEnd = since + 36 * 60 * 60_000L
+        val excludedEnd = since - 1L
+        val requests = mutableListOf<okhttp3.Request>()
+        val client = OkHttpClient.Builder().addInterceptor(Interceptor { chain ->
+            val request = chain.request()
+            requests += request
+            val type = request.url.queryParameter("type")!!.toInt()
+            fun entry(id: String, end: Long) =
+                """{"id":"$id","type":$type,"duration":60,"startTime":"${iso(end - 60_000, "+0530")}","endTime":"${iso(end, "+0530")}"}"""
+            val body = "[${entry("prior-day", includedEnd)},${entry("today", todayEnd)},${entry("before-cutoff", excludedEnd)}]"
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                .body(body.toResponseBody("application/json".toMediaType())).build()
+        }).build()
+
+        val records = TickTickApiClient(client).fetchFocusSessions("secret", since, fixedNow)
+
+        assertEquals(listOf("ticktick_focus_0_prior-day", "ticktick_focus_0_today", "ticktick_focus_1_prior-day", "ticktick_focus_1_today"), records.map { it.id })
+        assertEquals(2, requests.size)
+        assertTrue(requests.all { parseBoundary(it.url.queryParameter("from")!!) == since - 24L * 60L * 60L * 1_000L })
+        assertTrue(requests.all { parseBoundary(it.url.queryParameter("to")!!) == fixedNow })
+    }
+
+    @Test
+    fun fetchFocusSessionsTodayKeepsTodayOnlyCompletionWindow() = runBlocking {
+        val localTodayStart = java.time.LocalDate.now().atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
+        val previousEnd = localTodayStart - 1_000L
+        val todayEnd = System.currentTimeMillis() - 1_000L
+        val requests = mutableListOf<okhttp3.Request>()
+        val client = OkHttpClient.Builder().addInterceptor(Interceptor { chain ->
+            val request = chain.request()
+            requests += request
+            val type = request.url.queryParameter("type")!!.toInt()
+            val yesterday = """{"id":"yesterday","type":$type,"duration":60,"startTime":"${iso(previousEnd - 60_000, "Z")}","endTime":"${iso(previousEnd, "Z")}"}"""
+            val today = """{"id":"today","type":$type,"duration":60,"startTime":"${iso(todayEnd - 60_000, "Z")}","endTime":"${iso(todayEnd, "Z")}"}"""
+            Response.Builder().request(request).protocol(Protocol.HTTP_1_1).code(200).message("OK")
+                .body("[$yesterday,$today]".toResponseBody("application/json".toMediaType())).build()
+        }).build()
+
+        val records = TickTickApiClient(client).fetchFocusSessionsToday("secret")
+
+        assertEquals(listOf("ticktick_focus_0_today", "ticktick_focus_1_today"), records.map { it.id })
+        assertTrue(requests.all { parseBoundary(it.url.queryParameter("from")!!) == localTodayStart - 24L * 60L * 60L * 1_000L })
+    }
+
+    @Test
+    fun fetchFocusSessionsRejectsInvalidAndOverMonthWindows() {
+        val client = TickTickApiClient(OkHttpClient())
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { client.fetchFocusSessions("secret", -1L, now) }
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { client.fetchFocusSessions("secret", now + 1L, now) }
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            runBlocking { client.fetchFocusSessions("secret", now - 31L * 24L * 60L * 60L * 1_000L, now) }
+        }
+    }
+
+    @Test
     fun httpFailureIsPropagated() {
         val client = OkHttpClient.Builder().addInterceptor(Interceptor { chain ->
             Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1).code(503).message("Unavailable")
@@ -127,5 +191,10 @@ class TickTickFocusSyncTest {
         }
         val adjusted = instant.atZone(zone).format(DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS"))
         return adjusted + offset
+    }
+
+    private fun parseBoundary(value: String): Long {
+        val normalized = value.replace(Regex("([+-]\\d{2})(\\d{2})$"), "$1:$2")
+        return OffsetDateTime.parse(normalized).toInstant().toEpochMilli()
     }
 }

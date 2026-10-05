@@ -200,10 +200,12 @@ assert.equal(savedState.cloudNuke.isActive, false, 'Only the originating account
 
 // Duplicate navigation callbacks cannot trigger the five-attempt Nuke early.
 await resetState({ ...structuredClone(state), strictMode: true, strictEndsAt: fakeNow + 60000 });
+const attemptsBeforeNavigation = savedState.strictAttempts || 0;
+const blockedBeforeNavigation = savedState.blockedTotal || 0;
 await handlers.beforeNavigate({ tabId: 3, frameId: 0, url: 'https://reddit.com/' });
 await handlers.beforeNavigate({ tabId: 3, frameId: 0, url: 'https://reddit.com/' });
-assert.equal(savedState.strictAttempts, 1);
-assert.equal(savedState.blockedTotal, 1);
+assert.equal(savedState.strictAttempts, attemptsBeforeNavigation + 1);
+assert.equal(savedState.blockedTotal, blockedBeforeNavigation + 1);
 
 // A hung network check cannot delay a known cached block response.
 context.self.FocusLockCloud.syncUsage = () => new Promise(() => {});

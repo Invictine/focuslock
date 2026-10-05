@@ -90,6 +90,11 @@ class TickTickApiClient(private val focusHttpClient: OkHttpClient = sharedHttpCl
         const val REDIRECT_URI = "http://127.0.0.1:8080/"
         const val LEGACY_REDIRECT_URI = "focuslock://oauth/callback"
 
+        private const val DAY_MILLIS = 24L * 60L * 60L * 1_000L
+        // The API query includes an extra day for sessions that began before the
+        // completion window, so cap the actual requested span at 31 days.
+        private const val MAX_FOCUS_QUERY_RANGE_MILLIS = 31L * DAY_MILLIS
+
         /** Max concurrent per-project data requests (was strictly sequential, up to 30 calls). */
         private const val MAX_PARALLEL_PROJECT_REQUESTS = 6
 
@@ -380,21 +385,39 @@ class TickTickApiClient(private val focusHttpClient: OkHttpClient = sharedHttpCl
         fetchFocusSessionsToday(token)
 
     /** Fetch completed, real focus sessions from TickTick's official focus API. */
-    suspend fun fetchFocusSessionsToday(token: String): List<TickTickWorkRecord> = withContext(Dispatchers.IO) {
-        require(token.isNotBlank()) { "TickTick access token is blank" }
+    suspend fun fetchFocusSessionsToday(token: String): List<TickTickWorkRecord> {
         val now = System.currentTimeMillis()
-        val calendar = java.util.Calendar.getInstance().apply {
+        val startOfToday = java.util.Calendar.getInstance().apply {
             timeInMillis = now
             set(java.util.Calendar.HOUR_OF_DAY, 0)
             set(java.util.Calendar.MINUTE, 0)
             set(java.util.Calendar.SECOND, 0)
             set(java.util.Calendar.MILLISECOND, 0)
+        }.timeInMillis
+        return fetchFocusSessions(token, completedSinceMillis = startOfToday, nowMillis = now)
+    }
+
+    /**
+     * Fetch completed focus sessions whose completion time is in the inclusive
+     * [completedSinceMillis, nowMillis] window. The API query begins one day earlier
+     * so overnight sessions are present even when TickTick filters by start time.
+     */
+    suspend fun fetchFocusSessions(
+        token: String,
+        completedSinceMillis: Long,
+        nowMillis: Long = System.currentTimeMillis(),
+    ): List<TickTickWorkRecord> = withContext(Dispatchers.IO) {
+        require(token.isNotBlank()) { "TickTick access token is blank" }
+        require(completedSinceMillis >= 0L) { "Focus completion start must be non-negative" }
+        require(completedSinceMillis <= nowMillis) { "Focus completion start cannot be after now" }
+        require(nowMillis - completedSinceMillis <= MAX_FOCUS_QUERY_RANGE_MILLIS - DAY_MILLIS) {
+            "TickTick focus query range cannot exceed one month"
         }
-        val fromMillis = calendar.timeInMillis
+        val queryFromMillis = completedSinceMillis - DAY_MILLIS
         // Include overnight sessions even if TickTick selects records by start time.
-        // Only sessions ending today pass the parser below.
-        val from = formatFocusBoundary(fromMillis - 24L * 60L * 60L * 1000L)
-        val to = formatFocusBoundary(now)
+        // The parser uses completedSinceMillis as an inclusive completion-time filter.
+        val from = formatFocusBoundary(queryFromMillis)
+        val to = formatFocusBoundary(nowMillis)
         val records = mutableListOf<TickTickWorkRecord>()
         for (type in 0..1) {
             val url = okhttp3.HttpUrl.Builder()
@@ -413,7 +436,12 @@ class TickTickApiClient(private val focusHttpClient: OkHttpClient = sharedHttpCl
                 }
                 response.body?.string() ?: throw java.io.IOException("TickTick focus response body was empty")
             }
-            val parsed = TickTickFocusParser.parse(body, expectedType = type, startOfDayMillis = fromMillis, nowMillis = now)
+            val parsed = TickTickFocusParser.parse(
+                body,
+                expectedType = type,
+                startOfDayMillis = completedSinceMillis,
+                nowMillis = nowMillis,
+            )
             records += parsed
         }
         records.distinctBy { it.id }

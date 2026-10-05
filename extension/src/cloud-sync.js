@@ -629,6 +629,7 @@ async function getSnapshot(state, shouldSync) {
   await assertIdentity(auth.userId, auth.session);
   return {
     signedIn: Boolean(clerk.session),
+    accountId: clerk.session ? clerk.user?.id || '' : '',
     user: clerk.user ? { id: clerk.user.id, email: clerk.user.primaryEmailAddress?.emailAddress || '' } : null,
     devices: devices || [],
     summary,
@@ -652,6 +653,7 @@ async function status() {
   const m = await meta(clerk.user?.id || 'anonymous');
   return {
     signedIn: Boolean(clerk.session),
+    accountId: clerk.session ? clerk.user?.id || '' : '',
     lastSyncAt: Number(m.lastSyncAt) || 0,
     lastError: m.lastError || '',
     lastWarning: m.lastWarning || '',
@@ -709,8 +711,9 @@ async function addWorkRecord(record) {
 }
 
 // Idempotent focus-session log (sessionId dedupes retries server-side).
-async function logFocusSession(session) {
+async function logFocusSession(session, expectedAccountId) {
   const identity = await cloudClient();
+  if (expectedAccountId && identity.user?.id !== expectedAccountId) return { signedIn: false, ok: false };
   if (!identity.session || !identity.user) return { signedIn: false, ok: false };
   const sessionId = session.sessionId || `focus_${crypto.randomUUID()}`;
   const args = {
@@ -738,8 +741,9 @@ function finiteOrNull(value) {
   return Number.isFinite(n) ? n : null;
 }
 
-async function savePrefs(prefs) {
+async function savePrefs(prefs, expectedAccountId) {
   const identity = await cloudClient();
+  if (expectedAccountId && identity.user?.id !== expectedAccountId) return { signedIn: false, ok: false };
   if (!identity.session || !identity.user) return { signedIn: false, ok: false };
   const args = { updatedAt: finiteOrNull(prefs.updatedAt) ?? Date.now() };
   if (prefs.strictMode != null) args.strictMode = Boolean(prefs.strictMode);
@@ -775,8 +779,48 @@ async function activateNuke() {
   return { signedIn: true, ok: true };
 }
 
+async function guardian(message) {
+  const auth = await authContext();
+  if (!auth) return { signedIn: false, ok: false, error: 'Sign in to configure a trusted person.' };
+  const kind = message.type;
+  const args = kind === 'guardianSave' ? { email: String(message.email || '').trim() }
+    : kind === 'guardianRequest' ? { strictSessionId: String(message.sessionId || ''), strictEndsAt: Number(message.endsAt) } : {};
+  const path = kind === 'guardianSave' ? 'strictApproval:configureGuardian'
+    : kind === 'guardianRequest' ? 'strictApproval:requestApprovalEmail' : 'strictApproval:getGuardian';
+  const result = await callConvex(kind === 'guardianRequest' ? 'action' : kind === 'guardianSave' ? 'mutation' : 'query', path, args, auth.authToken);
+  await assertIdentity(auth.userId, auth.session);
+  return { ok: true, signedIn: true, result };
+}
+
+async function sharedRules(message) {
+  const auth = await authContext();
+  if (!auth) return { ok: false, signedIn: false, error: 'Sign in to manage account schedules and limits.' };
+  const config = await callConvex('query', 'focus:getConfiguration', {}, auth.authToken);
+  await assertIdentity(auth.userId, auth.session);
+  if (message.type === 'sharedRulesGet') return { ok: true, config };
+  if (config.prefs?.strictMode && (!config.prefs.strictEndsAt || config.prefs.strictEndsAt > Date.now())) throw new Error('Shared boundaries cannot change during Strict Mode.');
+  const schedules = message.collection === 'schedules';
+  const key = schedules ? 'schedules' : 'limits';
+  const version = Number(config[schedules ? 'schedulesUpdatedAt' : 'limitsUpdatedAt']) || 0;
+  if (Number(message.version) !== version) throw new Error('Another device changed these rules. Refresh and review before saving.');
+  const fields = schedules ? ['scheduleId', 'label', 'targetKind', 'targetKey', 'days', 'startMinute', 'endMinute', 'isEnabled']
+    : ['targetKind', 'targetKey', 'label', 'dailyLimitMinutes', 'sessionLimitMinutes', 'isBlockedNow'];
+  const clean = row => Object.fromEntries(fields.filter(field => row[field] !== undefined).map(field => [field, row[field]]));
+  const same = row => schedules ? row.scheduleId === message.row?.scheduleId
+    : row.targetKind === message.row?.targetKind && row.targetKey === message.row?.targetKey;
+  const rows = (config[key] || []).filter(row => !same(row)).map(clean);
+  if (message.remove !== true) rows.push(clean(message.row || {}));
+  // The API advances a changed collection to at least storedVersion + 1.
+  // Supplying its read version rejects concurrent replacements after that read.
+  const result = await callConvex('mutation', schedules ? 'focus:saveSchedules' : 'focus:saveAppLimits',
+    { [key]: rows, updatedAt: version }, auth.authToken);
+  await assertIdentity(auth.userId, auth.session);
+  if (result?.applied === false) throw new Error('Another device changed these rules. Refresh and review before saving.');
+  return { ok: true };
+}
+
 self.FocusLockCloud = {
   startLivePolicy, ensureLivePolicy, livePolicyStatus,
   syncUsage, getSnapshot, signOut, status, refreshAuth, isAuthUrl,
-  getDashboard, addWorkRecord, logFocusSession, savePrefs, saveGroups, setWebsiteBlocked, activateNuke,
+  getDashboard, addWorkRecord, logFocusSession, savePrefs, saveGroups, setWebsiteBlocked, activateNuke, guardian, sharedRules,
 };

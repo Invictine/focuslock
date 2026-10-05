@@ -16,10 +16,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -28,6 +32,8 @@ import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Shield
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material.icons.rounded.Timer
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -42,6 +48,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -59,6 +66,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.core.content.ContextCompat
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -103,7 +111,6 @@ fun StrictModeScreen() {
     val automation = FocusLockApplication.instance.strictModeAutomationRepository
     val places by automation.placesFlow.collectAsStateWithLifecycle(initialValue = emptyList())
     val windows by automation.recurringWindowsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
-
     var showEnableDialog by remember { mutableStateOf(false) }
     var showDisableDialog by remember { mutableStateOf(false) }
     var activationMode by rememberSaveable { mutableStateOf("manual") }
@@ -129,7 +136,7 @@ fun StrictModeScreen() {
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         StaggeredFadeSlide(visible = entered, index = 0, screenKey = "strict") {
-            ScreenHeader(title = "Strict Mode")
+            ScreenHeader(title = "Strict Mode", subtitle = "Protect your existing boundaries with a timed commitment.")
         }
         if (strictMode) {
             StaggeredFadeSlide(visible = entered, index = 1, modifier = Modifier.fillMaxWidth(), screenKey = "strict") {
@@ -195,7 +202,8 @@ fun StrictModeScreen() {
         }
 
         StaggeredFadeSlide(visible = entered, index = 4, modifier = Modifier.fillMaxWidth(), screenKey = "strict") {
-            StrictProtectionCard(
+            MoreProtectionOptions {
+              StrictProtectionCard(
                 appCount = blockedApps.count { it.isBlocked },
                 websiteCount = blockedWebsites.count { it.isBlocked },
                 boundariesLock = boundariesLock,
@@ -204,13 +212,10 @@ fun StrictModeScreen() {
                     scope.launch { settings.setBoundariesLock(enabled) }
                 }
             )
+              StrictRulesCard()
+              ApprovalUnlockCard(settings)
+            }
         }
-
-        StaggeredFadeSlide(visible = entered, index = 5, modifier = Modifier.fillMaxWidth(), screenKey = "strict") {
-            StrictRulesCard()
-        }
-
-        ApprovalUnlockCard(settings)
 
         if (showEnableDialog) {
             AlertDialog(
@@ -362,17 +367,11 @@ private fun StrictActivationSwitcher(selected: String, onSelect: (String) -> Uni
             Text("Activation", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Text("Choose how you want to set up Strict Mode.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            val options = listOf("manual" to "Manual", "schedule" to "Schedule", "location" to "Location")
-            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                options.forEachIndexed { index, (key, label) ->
-                    SegmentedButton(
-                        selected = selected == key,
-                        onClick = { onSelect(key) },
-                        shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
-                        label = { Text(label, maxLines = 1) }
-                    )
-                }
-            }
+            StrictChoiceSelector(
+                options = listOf("manual" to "Manual", "schedule" to "Schedule", "location" to "Location"),
+                selected = selected,
+                onSelect = onSelect
+            )
         }
     }
 }
@@ -404,16 +403,44 @@ private fun StrictPreferencesCard(preset: String, onPresetChange: (String) -> Un
             Text("Commitment style", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Text("Choose the kind of focus session. This preset is saved with your commitment.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            val options = listOf("deep_work" to "Deep work", "exam" to "Exam", "sleep" to "Sleep")
-            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                options.forEachIndexed { index, (key, label) ->
-                    SegmentedButton(
-                        selected = preset == key,
-                        onClick = { onPresetChange(key) },
-                        shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
-                        label = { Text(label, maxLines = 1) }
-                    )
+            StrictChoiceSelector(
+                options = listOf("deep_work" to "Deep work", "exam" to "Exam", "sleep" to "Sleep"),
+                selected = preset,
+                onSelect = onPresetChange
+            )
+        }
+    }
+}
+
+@Composable
+private fun StrictChoiceSelector(
+    options: List<Pair<String, String>>,
+    selected: String,
+    onSelect: (String) -> Unit
+) {
+    if (LocalDensity.current.fontScale >= 1.3f) {
+        Column(Modifier.fillMaxWidth().selectableGroup()) {
+            options.forEach { (key, label) ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
+                        .selectable(selected = selected == key, onClick = { onSelect(key) }, role = Role.RadioButton)
+                        .padding(horizontal = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    RadioButton(selected = selected == key, onClick = null)
+                    Text(label, modifier = Modifier.padding(start = 8.dp), style = MaterialTheme.typography.bodyLarge)
                 }
+            }
+        }
+    } else {
+        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+            options.forEachIndexed { index, (key, label) ->
+                SegmentedButton(
+                    selected = selected == key,
+                    onClick = { onSelect(key) },
+                    shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
+                    label = { Text(label, maxLines = 1) }
+                )
             }
         }
     }
@@ -433,6 +460,7 @@ private fun StrictAutomationCard(
     var placeName by rememberSaveable { mutableStateOf("") }
     var windowName by rememberSaveable { mutableStateOf("") }
     var showPlacePicker by remember { mutableStateOf(false) }
+    var editingPlace by remember { mutableStateOf<StrictPlaceRule?>(null) }
     var days by rememberSaveable { mutableStateOf(setOf(1, 2, 3, 4, 5)) }
     var startMinute by rememberSaveable { mutableStateOf(9 * 60) }
     var endMinute by rememberSaveable { mutableStateOf(17 * 60) }
@@ -441,9 +469,11 @@ private fun StrictAutomationCard(
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (mode == StrictAutomationMode.LOCATION) {
                 Text("Activate at a place", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                Text("Strict Mode activates when Android observes an app launch while you're near a saved place.",
+                Text("With Location activation selected, Strict Mode stays active unless a fresh, precise fix confirms you are outside every enabled place. An uncertain boundary reading keeps Strict Mode active.",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("Location access and a recent position are required.", style = MaterialTheme.typography.bodySmall,
+                Text("If location, required permissions, or background access is unavailable, or no fresh reliable fix is available, Strict Mode stays active. Home-only blocking is configured separately under Boundaries.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Precise location and background access let FocusLock confirm when you are outside all enabled places.", style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Button(onClick = { showPlacePicker = true }, modifier = Modifier.fillMaxWidth()) { Text("Choose place") }
                 places.forEach { place ->
@@ -460,6 +490,11 @@ private fun StrictAutomationCard(
                             onCheckedChange = null,
                             modifier = Modifier.semantics { contentDescription = "Activate Strict Mode at ${place.label}" }
                         )
+                        TextButton(onClick = {
+                            editingPlace = place
+                            placeName = place.label
+                            showPlacePicker = true
+                        }) { Text("Edit") }
                         TextButton(onClick = { onDeletePlace(place.id) }) { Text("Remove") }
                     }
                 }
@@ -522,9 +557,14 @@ private fun StrictAutomationCard(
         }
     }
     if (showPlacePicker) {
-        StrictLocationPickerDialog(initialLabel = placeName, onDismiss = { showPlacePicker = false }) { selection ->
-            onSavePlace(StrictPlaceRule(UUID.randomUUID().toString(), placeName.ifBlank { selection.label }, selection.latitude, selection.longitude, selection.radiusMeters))
+        StrictLocationPickerDialog(
+            initialLabel = editingPlace?.label ?: placeName,
+            initialSelection = editingPlace?.let { StrictLocationSelection(it.label, it.latitude, it.longitude, it.radiusMeters) },
+            onDismiss = { showPlacePicker = false; editingPlace = null }
+        ) { selection ->
+            onSavePlace(StrictPlaceRule(editingPlace?.id ?: UUID.randomUUID().toString(), placeName.ifBlank { selection.label }, selection.latitude, selection.longitude, selection.radiusMeters, editingPlace?.enabled ?: true))
             placeName = ""
+            editingPlace = null
         }
     }
 }
@@ -606,6 +646,30 @@ private fun StrictProtectionCard(
     }
 }
 
+@Composable
+private fun MoreProtectionOptions(content: @Composable () -> Unit) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        shape = MaterialTheme.shapes.large,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button) { expanded = !expanded },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("More protection options", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold))
+                Icon(
+                    imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                    contentDescription = if (expanded) "Collapse protection options" else "Expand protection options"
+                )
+            }
+            if (expanded) content()
+        }
+    }
+}
+
 /** Neutral tonal hero shown while Strict Mode is off, with the primary enable action. */
 @Composable
 private fun StrictOffCard(onEnableClick: () -> Unit) {
@@ -670,7 +734,7 @@ private fun StrictOffCard(onEnableClick: () -> Unit) {
     }
 }
 
-/** Prominent error-container hero with a live countdown while Strict Mode is active. */
+/** Prominent secondary-container hero with a live countdown while Strict Mode is active. */
 @Composable
 private fun StrictActiveCard(
     settings: SettingsRepository,
@@ -683,7 +747,7 @@ private fun StrictActiveCard(
 ) {
     Card(
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.errorContainer
+            containerColor = MaterialTheme.colorScheme.secondaryContainer
         ),
         shape = MaterialTheme.shapes.large,
         modifier = Modifier.fillMaxWidth()
@@ -698,14 +762,14 @@ private fun StrictActiveCard(
             ) {
                 IconBadge(
                     icon = Icons.Rounded.Lock,
-                    containerColor = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.12f),
-                    contentColor = MaterialTheme.colorScheme.onErrorContainer
+                    containerColor = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.12f),
+                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
                 )
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "Strict Mode is active",
                         style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                        color = MaterialTheme.colorScheme.onErrorContainer
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
                     )
                     StrictCooldownText(settings, endsAt)
                 }
@@ -713,18 +777,18 @@ private fun StrictActiveCard(
             Text(
                 "${attempts} blocked app ${if (attempts == 1) "attempt" else "attempts"} this session",
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onErrorContainer
+                color = MaterialTheme.colorScheme.onSecondaryContainer
             )
             if (attempts in 3..4) {
                 Text(if (attempts == 3) "You're at three attempts. Take a short pause before trying again."
                     else "One more blocked attempt will start the 10-minute reset if Nuke is enabled.",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onErrorContainer)
+                    color = MaterialTheme.colorScheme.error)
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Nuke after 5 attempts", fontWeight = FontWeight.SemiBold)
-                    Text("Start the 10-minute reset if you keep trying blocked apps.", style = MaterialTheme.typography.bodySmall)
+                    Text("Nuke after 5 attempts", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSecondaryContainer)
+                    Text("Start the 10-minute reset if you keep trying blocked apps.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSecondaryContainer)
                 }
                 Switch(checked = nukeAfterFive, onCheckedChange = onNukeAfterFiveChange)
             }
@@ -737,8 +801,8 @@ private fun StrictActiveCard(
                     .fillMaxWidth()
                     .height(52.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.onErrorContainer,
-                    contentColor = MaterialTheme.colorScheme.errorContainer
+                containerColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                    contentColor = MaterialTheme.colorScheme.secondaryContainer
                 ),
                 shape = MaterialTheme.shapes.large
             ) {
@@ -878,7 +942,7 @@ private fun StrictCooldownText(settings: SettingsRepository, endsAt: Long) {
         Text(
             text = cooldownText,
             style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onErrorContainer
+            color = MaterialTheme.colorScheme.onSecondaryContainer
         )
     }
 }

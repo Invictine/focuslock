@@ -47,6 +47,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -97,6 +98,7 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
         initialValue = SettingsRepository.DEFAULT_FOCUS_HOME_STYLE
     )
     var showHomeStyleDialog by remember { mutableStateOf(false) }
+    var showFrogEssentialApps by rememberSaveable { mutableStateOf(false) }
 
     var showOAuthCredentialsDialog by remember { mutableStateOf(false) }
     var showTokenField by remember { mutableStateOf(false) }
@@ -308,7 +310,7 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
     val syncDateFormatter = remember { SimpleDateFormat("MMM d, h:mm a", Locale.getDefault()) }
     var lastSyncText by remember(refreshTick) { mutableStateOf("") }
     LaunchedEffect(refreshTick) {
-        val ts = bank.getLastSyncTimestamp()
+        val ts = bank.getLastTickTickSyncTimestamp()
         lastSyncText = if (ts > 0) {
             "Last synced ${syncDateFormatter.format(Date(ts))}"
         } else "Never synced"
@@ -332,16 +334,16 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
                 if (showToast) Toast.makeText(context, syncMessage, Toast.LENGTH_LONG).show()
                 return
             }
-            val ts = bank.getLastSyncTimestamp()
+            val ts = bank.getLastTickTickSyncTimestamp()
             lastSyncText = if (ts > 0) {
                 "Last synced ${syncDateFormatter.format(Date(ts))}"
             } else lastSyncText
             syncMessage = if (result.sessionsFound == 0) {
-                "No completed focus sessions found today."
+                "No completed focus sessions found in the past week."
             } else if (result.newSessions == 0) {
-                "Already up to date — today's focus sessions were already synced."
+                "Already up to date — recent focus sessions were already synced."
             } else {
-                "Synced ${result.newSessions} focus session(s) — ${result.focusMinutes} min focused, +${result.earnedMinutes} min earned."
+                "Synced ${result.newSessions} new focus session(s) — +${result.earnedMinutes} min earned."
             }
             if (showToast) Toast.makeText(context, syncMessage, Toast.LENGTH_LONG).show()
         } catch (e: Exception) {
@@ -351,6 +353,12 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
         } finally {
             isSyncing = false
         }
+    }
+
+    BackHandler(enabled = showFrogEssentialApps) { showFrogEssentialApps = false }
+    if (showFrogEssentialApps) {
+        FrogEssentialAppsScreen(onBack = { showFrogEssentialApps = false })
+        return
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -503,7 +511,7 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
         }
 
         // 2c. Eat the Frog Card — hard-lock toggle, required focus minutes, wake hour.
-        FrogSettingsCard()
+        FrogSettingsCard(onOpenEssentialApps = { showFrogEssentialApps = true })
 
         // 3. Block Schedules Card — owns its flow, editor state and dialogs.
         BlockSchedulesCard()
@@ -769,13 +777,13 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            "Automatic focus import is unavailable. Log completed focus time in FocusLock; task notifications earn no credits.",
+                            "Completed TickTick focus sessions sync automatically while FocusLock protection is running. Missed sessions from the past week are recovered; task notifications earn no credits.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                     Switch(
-                        checked = false,
+                        checked = isTickTickConnected,
                         enabled = false,
                         onCheckedChange = {},
                         colors = SwitchDefaults.colors(
@@ -2132,7 +2140,7 @@ private fun DailyReminderCard() {
 
 /** "Eat the Frog" hard-lock settings: toggle, required focus minutes and wake hour. */
 @Composable
-private fun FrogSettingsCard() {
+private fun FrogSettingsCard(onOpenEssentialApps: () -> Unit) {
     val frog = FocusLockApplication.instance.frogRepository
     val scope = rememberCoroutineScope()
     val enabled by frog.enabledFlow.collectAsStateWithLifecycle(initialValue = FrogRepository.DEFAULT_ENABLED)
@@ -2194,7 +2202,7 @@ private fun FrogSettingsCard() {
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        text = "Hard-lock boundary apps until today's frog is done.",
+                        text = "Only essentials and your chosen tools until today's frog is done.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -2236,7 +2244,7 @@ private fun FrogSettingsCard() {
                             color = MaterialTheme.colorScheme.onSurface
                         )
                         Text(
-                            text = "24-hour clock (5 = 05:00). The lock arms on the first unlock at/after it.",
+                            text = "24-hour clock (5 = 05:00). Starts each morning and opens when you unlock.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -2262,6 +2270,30 @@ private fun FrogSettingsCard() {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.surfaceContainerHighest)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 56.dp)
+                    .clickable(onClick = onOpenEssentialApps)
+                    .padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "Essential apps",
+                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        "Choose what's available each morning",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Text("›", style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }

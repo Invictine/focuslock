@@ -4,9 +4,12 @@
   const url = q.get('url') || '';
   const list = q.get('list') || 'Blocked';
   const mode = q.get('mode') || '';
+  const reason = q.get('reason') || '';
   const sharedNuke = mode === 'shared-nuke' || (mode === 'nuclear' && /shared nuclear/i.test(list));
   const permanent = mode === 'permanent' || (!mode && /permanent/i.test(list));
   const dailyCapBlock = ['group-limit', 'daily-limit', 'global-limit'].includes(mode);
+  const noSnooze = permanent || sharedNuke || dailyCapBlock || ['strict', 'schedule', 'frozen', 'frog', 'nuclear'].includes(mode)
+    || reason === 'frozen-lock' || reason.startsWith('schedule:');
   document.getElementById('blockedUrl').textContent = url;
   document.getElementById('listPill').textContent =
     permanent ? 'Permanent block'
@@ -31,8 +34,11 @@
     document.getElementById('snoozeBtn').hidden = true;
     document.getElementById('snoozeBox').style.display = 'none';
   }
+  if (mode === 'frog') document.querySelector('.sub').textContent = 'Finish your Frog task and the required focused time before returning to this site.';
+  document.getElementById('snoozeBtn').hidden = noSnooze;
+  if (noSnooze) document.getElementById('snoozeBox').style.display = 'none';
 
-  const dashboardUrl = chrome.runtime.getURL('options/options.html');
+  const focusUrl = chrome.runtime.getURL('options/options.html?tab=stats&frog=1');
   const frogCard = document.getElementById('frogCard');
   const frogTitle = document.getElementById('frogTitle');
   const frogMeta = document.getElementById('frogMeta');
@@ -41,30 +47,20 @@
   const frogCta = document.getElementById('frogCta');
 
   function renderFrog(raw) {
-    if (raw?.supported === false) {
-      frogCard.hidden = false;
-      frogCard.setAttribute('aria-busy', 'false');
-      frogTitle.textContent = 'Today’s Frog is on your phone.';
-      frogMeta.textContent = 'The Android app keeps this task on-device, so Chrome cannot read its selection or progress yet.';
-      frogProgress.hidden = true;
-      frogProgressLabel.hidden = true;
-      frogCta.hidden = true;
-      return;
-    }
+    if (raw?.supported !== true) { frogCard.hidden = true; return; }
     const state = raw && (raw.state || raw.frogStatus || raw);
     const frog = state && (state.frog || state.selected || state.task);
+    frogCard.hidden = false;
+    frogCard.setAttribute('aria-busy', 'false');
+    frogCta.hidden = false;
+    frogCta.href = focusUrl;
+    if (state.enabled === false) { frogCard.hidden = true; return; }
     if (!frog || !frog.title) {
-      frogCard.hidden = false;
-      frogCard.setAttribute('aria-busy', 'false');
-      frogTitle.textContent = raw?.supported === true ? 'Choose one important task first.' : 'Focus task unavailable.';
-      frogMeta.textContent = raw?.supported === true
-        ? 'Your boundary stays protected while you decide what deserves your best attention.'
-        : 'Your block is still active. Open the Focus dashboard to check your account and sync status.';
+      frogTitle.textContent = 'Choose today’s Frog.';
+      frogMeta.textContent = 'Pick the task you want to finish before returning to this site.';
       frogProgress.hidden = true;
       frogProgressLabel.hidden = true;
-      frogCta.hidden = raw?.supported === true;
-      frogCta.href = dashboardUrl;
-      frogCta.textContent = 'Open Focus dashboard →';
+      frogCta.textContent = 'Choose a Frog in Focus →';
       return;
     }
     const tracked = Number(state.trackedSeconds ?? state.progressSeconds ?? 0);
@@ -72,35 +68,23 @@
     const percent = required > 0 ? Math.min(100, Math.round(tracked / required * 100)) : 0;
     const mins = Math.floor(tracked / 60);
     const targetMins = Math.ceil(required / 60);
-    frogCard.hidden = false;
-    frogCard.setAttribute('aria-busy', 'false');
     frogTitle.textContent = frog.title;
-    frogMeta.textContent = frog.projectName || frog.dueDate ? [frog.projectName, frog.dueDate].filter(Boolean).join(' · ') : 'Finish this before returning to the boundary app.';
+    frogMeta.textContent = frog.projectName || frog.dueDate ? [frog.projectName, frog.dueDate].filter(Boolean).join(' · ') : 'Focus sessions for this task count toward its required time.';
     frogProgress.hidden = false;
     frogProgressLabel.hidden = false;
     frogProgress.querySelector('span').style.width = percent + '%';
     frogProgress.setAttribute('aria-valuenow', String(percent));
     frogProgressLabel.textContent = targetMins ? `${mins} of ${targetMins} min focused · ${percent}%` : `${percent}% complete`;
-    frogCta.hidden = true;
+    frogCta.textContent = state.locked ? 'Continue your Frog in Focus →' : 'View your Frog in Focus →';
   }
-
   chrome.runtime.sendMessage({ type: 'frogStatus' }, (response) => {
     if (permanent) return; // no escape routes on a permanent block
-    if (chrome.runtime.lastError) {
-      frogCard.hidden = false;
-      frogCard.setAttribute('aria-busy', 'false');
-      frogTitle.textContent = 'Focus task unavailable.';
-      frogMeta.textContent = 'Your block is still active. Open the dashboard to check your task.';
-      frogProgress.hidden = true; frogProgressLabel.hidden = true;
-      frogCta.hidden = false; frogCta.href = dashboardUrl;
-      frogCta.textContent = 'Open Focus dashboard →';
-      return;
-    }
+    if (chrome.runtime.lastError) { frogCard.hidden = true; return; }
     renderFrog(response);
   });
 
   document.getElementById('goBack').onclick = () => history.length > 1 ? history.back() : location.replace('chrome://newtab/');
-  document.getElementById('dashboard').onclick = () => chrome.tabs.update({ url: dashboardUrl });
+  document.getElementById('dashboard').onclick = () => chrome.tabs.update({ url: chrome.runtime.getURL('options/options.html?tab=stats') });
   document.getElementById('closeTab').onclick = (e) => { e.preventDefault(); chrome.tabs.getCurrent(t => t && chrome.tabs.remove(t.id)); };
 
   // Emergency 5-min break with type + delay (disabled for frozen/nuclear-with-password)

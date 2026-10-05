@@ -1,11 +1,6 @@
 package com.focuslock.app.data.repository
 
-import android.Manifest
 import android.content.Context
-import android.content.pm.PackageManager
-import android.location.Location
-import android.location.LocationManager
-import androidx.core.content.ContextCompat
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -18,6 +13,9 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import java.time.ZonedDateTime
+import com.focuslock.app.location.DeviceLocationSource
+import com.focuslock.app.location.HomeLocationPolicy
+import com.focuslock.app.location.HomePlace
 
 private val Context.strictAutomationStore by preferencesDataStore(name = "focuslock_strict_automation")
 
@@ -43,6 +41,7 @@ data class StrictRecurringWindow(
 
 /** Persisted activation rules for Strict Mode. UI owns presentation; enforcement owns lookup. */
 class StrictModeAutomationRepository(private val context: Context) {
+    private val locationSource = DeviceLocationSource(context)
     private val json = Json { ignoreUnknownKeys = true }
     object Keys {
         val PLACES = stringPreferencesKey("strict_mode_places_json")
@@ -102,19 +101,19 @@ class StrictModeAutomationRepository(private val context: Context) {
     private fun decodePlaces(raw: String?): List<StrictPlaceRule> = try { if (raw.isNullOrBlank()) emptyList() else json.decodeFromString(raw) } catch (_: Exception) { emptyList() }
     private fun decodeWindows(raw: String?): List<StrictRecurringWindow> = try { if (raw.isNullOrBlank()) emptyList() else json.decodeFromString(raw) } catch (_: Exception) { emptyList() }
 
-    private fun isInsideConfiguredPlace(): Boolean {
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) !=
-            PackageManager.PERMISSION_GRANTED) return false
+    private suspend fun isInsideConfiguredPlace(): Boolean {
         val configured = _places.value.filter { it.enabled && it.radiusMeters > 0f }
         if (configured.isEmpty()) return false
-        val manager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return false
-        val last = sequenceOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
-            .mapNotNull { provider -> try { manager.getLastKnownLocation(provider) } catch (_: SecurityException) { null } }
-            .maxByOrNull { it.time } ?: return false
-        if (System.currentTimeMillis() - last.time !in 0..10 * 60_000L || !last.hasAccuracy()) return false
+        // Enabled location rules stay active unless a reliable fix is outside every place.
+        if (!locationSource.hasPrecisePermission() || !locationSource.hasBackgroundPermission() ||
+            !locationSource.isLocationEnabled()) return true
+        val last = locationSource.currentLocation() ?: return true
+        if (!locationSource.hasPrecisePermission() || !locationSource.hasBackgroundPermission() ||
+            !locationSource.isLocationEnabled()) return true
         return configured.any { rule ->
-            val target = Location("strict-rule").apply { latitude = rule.latitude; longitude = rule.longitude }
-            last.accuracy <= rule.radiusMeters && last.distanceTo(target) <= rule.radiusMeters
+            HomeLocationPolicy.isInside(
+                HomePlace(rule.label, rule.latitude, rule.longitude, rule.radiusMeters), last
+            ) != false
         }
     }
 

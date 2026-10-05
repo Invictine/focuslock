@@ -14,6 +14,7 @@ import com.focuslock.app.data.repository.PermanentBlocksRepository
 import com.focuslock.app.data.repository.SettingsRepository
 import com.focuslock.app.data.repository.StrictModeAutomationRepository
 import com.focuslock.app.data.repository.TargetGroupsRepository
+import com.focuslock.app.location.HomeLocationRepository
 import com.focuslock.app.sync.FocusSyncManager
 import com.focuslock.app.service.TickTickFocusSync
 import com.focuslock.app.work.DailyReminderScheduler
@@ -21,6 +22,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
 class FocusLockApplication : Application() {
@@ -49,6 +52,9 @@ class FocusLockApplication : Application() {
     lateinit var strictModeAutomationRepository: StrictModeAutomationRepository
         private set
 
+    lateinit var homeLocationRepository: HomeLocationRepository
+        private set
+
     lateinit var permanentBlocksRepository: PermanentBlocksRepository
         private set
 
@@ -72,6 +78,7 @@ class FocusLockApplication : Application() {
         frogRepository = FrogRepository(applicationContext)
         targetGroupsRepository = TargetGroupsRepository(applicationContext)
         strictModeAutomationRepository = StrictModeAutomationRepository(applicationContext)
+        homeLocationRepository = HomeLocationRepository(applicationContext)
         permanentBlocksRepository = PermanentBlocksRepository(applicationContext)
         syncManager = FocusSyncManager(
             applicationContext,
@@ -93,6 +100,13 @@ class FocusLockApplication : Application() {
         } catch (_: Exception) { }
 
         createNotificationChannels()
+
+        appScope.launch {
+            combine(frogRepository.wakeHourFlow, frogRepository.enabledFlow) { hour, enabled -> hour to enabled }
+                .distinctUntilChanged().collect { (hour, enabled) ->
+                    com.focuslock.app.service.FrogMorningScheduler.schedule(this@FocusLockApplication, hour, enabled)
+                }
+        }
 
         // WorkManager entries don't survive restore/reinstall; reconcile the daily
         // reminder's scheduled worker with the persisted preference at process start.

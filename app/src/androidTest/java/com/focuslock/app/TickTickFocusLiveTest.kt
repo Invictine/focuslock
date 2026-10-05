@@ -44,15 +44,26 @@ class TickTickFocusLiveTest {
             }
             response
         }.build()
-        TickTickApiClient(diagnostics).fetchFocusSessionsToday(TickTickAuthConfig.getValidAccessToken(app.settingsRepository)!!)
+        val todayRecords = TickTickApiClient(diagnostics).fetchFocusSessionsToday(TickTickAuthConfig.getValidAccessToken(app.settingsRepository)!!)
         val first = app.tickTickFocusSync.sync()
         assertNotNull("TickTick connection is unavailable or expired", first)
         first!!
         android.util.Log.i("TickTickFocusLiveTest", "Found ${first.sessionsFound} sessions, ${first.focusMinutes} focus minutes; imported ${first.newSessions}, earned ${first.earnedMinutes} minutes")
         assertTrue("TickTick returned no completed focus sessions today; live ingestion needs a real session", first.sessionsFound > 0)
-        assertTrue(app.creditBankRepository.fullHistoryFlow.first().any {
+        val history = app.creditBankRepository.fullHistoryFlow.first()
+        assertTrue(history.any {
             it.source == WorkRecordSource.TICKTICK_FOCUS_API && it.durationMinutes > 0
         })
+        todayRecords.forEach { providerRecord ->
+            val stored = history.firstOrNull { it.id == providerRecord.id }
+            assertNotNull("Today's provider session must be present in the credit bank", stored)
+            assertEquals(providerRecord.durationMinutes, stored!!.durationMinutes)
+            assertTrue("Today's session must carry a persisted credit award", stored.earnedMinutesCredited > 0)
+        }
+        val recentProviderHistory = history.filter { it.source == WorkRecordSource.TICKTICK_FOCUS_API }
+        android.util.Log.i("TickTickFocusLiveTest", "Bank verification: today API=${todayRecords.sumOf { it.durationMinutes }} focus minutes; stored recent=${recentProviderHistory.sumOf { it.durationMinutes }} focus minutes, ${recentProviderHistory.sumOf { it.earnedMinutesCredited }} earned minutes; current balance=${app.creditBankRepository.getBalanceSeconds()} seconds")
+        val stats = app.creditBankRepository.statsFlow.first()
+        android.util.Log.i("TickTickFocusLiveTest", "Daily bank: focus=${stats.totalWorkMinutesToday} minutes, leisure used=${stats.totalDoomscrollMinutesToday} minutes, date=${stats.lastResetDate}")
         val second = app.tickTickFocusSync.sync()!!
         assertEquals("Repeated sync must not award duplicate credit", 0, second.newSessions)
         assertEquals(0, second.earnedMinutes)

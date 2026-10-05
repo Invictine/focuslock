@@ -1,7 +1,7 @@
 package com.focuslock.app.ui.strict
 
-import android.content.Context
 import android.content.Intent
+import android.provider.Settings
 import android.location.Geocoder
 import android.location.Location
 import android.location.LocationManager
@@ -16,8 +16,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -35,18 +33,14 @@ import androidx.compose.runtime.setValue
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
-import androidx.core.location.LocationManagerCompat
-import androidx.core.os.CancellationSignal
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.withTimeoutOrNull
-import kotlin.coroutines.resume
+import com.focuslock.app.location.DeviceLocationSource
 import java.util.Locale
 
 data class StrictLocationSelection(val label: String, val latitude: Double, val longitude: Double, val radiusMeters: Float)
@@ -58,6 +52,7 @@ private data class GeocodedPlace(val label: String, val latitude: Double, val lo
 fun StrictLocationPickerDialog(
     initialLabel: String,
     initialRadiusMeters: Float = 150f,
+    initialSelection: StrictLocationSelection? = null,
     onDismiss: () -> Unit,
     onSelected: (StrictLocationSelection) -> Unit,
 ) {
@@ -65,10 +60,11 @@ fun StrictLocationPickerDialog(
     val scope = rememberCoroutineScope()
     var query by remember { mutableStateOf(initialLabel) }
     var results by remember { mutableStateOf<List<GeocodedPlace>>(emptyList()) }
-    var selected by remember { mutableStateOf<GeocodedPlace?>(null) }
-    var radius by remember { mutableStateOf(initialRadiusMeters.coerceIn(50f, 1000f)) }
+    var selected by remember { mutableStateOf(initialSelection?.let { GeocodedPlace(it.label, it.latitude, it.longitude) }) }
+    var radius by remember { mutableStateOf((initialSelection?.radiusMeters ?: initialRadiusMeters).coerceIn(50f, 1000f)) }
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var providersOff by remember { mutableStateOf(false) }
     var retryCurrent by remember { mutableStateOf(false) }
     var saveAfterPermission by remember { mutableStateOf(false) }
 
@@ -105,9 +101,15 @@ fun StrictLocationPickerDialog(
         loading = true; error = null
         scope.launch {
             try {
-                val location = freshLocation(context)
-                if (location == null) error = "Could not get a precise position. Turn on location, move near a window, and try again."
+                val location = DeviceLocationSource(context).currentLocation(maxAgeMs = 30_000L, timeoutMs = 15_000L)
+                if (location == null) {
+                    val manager = context.getSystemService(android.content.Context.LOCATION_SERVICE) as? LocationManager
+                    providersOff = manager?.let { !it.isProviderEnabled(LocationManager.GPS_PROVIDER) && !it.isProviderEnabled(LocationManager.NETWORK_PROVIDER) } ?: false
+                    error = if (providersOff) "Turn on device location to use your current position." else "Could not get a precise position. Move near a window and try again."
+                }
                 else {
+                    providersOff = false
+                    results = emptyList()
                     selected = GeocodedPlace("Current location", location.latitude, location.longitude)
                     if (location.hasAccuracy() && location.accuracy > radius) {
                         radius = location.accuracy.coerceIn(50f, 1000f)
@@ -154,11 +156,12 @@ fun StrictLocationPickerDialog(
                 }
                 if (loading) CircularProgressIndicator(modifier = Modifier.padding(8.dp))
                 error?.let { Text(it, color = androidx.compose.material3.MaterialTheme.colorScheme.error) }
-                LazyColumn(modifier = Modifier.heightIn(max = 220.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    items(results) { place ->
-                        TextButton(onClick = { selected = place }, enabled = !loading, modifier = Modifier.fillMaxWidth()) {
-                            Text(place.label, modifier = Modifier.fillMaxWidth())
-                        }
+                if (providersOff) TextButton(onClick = {
+                    runCatching { context.startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)) }
+                }) { Text("Open location settings") }
+                results.forEach { place ->
+                    TextButton(onClick = { selected = place }, enabled = !loading, modifier = Modifier.fillMaxWidth()) {
+                        Text(place.label, modifier = Modifier.fillMaxWidth())
                     }
                 }
                 selected?.let { place ->
@@ -180,41 +183,4 @@ fun StrictLocationPickerDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
     )
-}
-
-fun recentLocation(context: Context): Location? {
-    if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) return null
-    val manager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return null
-    return sequenceOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
-        .mapNotNull { provider ->
-            try { manager.getLastKnownLocation(provider) }
-            catch (_: SecurityException) { null }
-            catch (_: IllegalArgumentException) { null }
-        }
-        .maxByOrNull { it.time }
-        ?.takeIf { it.time > 0 && System.currentTimeMillis() - it.time in 0..120_000L && it.hasAccuracy() && it.accuracy <= 1000f }
-}
-
-private suspend fun freshLocation(context: Context): Location? {
-    if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) return null
-    val manager = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return null
-    val provider = listOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
-        .firstOrNull { runCatching { manager.isProviderEnabled(it) }.getOrDefault(false) }
-        ?: return recentLocation(context)
-    val fresh = withTimeoutOrNull(15_000L) {
-        suspendCancellableCoroutine<Location?> { continuation ->
-            val cancellation = CancellationSignal()
-            continuation.invokeOnCancellation { cancellation.cancel() }
-            try {
-                LocationManagerCompat.getCurrentLocation(manager, provider, cancellation, ContextCompat.getMainExecutor(context)) { location ->
-                    if (continuation.isActive) continuation.resume(location)
-                }
-            } catch (_: SecurityException) {
-                if (continuation.isActive) continuation.resume(null)
-            } catch (_: IllegalArgumentException) {
-                if (continuation.isActive) continuation.resume(null)
-            }
-        }
-    }
-    return fresh?.takeIf { it.hasAccuracy() && it.accuracy <= 1000f } ?: recentLocation(context)
 }

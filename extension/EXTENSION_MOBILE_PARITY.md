@@ -1,6 +1,15 @@
 # Chrome extension and Android parity
 
-Status: implementation and fixture verification are in progress. A signed-in Chrome-to-Android round trip has not been verified on a physical device.
+Status (2026-10-03): browser-compatible feature and navigation updates are implemented. Unit, UI-fixture and packaged Chromium verification pass. A signed-in Chrome-to-Android round trip and a real approval email remain unverified.
+
+## Updated navigation and controls
+
+- **Focus**, **Boundaries**, and **Strict** are the primary destinations. Settings and Account are utilities. The Boundaries hub opens websites, applications, groups, permanent commitments, and a phone-location explanation, each with a Back action.
+- Focus places balance/progress before the Frog and work actions. Timers run in the worker and survive closing/reloading the dashboard. Sessions of at least five minutes started with an account earn shared credit. Failed uploads retain the stable session ID and original account, and retry on maintenance, reconnect, or **Retry account sync**. Anonymous sessions still advance the browser Frog but never claim shared credit.
+- Strict supports hours, days, a local end date up to 30 days, extending an active commitment, the existing five-attempt Nuclear escalation, and configuring/requesting trusted-person approval through the existing backend. A commitment is enforced locally before sync; a failed account update stays pending for the account that started it. Signed-out commitments stay Chrome-local.
+- A Chrome-local weekly Strict window activates at browser wake or minute maintenance, supports overnight windows, and syncs the resulting commitment when signed in. An approved occurrence does not immediately re-arm. Place-based activation remains phone-local.
+- The website detail contains **Account schedules and individual limits**. Load current rules to add/edit daily caps and recurring schedules, including native app targets. These writes preserve unrelated rows and reject stale collection versions. Native apps remain responsible for app enforcement. Offline save failures are shown; existing rules remain active.
+- Permanent targets are excluded from ordinary website controls. Permanent blocks, Strict, Frog, frozen locks, and shared caps suppress unavailable snooze controls.
 
 ## What is shared
 
@@ -12,7 +21,8 @@ Status: implementation and fixture verification are in progress. A signed-in Chr
 | Shared target groups | Can create a group from at least two ungrouped synced app or website targets, display members, edit its daily limit, and remove the group. Chrome enforces a group limit when a member website is visited, combining synced group usage with locally observed browser usage. It cannot block an app. | Can create and edit merged app/website groups and enforce their limits on the phone using the usage available to Android. |
 | Schedules and target limits | Enforces synced website schedules and per-target website caps, plus Chrome-local schedules and list limits. | Enforces native app boundaries and its supported schedules and target limits. |
 | Global daily leisure cap | Currently enforced for selected account-shared websites from synced scroll totals plus locally observed pending spend. | Matching global-cap enforcement is not currently implemented in Android. |
-| Eat the Frog | Does not read or change the phone's Frog selection or progress. The blocked page reports that the task stays on the phone. | Frog state is held in local Android storage and powers the native task and blocking flow. It is not synced to Chrome. |
+| Eat the Frog | Opt-in browser-local manual task, required focus time, task completion, wake-hour rollover, and website enforcement. Both completion and tracked time are required; credits and snoozes cannot bypass its lock. The blocked page shows actual browser task progress. | Frog state is held in local Android storage, including TickTick/manual selection and native blocking. Phone task selection and progress do not sync to Chrome. |
+| Home-only and location | Displays the device boundary explicitly; Chrome rules apply wherever the computer is used. | Home location, location permission/status, home-only gating, and Strict place activation remain phone-local. |
 | Native protection | Chrome's user can disable or uninstall the extension. It cannot apply Android permissions or protect its own installation. | Android can use its native permission and service surfaces; those do not transfer to Chrome. |
 
 ## Credit and boundary behavior
@@ -36,9 +46,9 @@ Groups are account-shared definitions. Creating or editing a group preserves exi
 
 ## Verification status
 
-The packaged Chromium smoke test uses a seeded policy with `signedIn: false`; it verifies actual navigation redirects and browser usage counting, not Clerk authentication or personal-account sync. The UI fixture tests cover group creation/edit/removal, target ownership, stale-version rejection, save errors, credit calculation, and responsive layouts. Policy and backend coverage is being expanded, so exact test counts are intentionally left to the root task's final verification.
+The packaged Chromium smoke test uses a seeded policy with `signedIn: false`; it verifies actual navigation redirects, browser spending, merged caps, incoming Strict updates, offline enforcement, real Frog UI/enforcement, timer recovery after reload, and Strict activation/extension UI. Elapsed timer time is synthetically advanced only in the disposable test profile. It does not verify Clerk authentication or personal-account sync. The UI fixtures cover groups, hub/detail/back routes, permanent filtering, blocked-page recovery, credit calculation, and responsive layouts. Feature tests cover overnight weekly activation, 30-day limits, extension-only commitments, worker restarts, completion deduplication, and originating-account upload guards.
 
-Live acceptance remains outstanding. Reload the installed extension from the complete root `build/extension-unpacked/` output, rebuild/install the current Android APK, sign into the same account on both devices, then verify a disposable selected website and merged-group change in both directions. No physical Android device was connected for this verification, so build and fixture success do not establish that round trip.
+Live acceptance remains outstanding. Reload the installed extension from the complete root `build/extension-unpacked/` output, use the current Android app, and sign into the same account on both devices. Verify a disposable selected website, schedule, individual cap and merged-group change in both directions. Approval verification also needs the configured email service and the trusted person's participation. Build and fixture success do not establish these live results.
 
 ## Temporary deployment restore
 

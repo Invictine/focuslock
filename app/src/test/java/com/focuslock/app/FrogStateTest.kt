@@ -6,6 +6,7 @@ import com.focuslock.app.data.repository.canArmNow
 import com.focuslock.app.data.repository.computeFrogLocked
 import com.focuslock.app.data.repository.frogCycleDate
 import com.focuslock.app.data.repository.shouldRolloverFrogCycle
+import com.focuslock.app.data.repository.sanitizeFrogToolPackages
 import java.time.LocalDateTime
 import java.time.ZoneId
 import kotlinx.serialization.json.Json
@@ -260,6 +261,45 @@ class FrogStateTest {
         assertEquals(
             FrogPhase.PICK_FROG,
             FrogPhase.from(armed = true, selected = false, tickedOff = false, trackedSeconds = 0, requiredSeconds = 1800),
+        )
+    }
+
+    @Test
+    fun phaseRequiresToolConfirmationBeforeWorking() {
+        assertEquals(
+            FrogPhase.PICK_TOOLS,
+            FrogPhase.from(
+                armed = true, selected = true, tickedOff = false,
+                trackedSeconds = 0, requiredSeconds = 1800, toolsConfirmed = false,
+            ),
+        )
+    }
+
+    @Test
+    fun toolConfirmationPhaseDoesNotReplaceCompletionRequirements() {
+        assertEquals(
+            FrogPhase.COMPLETE,
+            FrogPhase.from(
+                armed = true, selected = true, tickedOff = true,
+                trackedSeconds = 1800, requiredSeconds = 1800, toolsConfirmed = false,
+            ),
+        )
+        assertEquals(
+            FrogPhase.WORKING,
+            FrogPhase.from(
+                armed = true, selected = true, tickedOff = false,
+                trackedSeconds = 0, requiredSeconds = 1800,
+            ),
+        ) // Legacy callers retain their previous behavior.
+    }
+
+    @Test
+    fun toolPackageSanitizerTrimsAndRejectsInvalidPackageNames() {
+        assertEquals(
+            setOf("com.example.notes", "org.reader_2.app"),
+            sanitizeFrogToolPackages(
+                setOf(" com.example.notes ", "org.reader_2.app", "", "two words", ".bad.name", "a", "bad..name"),
+            ),
         )
     }
 

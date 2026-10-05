@@ -1,6 +1,7 @@
 package com.focuslock.app.data.repository
 
 import android.content.Context
+import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
@@ -45,7 +46,10 @@ import org.json.JSONObject
 
 private val Context.bankDataStore by preferencesDataStore(name = "focuslock_bank")
 
-class CreditBankRepository(private val context: Context) {
+class CreditBankRepository(
+    private val context: Context,
+    private val dataStore: DataStore<Preferences> = context.bankDataStore,
+) {
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -80,7 +84,7 @@ class CreditBankRepository(private val context: Context) {
     // writes are skipped with a log so the app keeps running until the file recovers.
     private suspend fun readBankPrefs(): Preferences =
         try {
-            context.bankDataStore.data.first()
+            dataStore.data.first()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -91,7 +95,7 @@ class CreditBankRepository(private val context: Context) {
     /** Returns true when the edit committed; false means it was skipped (failure logged). */
     private suspend fun editBankPrefs(transform: (MutablePreferences) -> Unit): Boolean =
         try {
-            context.bankDataStore.edit(transform)
+            dataStore.edit(transform)
             true
         } catch (e: CancellationException) {
             throw e
@@ -116,6 +120,7 @@ class CreditBankRepository(private val context: Context) {
         val WORK_HISTORY_JSON = stringPreferencesKey("work_history_json")
         val CREDITED_IDS_JSON = stringPreferencesKey("credited_ids_json")
         val LAST_SYNC_TIMESTAMP = longPreferencesKey("last_sync_timestamp")
+        val LAST_TICKTICK_SYNC_TIMESTAMP = longPreferencesKey("last_ticktick_sync_timestamp")
         val STATE_UPDATED_AT = longPreferencesKey("state_updated_at")
         val SYNCED_STATE_UPDATED_AT = longPreferencesKey("synced_state_updated_at")
         // Convex's lifetime Chrome counters acknowledged by this account's bank.
@@ -151,7 +156,7 @@ class CreditBankRepository(private val context: Context) {
     private var cachedResetDate: String? = null
 
     init {
-        context.bankDataStore.data
+        dataStore.data
             .onEach { prefs ->
                 // Serialize with flushPendingScroll's clear-after-write: otherwise this
                 // collector could still see the batch marked pending on the emission that
@@ -176,7 +181,7 @@ class CreditBankRepository(private val context: Context) {
         repositoryScope.launch { removeLegacyNotificationCredits() }
     }
 
-    val statsFlow: Flow<UserStats> = context.bankDataStore.data
+    val statsFlow: Flow<UserStats> = dataStore.data
         .onEach { prefs ->
             scrollMutex.withLock {
                 _liveBalanceSeconds.value = effectiveBalance(prefs[Keys.CREDIT_BALANCE_SECONDS] ?: 0L)
@@ -253,7 +258,7 @@ class CreditBankRepository(private val context: Context) {
 
     suspend fun getCreditedIds(): Set<String> {
         return try {
-            val raw = context.bankDataStore.data.first()[Keys.CREDITED_IDS_JSON]
+            val raw = dataStore.data.first()[Keys.CREDITED_IDS_JSON]
             if (raw.isNullOrBlank()) emptySet()
             else json.decodeFromString<Set<String>>(raw)
         } catch (e: Exception) {
@@ -268,6 +273,15 @@ class CreditBankRepository(private val context: Context) {
     suspend fun setLastSyncTimestamp(timestamp: Long) {
         editBankPrefs { prefs ->
             prefs[Keys.LAST_SYNC_TIMESTAMP] = timestamp
+        }
+    }
+
+    suspend fun getLastTickTickSyncTimestamp(): Long =
+        readBankPrefs()[Keys.LAST_TICKTICK_SYNC_TIMESTAMP] ?: 0L
+
+    suspend fun setLastTickTickSyncTimestamp(timestamp: Long) {
+        check(editBankPrefs { it[Keys.LAST_TICKTICK_SYNC_TIMESTAMP] = timestamp }) {
+            "Could not persist TickTick sync status"
         }
     }
 
@@ -323,6 +337,7 @@ class CreditBankRepository(private val context: Context) {
                 prefs.remove(Keys.WORK_HISTORY_JSON)
                 prefs.remove(Keys.CREDITED_IDS_JSON)
                 prefs.remove(Keys.LAST_SYNC_TIMESTAMP)
+                prefs.remove(Keys.LAST_TICKTICK_SYNC_TIMESTAMP)
                 prefs.remove(Keys.STATE_UPDATED_AT)
                 prefs.remove(Keys.SYNCED_STATE_UPDATED_AT)
                 prefs.remove(Keys.EXTERNAL_COUNTERS_JSON)
@@ -556,7 +571,7 @@ class CreditBankRepository(private val context: Context) {
                 val credited: Set<String> = try {
                     prefs[Keys.CREDITED_IDS_JSON]?.let { json.decodeFromString<Set<String>>(it) } ?: emptySet()
                 } catch (_: Exception) { emptySet() }
-                val updatedCredited: Set<String> = (credited + incoming.map { it.id }).toList().takeLast(500).toSet()
+                val updatedCredited = retainCreditedIds(credited + incoming.map { it.id })
                 prefs[Keys.CREDITED_IDS_JSON] = json.encodeToString<Set<String>>(updatedCredited)
                 _workHistory.value = merged
             }
@@ -623,7 +638,7 @@ class CreditBankRepository(private val context: Context) {
                 _workHistory.value = updatedHistory
 
                 prefs[Keys.CREDITED_IDS_JSON] =
-                    json.encodeToString<Set<String>>(currentIds.toList().takeLast(500).toSet())
+                    json.encodeToString<Set<String>>(retainCreditedIds(currentIds))
             }
             // Report earnings only when the credit actually persisted.
             if (!committed) credited = false
@@ -677,6 +692,8 @@ class CreditBankRepository(private val context: Context) {
                 val newRecords = mutableListOf<TickTickWorkRecord>()
                 var earnedSeconds = 0L
                 var workSeconds = 0L
+                val todayStart = startOfTodayMillis()
+                val now = System.currentTimeMillis()
                 for (r in records) {
                     if (!isFocusRecord(r.source, r.durationMinutes)) continue
                     // add() is false for IDs already stored OR already credited in this batch.
@@ -684,7 +701,9 @@ class CreditBankRepository(private val context: Context) {
                     val earned = calculateEarnedMinutes(r.durationMinutes, workRatio, taskBonusMinutes)
                     totalEarned += earned
                     earnedSeconds += earned * 60L
-                    workSeconds += r.durationMinutes * 60L
+                    // Historical catch-up still earns spendable credit, but only
+                    // today's sessions advance today's totals and the current frog.
+                    if (r.timestamp in todayStart..now) workSeconds += r.durationMinutes * 60L
                     newRecords.add(r.copy(earnedMinutesCredited = earned))
                 }
                 if (newRecords.isEmpty()) return@editBankPrefs
@@ -694,13 +713,12 @@ class CreditBankRepository(private val context: Context) {
                 val newBalance = (prefs[Keys.CREDIT_BALANCE_SECONDS] ?: 0L) + earnedSeconds
                 prefs[Keys.CREDIT_BALANCE_SECONDS] = newBalance
                 prefs[Keys.STATE_UPDATED_AT] = System.currentTimeMillis()
-                prefs[Keys.LAST_SYNC_TIMESTAMP] = System.currentTimeMillis()
                 prefs[Keys.TOTAL_WORK_SECONDS_TODAY] = (prefs[Keys.TOTAL_WORK_SECONDS_TODAY] ?: 0L) + workSeconds
 
-                history = (newRecords.asReversed() + history).take(50)
+                history = (newRecords + history).sortedByDescending { it.timestamp }.take(50)
                 prefs[Keys.WORK_HISTORY_JSON] = json.encodeToString(history)
                 prefs[Keys.CREDITED_IDS_JSON] =
-                    json.encodeToString<Set<String>>(credited.toList().takeLast(500).toSet())
+                    json.encodeToString<Set<String>>(retainCreditedIds(credited))
 
                 _liveBalanceSeconds.value = effectiveBalance(newBalance)
                 balanceLoaded = true
@@ -717,6 +735,7 @@ class CreditBankRepository(private val context: Context) {
             } catch (_: Throwable) {
             }
         }
+        check(committed) { "Could not persist TickTick focus credits; retry sync" }
         return Pair(newCount, totalEarned)
     }
 
@@ -949,6 +968,13 @@ class CreditBankRepository(private val context: Context) {
     companion object {
         private const val SCROLL_FLUSH_THRESHOLD_SECONDS = 30L
         private const val SCROLL_FLUSH_INTERVAL_MS = 30_000L
+
+        // Provider sessions are replayed during catch-up, including after the
+        // history rolls off. Keep their IDs so a long gap or a busy week cannot
+        // award them again; retain the previous bound for other record IDs.
+        internal fun retainCreditedIds(ids: Set<String>): Set<String> =
+            ids.filter { it.startsWith("ticktick_focus_") }.toSet() +
+                ids.filterNot { it.startsWith("ticktick_focus_") }.takeLast(500).toSet()
 
         /** Pure positive-delta merge; a date change resets only the external daily baseline. */
         internal fun externalCounterDelta(

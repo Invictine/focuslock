@@ -39,6 +39,9 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -194,6 +197,7 @@ fun ScreenHeader(
     subtitle: String? = null,
     modifier: Modifier = Modifier,
     actions: (@Composable RowScope.() -> Unit)? = null,
+    onBack: (() -> Unit)? = null,
 ) {
     Column(
         modifier = modifier
@@ -204,6 +208,11 @@ fun ScreenHeader(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            if (onBack != null) {
+                IconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back")
+                }
+            }
             Text(
                 text = title,
                 style = MaterialTheme.typography.headlineMedium.copy(

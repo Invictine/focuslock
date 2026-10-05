@@ -27,6 +27,11 @@ await context.addInitScript(() => {
       getURL: p => new URL('/extension/' + p, location.origin).href,
       sendMessage: async message => {
         window.__messages.push(message);
+        if (message?.type === 'featureStatus') { const current = JSON.parse(localStorage.getItem('focuslock.v1') || '{}'); return { ok: true,
+          strictMode: current.strictMode === true && (!Number(current.strictEndsAt) || Number(current.strictEndsAt) > Date.now()),
+          strictEndsAt: current.strictEndsAt || 0,
+          frog: { enabled: false, phase: 'PICK_FROG', frog: null, trackedSeconds: 0, requiredSeconds: 1500, locked: false }, timer: null }; }
+        if (message?.type === 'frogStatus') return { supported: true, enabled: false, frog: null };
         if (message?.type === 'getDashboard') return { signedIn: true, dashboard: {
           state: { totalWorkSecondsToday: 3600, creditBalanceSeconds: 900, totalScrollSecondsToday: 300 }, sessions: [], records: [],
           apps: [
@@ -77,8 +82,15 @@ await page.goto('http://focuslock.test/extension/options/options.html');
 await page.locator('#lists .card').first().waitFor({state:'attached'});
 const nav = page.locator('nav button[data-tab]');
 const tabs = await nav.evaluateAll(items=>items.map(item=>item.dataset.tab));
-assert.deepEqual(tabs,['stats','blocks','permalock','settings','account'],'Five primary destinations');
+assert.deepEqual(tabs,['stats','blocks','strict'],'Focus, Boundaries, and Strict primary destinations');
+const openBoundaryRoute = async route => {
+  if (!(await page.locator('#boundaryHub').isVisible())) await page.locator('[data-boundary-back]').click();
+  await page.locator(`#boundaryHub [data-boundary-route="${route}"]`).click();
+};
 assert.equal(await page.locator('#tab-stats').isVisible(),true,'Default focus view');
+assert.equal(await page.locator('#frogPanel').isVisible(),true,'Focus includes the browser Frog slot');
+assert.equal(await page.locator('#tab-stats').evaluate(el => Boolean(el.querySelector('#cloudBalanceCard').compareDocumentPosition(el.querySelector('#frogPanel')) & Node.DOCUMENT_POSITION_FOLLOWING)), true,
+  'Balance and progress appear before Frog');
 assert.equal(await page.locator('nav button[data-tab="stats"]').getAttribute('aria-current'),'page','Focus is active by default');
 for(const tab of tabs){
   await page.locator(`nav button[data-tab="${tab}"]`).click();
@@ -93,8 +105,18 @@ assert.equal(await page.locator('#tab-sched').isVisible(),true,'Schedule view');
 assert.equal(await page.locator('nav button[data-tab="stats"]').getAttribute('aria-current'),'page','Focus remains active under schedule');
 assert.equal(await page.locator('#focusViews button[data-tab="sched"]').evaluate(el=>el.classList.contains('on')),true,'Schedule selected');
 await page.locator('nav button[data-tab="blocks"]').click();
-assert.equal(await page.locator('#groupCount').textContent(), '1', 'Synced target group count');
-await page.locator('#boundaryTabs button[data-surface="groups"]').click();
+assert.equal(await page.locator('#boundaryHub').isVisible(), true, 'Boundaries opens at its overview');
+assert.equal(await page.locator('#appCount').textContent(), '2 blocked', 'Application overview count is labeled');
+assert.equal(await page.locator('#siteCount').textContent(), '2 blocked', 'Website overview counts only blocked sites');
+await openBoundaryRoute('apps');
+assert.equal(await page.locator('#surface-apps').isVisible(), true, 'Application detail is reachable');
+await page.locator('[data-boundary-back]').click();
+await openBoundaryRoute('sites');
+assert.equal(await page.locator('#surface-sites').isVisible(), true, 'Website detail is reachable');
+await page.locator('[data-boundary-back]').click();
+assert.equal(await page.locator('#boundaryHub [data-boundary-route="groups"] #groupCount').count(), 1, 'Groups overview card is present');
+assert.equal(await page.locator('#groupCount').textContent(), '1 group', 'Synced target group count is labeled');
+await openBoundaryRoute('groups');
 assert.equal(await page.locator('#surface-groups').isVisible(), true, 'Target groups surface is reachable');
 assert.match(await page.locator('#groupList').textContent(), /YouTube/);
 assert.match(await page.locator('#groupList').textContent(), /youtube\.com/);
@@ -110,7 +132,7 @@ await page.waitForFunction(() => document.querySelector('#groupList [data-group-
 assert.equal(await page.locator('#groupList [data-group-id="media"] [data-group-remove]').isDisabled(), true, 'Strict mode disables group removal');
 assert.equal(await page.locator('#groupList [data-group-id="media"] [data-group-limit-enabled]').isDisabled(), true, 'Strict mode disables group limit checkbox');
 assert.equal(await strictGroupMinutes.isDisabled(), true, 'Strict mode disables group minutes');
-await page.locator('#boundaryTabs button[data-surface="sites"]').click();
+await openBoundaryRoute('sites');
 assert.equal(await page.locator('#siteRows [data-del]').first().isDisabled(), true, 'Strict mode disables shared site editing');
 for (const id of ['presetSocial', 'presetVideo', 'presetUnblock', 'newList']) assert.equal(await page.locator('#' + id).isDisabled(), true, `Strict mode disables ${id}`);
 await page.evaluate(async () => {
@@ -123,7 +145,7 @@ assert.equal(await page.locator('#groupList [data-group-id="media"] [data-group-
 assert.equal(await page.locator('#groupList [data-group-id="media"] [data-group-limit-min]').isDisabled(), false, 'Strict expiry unlocks group minutes');
 assert.equal(await page.locator('#groupList [data-group-id="media"] [data-group-limit-min]').inputValue(), '77', 'Strict expiry preserves unsaved group input');
 assert.equal(await page.locator('#siteRows [data-del]').first().isDisabled(), false, 'Strict expiry unlocks shared site editing');
-await page.locator('#boundaryTabs button[data-surface="groups"]').click();
+await openBoundaryRoute('groups');
 await page.locator('#createGroup').click();
 await page.locator('#createGroupModal').waitFor({state:'visible'});
 assert.equal(await page.locator('#groupTargetOptions [data-group-member][data-key="com.google.youtube"]').isDisabled(), true,
@@ -183,9 +205,9 @@ await page.waitForFunction(before => window.__messages.filter(message => message
 const remainingGroups = await page.evaluate(() => window.__messages.filter(message => message.type === 'focusGroupsSave').at(-1).groups);
 assert.equal(remainingGroups.length, 1, 'Removing a group preserves unrelated groups');
 assert.equal(remainingGroups[0].name, 'Reddit set');
-await page.locator('#boundaryTabs button[data-surface="sites"]').click();
+await openBoundaryRoute('sites');
 const before = await page.locator('#lists .card').count();
-await page.locator('details.advanced').evaluate(el=>el.open=true);
+await page.locator('#surface-sites > details.advanced').evaluate(el=>el.open=true);
 await page.locator('#newList').click();
 await page.waitForFunction(count=>document.querySelectorAll('#lists .card').length===count, before+1);
 const added = page.locator('#lists .card').last();
@@ -195,7 +217,8 @@ await added.locator('[data-f="sites"]').fill('example.org');
 await added.locator('[data-a="save"]').click();
 await page.reload();
 await page.locator('nav button[data-tab="blocks"]').click();
-await page.locator('details.advanced').evaluate(el=>el.open=true);
+await page.locator('#boundaryHub [data-boundary-route="sites"]').click();
+await page.locator('#surface-sites > details.advanced').evaluate(el=>el.open=true);
 await page.locator('#lists .card').first().waitFor();
 await page.locator('#lists .card').last().locator('details.list-editor').evaluate(el => { el.open = true; });
 assert.equal(await page.locator('#lists .card').last().locator('[data-f="name"]').inputValue(),'UI verification list');
@@ -212,11 +235,11 @@ for (const width of [1280,840,640,390]) {
 await page.setViewportSize({width:1280,height:900});
 await page.goto('http://focuslock.test/extension/options/options.html?account=profile');
 assert.equal(await page.locator('#tab-account').isVisible(),true,'Account deep link');
-assert.equal(await page.locator('nav button[data-tab="account"]').getAttribute('aria-current'),'page','Account active nav');
+assert.equal(await page.locator('.header-tools button[data-tab="account"]').getAttribute('aria-current'),'page','Account utility active state');
 await page.screenshot({path:path.join(out,'extension-account.png'),fullPage:true});
 await page.goto('http://focuslock.test/extension/options/options.html?tab=settings');
 assert.equal(await page.locator('#tab-settings').isVisible(),true,'Settings deep link');
-assert.equal(await page.locator('nav button[data-tab="settings"]').getAttribute('aria-current'),'page','Settings active nav');
+assert.equal(await page.locator('.header-tools button[data-tab="settings"]').getAttribute('aria-current'),'page','Settings utility active state');
 await page.locator('nav button[data-tab="stats"]').click();
 await page.screenshot({path:path.join(out,'extension-focus.png'),fullPage:true});
 await page.locator('#workTitle').fill('UI work credit check');

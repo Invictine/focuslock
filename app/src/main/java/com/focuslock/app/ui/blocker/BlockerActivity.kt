@@ -5,6 +5,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.os.Bundle
+import android.os.Build
+import android.os.SystemClock
+import android.provider.Settings
 import android.util.Log
 import android.view.WindowManager
 import android.widget.Toast
@@ -15,6 +18,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.SystemBarStyle
 import androidx.compose.runtime.*
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import com.focuslock.app.FocusLockApplication
 import com.focuslock.app.data.model.TickTickWorkRecord
 import com.focuslock.app.data.model.WorkRecordSource
@@ -42,6 +47,7 @@ import java.util.UUID
 class BlockerActivity : ComponentActivity() {
 
     private var creditReceiver: BroadcastReceiver? = null
+    private var homeEnforcementAllowed by mutableStateOf(false)
 
     /**
      * Frog hard-lock focus session, owned by the activity so it survives every
@@ -49,9 +55,11 @@ class BlockerActivity : ComponentActivity() {
      * interactive. [frogSessionStartMs] == 0 means "not running".
      */
     private var frogSessionStartMs = 0L
+    private var frogSessionStartElapsedRealtimeMs = 0L
     private val frogSessionElapsedSeconds = mutableLongStateOf(0L)
     private val frogSessionRunning = mutableStateOf(false)
     private var frogSessionTickerJob: Job? = null
+    private var frogTimerRecoveryAttempted = false
 
     /**
      * IO scope for the frog focus work record (the explicit "Stop & log" path).
@@ -108,7 +116,7 @@ class BlockerActivity : ComponentActivity() {
                 if (isFrogBlocked()) {
                     Toast.makeText(
                         this@BlockerActivity,
-                        "Eat the frog to unlock.",
+                        "Finish your frog to unlock your phone.",
                         Toast.LENGTH_SHORT
                     ).show()
                 } else if (lockdownModeCached || blockReason == "strict") {
@@ -127,6 +135,28 @@ class BlockerActivity : ComponentActivity() {
         // "permanent" = always-block: no unlock paths are offered on this screen.
         // "frog" = eat-the-frog hard lock: no emergency/credit/verify escapes either.
         readBlockTargetFromIntent()
+
+        // Revalidate the scope while the blocker is visible, including after a
+        // permission change or leaving home. Keep the underlying commitment intact.
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                while (true) {
+                    if (!FocusLockApplication.instance.homeLocationRepository.shouldEnforceNow(permanent = isPermanentBlockNow())) {
+                        homeEnforcementAllowed = false
+                        discardFrogFocusSession()
+                        if (isFrogBlocked()) com.focuslock.app.service.FrogHomeLauncher.openRegularHome(this@BlockerActivity)
+                        finish()
+                        return@repeatOnLifecycle
+                    }
+                    homeEnforcementAllowed = true
+                    if (isFrogBlocked() && !frogTimerRecoveryAttempted) {
+                        frogTimerRecoveryAttempted = true
+                        resumeFrogFocusSession()
+                    }
+                    delay(10_000L)
+                }
+            }
+        }
 
         // First frame renders immediately from binder-free state: website domain,
         // process-wide cached label, or the raw package id. The real label resolves
@@ -238,32 +268,55 @@ class BlockerActivity : ComponentActivity() {
         val currentWebsite = blockedWebsite
         val currentPackage = blockedPackage
         val currentReason = blockReason
+        if (currentReason == FrogCoordinator.REASON_FROG) hideFrogStatusBar()
+        else androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
+            .show(androidx.core.view.WindowInsetsCompat.Type.statusBars())
         setContent {
             FocusLockTheme {
-                BlockerPresentation(
-                    appName = resolvedAppName.value,
-                    blockedPackage = currentPackage,
-                    isWebsite = currentWebsite != null,
-                    blockReason = currentReason,
-                    onCloseApp = { goHome() },
-                    onOpenFocusLock = { openFocusLock() },
-                    onFrogComplete = {
-                        Toast.makeText(
-                            this@BlockerActivity,
-                            "Frog complete.",
-                            Toast.LENGTH_LONG
-                        ).show()
-                        finish()
-                    },
-                    onStaleFrogDismiss = {
-                        Toast.makeText(
-                            this@BlockerActivity,
-                            "Frog lock ended.",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                        finish()
+                if (homeEnforcementAllowed) {
+                    if (currentReason == FrogCoordinator.REASON_FROG) {
+                        FrogFocusScreen(
+                            onOpenFocusLock = { openFocusLock() },
+                            onFrogComplete = {
+                                discardFrogFocusSession()
+                                Toast.makeText(this@BlockerActivity, "Frog complete.", Toast.LENGTH_LONG).show()
+                                com.focuslock.app.service.FrogHomeLauncher.openRegularHome(this@BlockerActivity)
+                                finish()
+                            },
+                            onFrogEnded = {
+                                discardFrogFocusSession()
+                                Toast.makeText(this@BlockerActivity, "Frog lock ended.", Toast.LENGTH_SHORT).show()
+                                com.focuslock.app.service.FrogHomeLauncher.openRegularHome(this@BlockerActivity)
+                                finish()
+                            },
+                        )
+                    } else {
+                        BlockerPresentation(
+                            appName = resolvedAppName.value,
+                            blockedPackage = currentPackage,
+                            isWebsite = currentWebsite != null,
+                            blockReason = currentReason,
+                            onCloseApp = { goHome() },
+                            onOpenFocusLock = { openFocusLock() },
+                            onFrogComplete = {
+                                Toast.makeText(
+                                    this@BlockerActivity,
+                                    "Frog complete.",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                                finish()
+                            },
+                            onStaleFrogDismiss = {
+                                Toast.makeText(
+                                    this@BlockerActivity,
+                                    "Frog lock ended.",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                finish()
+                            }
+                        )
                     }
-                )
+                }
             }
         }
     }
@@ -290,6 +343,11 @@ class BlockerActivity : ComponentActivity() {
         renderBlockerContent()
     }
 
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && isFrogBlocked()) hideFrogStatusBar()
+    }
+
     /** Refreshes the block target/reason from the current [intent]. */
     private fun readBlockTargetFromIntent() {
         blockedWebsite = intent.getStringExtra(EXTRA_BLOCKED_WEBSITE)
@@ -297,10 +355,13 @@ class BlockerActivity : ComponentActivity() {
         blockReason = intent.getStringExtra(EXTRA_BLOCK_REASON)
         // Older callers may omit the reason. Recover the permanent presentation from
         // the dedicated local store so such a launch cannot expose unlock controls.
-        if (blockReason != "permanent" && blockedWebsite == null &&
-            FocusLockApplication.instance.permanentBlocksRepository.isPermanentlyBlocked(blockedPackage)) {
+        val permanentStore = FocusLockApplication.instance.permanentBlocksRepository
+        val permanentTarget = blockedWebsite?.let { permanentStore.isPermanentlyBlockedDomain(it) }
+            ?: permanentStore.isPermanentlyBlocked(blockedPackage)
+        if (blockReason != "permanent" && permanentTarget) {
             blockReason = "permanent"
         }
+        if (isFrogBlocked()) com.focuslock.app.service.FrogHomeLauncher.captureFallback(this)
     }
 
     /** True when the current block reason is the permanent (always-block) reason. */
@@ -308,11 +369,10 @@ class BlockerActivity : ComponentActivity() {
 
     /** Re-check the dedicated local store before every unlock-capable action. */
     private suspend fun isPermanentBlockNow(): Boolean {
-        val repository = FocusLockApplication.instance.permanentBlocksRepository
-        return isPermanentBlock() || run {
-            try { repository.warm() } catch (_: Exception) { }
-            repository.isPermanentlyBlocked(blockedPackage)
-        }
+        if (isPermanentBlock()) return true
+        val settings = FocusLockApplication.instance.settingsRepository
+        return blockedWebsite?.let { settings.isWebsitePermanent(it) }
+            ?: settings.isAppPermanent(blockedPackage)
     }
 
     /**
@@ -456,21 +516,66 @@ class BlockerActivity : ComponentActivity() {
      */
     private fun startFrogFocusSession() {
         if (frogSessionRunning.value) return
-        frogSessionStartMs = System.currentTimeMillis()
-        frogSessionElapsedSeconds.longValue = 0L
-        frogSessionRunning.value = true
+        lifecycleScope.launch {
+            val app = FocusLockApplication.instance
+            val enforceNow = app.homeLocationRepository.shouldEnforceNow(permanent = isPermanentBlockNow())
+            val state = app.frogRepository.currentState()
+            val task = state.frog
+            if (!homeEnforcementAllowed || !enforceNow || !state.locked || !state.toolsConfirmed || task == null) {
+                if (!enforceNow) discardFrogFocusSession()
+                return@launch
+            }
+            val nowElapsed = SystemClock.elapsedRealtime()
+            frogSessionStartMs = System.currentTimeMillis()
+            frogSessionStartElapsedRealtimeMs = nowElapsed
+            frogSessionElapsedSeconds.longValue = 0L
+            frogSessionRunning.value = true
+            blockSessionPrefs().edit()
+                .putString(KEY_FROG_TIMER_TASK_ID, task.id)
+                .putString(KEY_FROG_TIMER_CYCLE_DATE, state.cycleDate)
+                .putLong(KEY_FROG_TIMER_START_ELAPSED, nowElapsed)
+                .putLong(KEY_FROG_TIMER_START_WALL, frogSessionStartMs)
+                .putInt(KEY_FROG_TIMER_BOOT_COUNT, currentBootCount())
+                .apply()
+            runFrogFocusTicker()
+        }
+    }
+
+    /** Restore an unfinished timer only for the exact same locked task and device boot. */
+    private fun resumeFrogFocusSession() {
+        lifecycleScope.launch {
+            val state = FocusLockApplication.instance.frogRepository.currentState()
+            val prefs = blockSessionPrefs()
+            val startElapsed = prefs.getLong(KEY_FROG_TIMER_START_ELAPSED, 0L)
+            val startWall = prefs.getLong(KEY_FROG_TIMER_START_WALL, 0L)
+            val bootCount = currentBootCount()
+            val enforceNow = FocusLockApplication.instance.homeLocationRepository
+                .shouldEnforceNow(permanent = isPermanentBlockNow())
+            val matches = state.locked && state.toolsConfirmed && state.frog?.id == prefs.getString(KEY_FROG_TIMER_TASK_ID, null) &&
+                state.cycleDate == prefs.getString(KEY_FROG_TIMER_CYCLE_DATE, null) &&
+                startElapsed in 1L..SystemClock.elapsedRealtime() && startWall > 0L &&
+                bootCount >= 0 && prefs.getInt(KEY_FROG_TIMER_BOOT_COUNT, -1) == bootCount
+            if (!matches || !homeEnforcementAllowed || !enforceNow) {
+                clearSavedFrogFocusSession()
+                return@launch
+            }
+            frogSessionStartMs = startWall
+            frogSessionStartElapsedRealtimeMs = startElapsed
+            frogSessionElapsedSeconds.longValue =
+                ((SystemClock.elapsedRealtime() - startElapsed) / 1_000L).coerceIn(0L, FROG_SESSION_TARGET_SECONDS)
+            frogSessionRunning.value = true
+            runFrogFocusTicker()
+        }
+    }
+
+    private fun runFrogFocusTicker() {
         frogSessionTickerJob?.cancel()
         frogSessionTickerJob = lifecycleScope.launch {
             while (frogSessionRunning.value) {
-                val elapsedSeconds = ((System.currentTimeMillis() - frogSessionStartMs) / 1000L)
+                val elapsedSeconds = ((SystemClock.elapsedRealtime() - frogSessionStartElapsedRealtimeMs) / 1_000L)
                     .coerceAtLeast(0L)
-                // Stop at the 25-minute target (early stop stays available).
                 if (elapsedSeconds >= FROG_SESSION_TARGET_SECONDS) {
-                    frogSessionElapsedSeconds.longValue = FROG_SESSION_TARGET_SECONDS
-                    frogSessionRunning.value = false
-                    frogSessionTickerJob = null
-                    frogSessionStartMs = 0L
-                    logFrogFocusSession(FROG_SESSION_TARGET_SECONDS)
+                    finishFrogFocusSession(FROG_SESSION_TARGET_SECONDS)
                     break
                 }
                 frogSessionElapsedSeconds.longValue = elapsedSeconds
@@ -479,16 +584,41 @@ class BlockerActivity : ComponentActivity() {
         }
     }
 
-    /** Stops the session early and banks the whole minutes already focused. */
-    private fun stopFrogFocusSession() {
-        if (!frogSessionRunning.value) return
-        val elapsedSeconds = ((System.currentTimeMillis() - frogSessionStartMs) / 1000L)
-            .coerceAtLeast(0L)
+    private fun finishFrogFocusSession(elapsedSeconds: Long) {
         frogSessionRunning.value = false
         frogSessionTickerJob?.cancel()
         frogSessionTickerJob = null
         frogSessionStartMs = 0L
+        frogSessionStartElapsedRealtimeMs = 0L
         frogSessionElapsedSeconds.longValue = 0L
+        clearSavedFrogFocusSession()
+        logFrogFocusSession(elapsedSeconds)
+    }
+
+    private fun discardFrogFocusSession() {
+        frogSessionRunning.value = false
+        frogSessionTickerJob?.cancel()
+        frogSessionTickerJob = null
+        frogSessionStartMs = 0L
+        frogSessionStartElapsedRealtimeMs = 0L
+        frogSessionElapsedSeconds.longValue = 0L
+        clearSavedFrogFocusSession()
+    }
+
+    private fun clearSavedFrogFocusSession() {
+        discardSavedFrogTimer(this)
+    }
+
+    private fun currentBootCount(): Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+        runCatching { Settings.Global.getInt(contentResolver, Settings.Global.BOOT_COUNT, -1) }.getOrDefault(-1)
+    } else -1
+
+    /** Stops the session early and banks the whole minutes already focused. */
+    private fun stopFrogFocusSession() {
+        if (!frogSessionRunning.value) return
+        val elapsedSeconds = ((SystemClock.elapsedRealtime() - frogSessionStartElapsedRealtimeMs) / 1_000L)
+            .coerceIn(0L, FROG_SESSION_TARGET_SECONDS)
+        discardFrogFocusSession()
         if (elapsedSeconds < 60L) {
             Toast.makeText(this, "Focus at least a minute to log it.", Toast.LENGTH_SHORT).show()
             return
@@ -512,18 +642,7 @@ class BlockerActivity : ComponentActivity() {
         }
     }
 
-    /**
-     * Best-effort write from [onDestroy] on a transient scope: [frogWriteScope] is
-     * cancelled right after this call (as required), which would cancel a coroutine
-     * that had not started yet. Mirrors FrogWakeReceiver's throwaway IO scope.
-     */
-    private fun logFrogFocusSessionDetached(elapsedSeconds: Long) {
-        val minutes = (elapsedSeconds / 60L).toInt()
-        if (minutes <= 0) return
-        CoroutineScope(Dispatchers.IO).launch { writeFrogFocusRecord(minutes) }
-    }
-
-    /** Suspend body shared by both frog-session write paths; never throws. */
+    /** Suspend body shared by the explicit stop and timer completion paths; never throws. */
     private suspend fun writeFrogFocusRecord(minutes: Int) {
         val app = FocusLockApplication.instance
         try {
@@ -564,18 +683,8 @@ class BlockerActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        // Finalize any running frog focus session before the writer scope dies: the
-        // pending minutes go out on a detached IO scope (which cancel() cannot cut off),
-        // while the explicit "Stop & log" path is protected by NonCancellable.
-        if (frogSessionRunning.value) {
-            val elapsedSeconds = ((System.currentTimeMillis() - frogSessionStartMs) / 1000L)
-                .coerceAtLeast(0L)
-            frogSessionRunning.value = false
-            frogSessionTickerJob?.cancel()
-            frogSessionTickerJob = null
-            frogSessionStartMs = 0L
-            if (elapsedSeconds >= 60L) logFrogFocusSessionDetached(elapsedSeconds)
-        }
+        // A running Frog session is checkpointed in private preferences and resumes
+        // only after the same task/cycle is revalidated by the next blocker instance.
         frogWriteScope.cancel()
         super.onDestroy()
         creditReceiver?.let {
@@ -585,6 +694,17 @@ class BlockerActivity : ComponentActivity() {
     }
 
     companion object {
+        /** Clear a running timer when home enforcement is paused by a policy owner. */
+        fun discardSavedFrogTimer(context: Context) {
+            context.getSharedPreferences(PREFS_BLOCK_SESSION, Context.MODE_PRIVATE).edit()
+                .remove(KEY_FROG_TIMER_TASK_ID)
+                .remove(KEY_FROG_TIMER_CYCLE_DATE)
+                .remove(KEY_FROG_TIMER_START_ELAPSED)
+                .remove(KEY_FROG_TIMER_START_WALL)
+                .remove(KEY_FROG_TIMER_BOOT_COUNT)
+                .apply()
+        }
+
         const val EXTRA_BLOCKED_PACKAGE = "extra_blocked_package"
         const val EXTRA_BLOCKED_WEBSITE = "extra_blocked_website"
 
@@ -600,5 +720,10 @@ class BlockerActivity : ComponentActivity() {
         private const val PREFS_BLOCK_SESSION = "focuslock_block_session"
         private const val KEY_BALANCE_AT_BLOCK = "balance_at_block_sec"
         private const val KEY_BLOCK_STARTED_AT = "block_started_at"
+        private const val KEY_FROG_TIMER_TASK_ID = "frog_timer_task_id"
+        private const val KEY_FROG_TIMER_CYCLE_DATE = "frog_timer_cycle_date"
+        private const val KEY_FROG_TIMER_START_ELAPSED = "frog_timer_start_elapsed"
+        private const val KEY_FROG_TIMER_START_WALL = "frog_timer_start_wall"
+        private const val KEY_FROG_TIMER_BOOT_COUNT = "frog_timer_boot_count"
     }
 }

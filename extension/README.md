@@ -22,6 +22,10 @@ The stable development ID is `fkkpmoiageeieaoplphafmhjkkdadcnf`. Clerk must allo
 - A positive daily allowance permits a matching site until its local tracked budget is exhausted. A zero allowance blocks matching sites whenever the list is active.
 - Overnight schedules belong to the day on which they start.
 - Strict Mode and frozen lists reject snoozes. Snoozes are capped at five minutes by the worker, regardless of the requested duration.
+- Strict has its own primary screen with hour/day/end-date commitments up to 30 days, extensions, weekly Chrome activation, five-attempt Nuclear escalation, and trusted-person approval controls. Commitments enforce locally before syncing; pending updates retain the initiating account.
+- Eat the Frog supports a browser-local manual task, wake-hour rollover, required focus time, and task completion. The lock releases only after both conditions are met. This is separate from Android's local task/TickTick state.
+- Focus timers persist in the background worker. Closing the dashboard does not lose a session. Signed-in sessions of at least five minutes queue an idempotent account-bound credit event; anonymous sessions can advance the local Frog without shared credit.
+- **Boundaries → Everyday websites → Account schedules and individual limits** can edit shared daily caps and weekly schedules while preserving rules from other devices. Load and review current account rules before saving; stale versions and offline failures are surfaced.
 - Active Strict Mode commitments survive sign-out/account changes. A different account cannot shorten them or remove their held blocked domains.
 - Permalock is a device-local, append-only permanent block list. Its verdict wins over snoozes, exceptions, schedules, daily allowances, Strict Mode, and both Nuclear modes; no dashboard control, import, or reset can remove an entry, and the blocked page offers no snooze or dashboard escape. It is never uploaded or restored by account sync.
 - Shared Nuke is separate from local timed Nuclear mode. Shared Nuke remains active until the originating account completes its reset; the configured HTTPS sign-in origins remain reachable for account recovery.
@@ -35,7 +39,7 @@ Content scripts may ask only for a verdict on their own document. Account operat
 
 Convex calls have a seven-second deadline. Pending writes remain durable when requests fail or the server rejects a stale update. Returned account data is checked against the current Clerk identity before being displayed. Local controls remain available when popup authentication is unavailable.
 
-Chrome still lets a user disable or uninstall an extension. This package does not provide native application blocking, Android's local Frog task state and automations, or OS-level uninstall protection. Group limits cover shared app and website usage, but cross-device totals depend on synced snapshots and cannot guarantee exact concurrent cutoff. See [EXTENSION_MOBILE_PARITY.md](EXTENSION_MOBILE_PARITY.md) for the current feature boundary and acceptance status, and `HARDENING.md` for security and test notes.
+Chrome still lets a user disable or uninstall an extension. Native app blocking, Android location/home-only rules, phone TickTick ingestion, and OS-level permissions do not transfer to Chrome. Browser Frog state and weekly activation are device-local. Group limits cover shared app and website usage, but cross-device totals depend on synced snapshots and cannot guarantee exact concurrent cutoff. See [EXTENSION_MOBILE_PARITY.md](EXTENSION_MOBILE_PARITY.md) for the current feature boundary and acceptance status, and `HARDENING.md` for security and test notes.
 
 ## Verification
 

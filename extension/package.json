@@ -6,8 +6,8 @@
   "scripts": {
     "prebuild": "node ../scripts/generate-theme.mjs --check",
     "build": "node build.mjs",
-    "check": "node --check background/service-worker.js && node --check popup/popup.js && node --check options/options.js && node --check options/options-auth.js && node --check blocked/blocked.js && node --check content/content-guard.js && node --check src/store.js && node --check src/matcher.js && node --check src/policy.js && node --check src/cloud-sync.js && node --check src/live-policy.js",
-    "test": "node tests/cloud-sync.test.mjs && node tests/auth-ui.test.mjs && node tests/enforcement.test.mjs && node tests/store-hardening.test.mjs && node tests/store-concurrency.test.mjs && node tests/matcher.test.mjs && node tests/policy.test.mjs && node --test tests/auth-behavior.test.mjs tests/live-policy.test.mjs",
+    "check": "node --check background/service-worker.js && node --check popup/popup.js && node --check options/options.js && node --check options/options-auth.js && node --check blocked/blocked.js && node --check content/content-guard.js && node --check src/store.js && node --check src/matcher.js && node --check src/policy.js && node --check src/cloud-sync.js && node --check src/live-policy.js && node --check src/features.js && node --check options/features.js && node --check options/shared-rules.js",
+    "test": "node tests/cloud-sync.test.mjs && node tests/auth-ui.test.mjs && node tests/enforcement.test.mjs && node tests/store-hardening.test.mjs && node tests/store-concurrency.test.mjs && node tests/matcher.test.mjs && node tests/policy.test.mjs && node --test tests/auth-behavior.test.mjs tests/live-policy.test.mjs && node tests/features.test.mjs",
     "test:ui": "node tests/ui.test.mjs && node tests/ui-regressions.test.mjs",
     "test:browser": "npm run build && node tests/browser-smoke.mjs"
   },

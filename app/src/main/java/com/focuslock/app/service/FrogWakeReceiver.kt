@@ -9,6 +9,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 
 /**
@@ -76,6 +77,7 @@ class FrogWakeReceiver : BroadcastReceiver() {
                         Intent(ACTION_FROG_ARMED).setPackage(appContext.packageName)
                     )
                 }
+                FrogMorningScheduler.schedule(appContext, repo.wakeHourFlow.first(), repo.enabledFlow.first())
             } catch (t: Throwable) {
                 // Swallow everything: a receiver must never crash the process.
                 Log.w(TAG, "frog wake handling failed", t)
@@ -94,6 +96,9 @@ class FrogWakeReceiver : BroadcastReceiver() {
 
         /** Only these system actions may trigger an arm attempt. */
         private val SUPPORTED_ACTIONS = setOf(
+            "com.focuslock.app.action.FROG_MORNING_ALARM",
+            Intent.ACTION_TIME_CHANGED,
+            Intent.ACTION_TIMEZONE_CHANGED,
             Intent.ACTION_USER_PRESENT,
             Intent.ACTION_BOOT_COMPLETED,
             Intent.ACTION_MY_PACKAGE_REPLACED,

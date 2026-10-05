@@ -4,6 +4,7 @@ const publishableKey = process.env.CLERK_PUBLISHABLE_KEY;
 const syncHost = process.env.CLERK_SYNC_HOST;
 const M = self.FocusLockMatcher;
 const S = self.FocusLockStore;
+const P = self.FocusLockPolicy;
 const app = document.getElementById('app');
 let clerk = null;
 let renderedAccountId = null;
@@ -14,6 +15,7 @@ let activeUrl = '';
 let domain = '';
 let localState = null;
 let cloud = null;
+let featureStatus = null;
 let busy = false;
 let message = '';
 let messageTimer = null;
@@ -70,6 +72,8 @@ function render() {
   const signedIn = Boolean(clerk.user && clerk.session);
   const strict = localState?.strictMode === true
     && (!Number(localState.strictEndsAt) || Number(localState.strictEndsAt) > Date.now());
+  const strictActive = featureStatus?.strictMode === true || strict;
+  const savedBalance = localState?.cloudPolicy?.state ? P.effectiveBalance(localState) : null;
   const localSeconds = localState?.stats?.[S.todayKey()]?.[domain] || 0;
   const localTotal = Object.values(localState?.stats?.[S.todayKey()] || {}).reduce((sum, value) => sum + Number(value || 0), 0);
   const totalSeconds = signedIn && cloud?.summary ? cloud.summary.totalTrackedSeconds : localTotal;
@@ -96,7 +100,7 @@ function render() {
       </section>
     ` : `
       <section class="summary" aria-labelledby="today-heading">
-        <div><p class="label" id="today-heading">Screen time today</p><h1>${formatDuration(totalSeconds)}</h1></div>
+        <div><p class="label" id="today-heading">Screen time today</p><h1>${formatDuration(totalSeconds)}</h1><p class="earned-balance">Focus available <strong>${savedBalance == null ? '—' : formatDuration(savedBalance)}</strong></p></div>
         <p class="summary-meta">${cloud?.lastWarning ? escapeHtml(cloud.lastWarning) : cloud?.summary ? `Across ${cloud?.devices?.length || 1} connected device${(cloud?.devices?.length || 1) === 1 ? '' : 's'}` : 'This browser · sync pending'}</p>
       </section>
 
@@ -106,22 +110,28 @@ function render() {
       </section>
     `}
 
+    <nav class="destinations" aria-label="FocusLock sections">
+      <button type="button" data-open-tab="stats">Focus</button>
+      <button type="button" data-open-tab="blocks">Boundaries</button>
+      <button type="button" data-open-tab="strict" aria-label="Strict Mode">Strict${strictActive ? ' · active' : ''}</button>
+    </nav>
+
     ${accountError ? `<p class="error" role="alert">${escapeHtml(accountError)} <button class="text-button" id="account-retry" type="button">Open account settings</button></p>` : ''}
 
     <section class="current-site">
       <div class="site-heading"><div><p class="label">Current website</p><h2>${escapeHtml(domain || 'Chrome page')}</h2></div><strong>${formatDuration(localSeconds)}</strong></div>
       <div class="progress" role="progressbar" aria-label="Current website share of today" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.min(100, totalSeconds ? Math.round(localSeconds / totalSeconds * 100) : 0)}"><i style="width:${Math.min(100, totalSeconds ? localSeconds / totalSeconds * 100 : 0)}%"></i></div>
       <div class="site-actions">
-        <button class="primary" id="block-site" ${!domain || strict ? 'disabled' : ''}>Block this site</button>
-        <button class="secondary" id="allow-site" ${!domain || strict ? 'disabled' : ''}>Allow 5 min</button>
+        <button class="primary" id="block-site" ${!domain || strictActive ? 'disabled' : ''}>Block this site</button>
+        <button class="secondary" id="allow-site" ${!domain || strictActive ? 'disabled' : ''}>Allow 5 min</button>
       </div>
-      ${strict ? '<p class="summary-meta" role="status">Strict Mode is active. Boundaries are locked until it ends.</p>' : ''}
+      ${strictActive ? '<p class="strict-status" role="status">Strict Mode is active. Boundaries are locked until it ends.</p>' : ''}
     </section>
 
     ${message ? `<p class="feedback" role="status">${escapeHtml(message)}</p>` : ''}
     ${cloud?.error ? `<p class="error" role="alert">Sync paused: ${escapeHtml(cloud.error)}</p>` : ''}
 
-    <footer><button class="text-button" id="dashboard">Open boundaries & stats</button>${signedIn ? '<button class="text-button" id="signout">Sign out</button>' : ''}<button class="icon-button" id="settings" aria-label="Open extension settings">${icon('settings')}</button></footer>
+    <footer><button class="text-button" id="dashboard">Open Focus</button>${signedIn ? '<button class="text-button" id="signout">Sign out</button>' : ''}<button class="icon-button" id="settings" aria-label="Open extension settings">${icon('settings')}</button></footer>
   `;
 
   bindEvents(signedIn);
@@ -135,7 +145,8 @@ function flash(text) {
 }
 
 function bindEvents(signedIn) {
-  document.getElementById('dashboard')?.addEventListener('click', () => chrome.tabs.create({ url: chrome.runtime.getURL('options/options.html') }));
+  document.querySelectorAll('[data-open-tab]').forEach((button) => button.addEventListener('click', () => openDashboard(button.dataset.openTab)));
+  document.getElementById('dashboard')?.addEventListener('click', () => openDashboard('stats'));
   document.getElementById('settings')?.addEventListener('click', () => chrome.tabs.create({ url: chrome.runtime.getURL('options/options.html?tab=settings') }));
   document.getElementById('account')?.addEventListener('click', () => openAccountPage(signedIn ? 'profile' : 'signin'));
   document.getElementById('signin')?.addEventListener('click', () => openAccountPage('signin'));
@@ -207,6 +218,12 @@ async function refreshCloud(forceSync) {
   }
 }
 
+function openDashboard(tab) {
+  const url = new URL(chrome.runtime.getURL('options/options.html'));
+  url.searchParams.set('tab', tab);
+  chrome.tabs.create({ url: url.href });
+}
+
 async function init() {
   [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
   activeUrl = activeTab?.url || '';
@@ -214,6 +231,7 @@ async function init() {
   // popup useful without exposing the extension id as a fake domain.
   domain = /^https?:\/\//i.test(activeUrl) ? M.domainOf(activeUrl) : '';
   localState = await S.load();
+  featureStatus = await chrome.runtime.sendMessage({ type: 'featureStatus' }).catch(() => null);
   let authTimeout;
   try {
     clerk = await Promise.race([
@@ -242,7 +260,8 @@ async function init() {
 
 chrome.storage.onChanged?.addListener((changes, area) => {
   if (area !== 'local' || !changes[S.KEY]) return;
-  void S.load().then((latest) => { localState = latest; render(); }).catch(() => {});
+  void Promise.all([S.load(), chrome.runtime.sendMessage({ type: 'featureStatus' }).catch(() => null)])
+    .then(([latest, status]) => { localState = latest; featureStatus = status; render(); }).catch(() => {});
 });
 
 init().catch((error) => {

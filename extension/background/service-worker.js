@@ -1,5 +1,5 @@
 /* FocusLock service worker — tracking + blocking engine (Cold Turkey core). */
-importScripts('../src/matcher.js', '../src/store.js', '../src/policy.js', '../dist/cloud-sync.js');
+importScripts('../src/matcher.js', '../src/features.js', '../src/store.js', '../src/policy.js', '../dist/cloud-sync.js');
 
 const M = self.FocusLockMatcher;
 const Store = self.FocusLockStore;
@@ -22,6 +22,176 @@ let lastCloudRefreshAttemptAt = 0;
 const CLOUD_VERDICT_MAX_AGE_MS = 60 * 1000;
 const ACTIVE_POLICY_MAX_AGE_MS = 60 * 1000;
 const CURSOR_KEY = 'focuslock.sessionCursor';
+let featureQueue = Promise.resolve();
+function featureSerial(task) {
+  const result = featureQueue.then(task, task);
+  featureQueue = result.catch(() => {});
+  return result;
+}
+
+async function featureWrite(mutator) {
+  const saved = await Store.update(mutator);
+  mem.state = saved;
+  return saved;
+}
+async function recheckWebsites() {
+  const tabs = await chrome.tabs.query({});
+  await Promise.allSettled(tabs.filter(tab => tab.id >= 0 && /^https?:/.test(tab.url || ''))
+    .map(tab => enforceTab(tab.id, tab.url)));
+}
+async function commitStrict(message) {
+  return featureSerial(() => commitStrictNow(message));
+}
+async function commitStrictNow(message) {
+    await syncCloud('edit');
+    let status;
+    try { status = await self.FocusLockCloud.status(); } catch (_) { status = { signedIn: false, accountId: '' }; }
+    const now = nowMs();
+    let end;
+    const saved = await featureWrite(state => {
+      end = self.FocusLockFeatures.strictEnd(state, message.endsAt, now);
+      const wasActive = strictIsActive(state, now);
+      const origin = wasActive ? state.strictOriginAccountId || state.strictPending?.accountId || '' : status.signedIn ? status.accountId || '' : '';
+      state.strictOriginAccountId = origin;
+      state.strictMode = true; state.strictEndsAt = end;
+      state.strictPreset = ['hours', 'days', 'date', 'weekly'].includes(message.preset) ? message.preset : 'custom';
+      state.strictNukeAfterFive = wasActive ? state.strictNukeAfterFive : message.nukeAfterFive === true;
+      if (!wasActive) { state.strictAttempts = 0; state.strictSessionKey = `${now}:${end}`; }
+      state.strictHeldSites = [...new Set([...(state.strictHeldSites || []),
+        ...(state.cloudSites || []).filter(site => site.isBlocked).map(site => site.domain)])];
+      state.strictPending = origin ? { accountId: origin,
+        prefs: { strictMode: true, strictEndsAt: end, strictPreset: state.strictPreset,
+          strictNukeAfterFive: state.strictNukeAfterFive, updatedAt: now } } : null;
+      return state;
+    });
+    let synced = false, error = '';
+    if (saved.strictPending) {
+      try { synced = await uploadStrict(saved.strictPending); }
+      catch (e) { error = e?.message || 'Account sync is waiting. Your Chrome commitment is active.'; }
+    }
+    await recheckWebsites();
+    return { ok: true, synced, localOnly: !saved.strictOriginAccountId, endsAt: end, error };
+}
+async function uploadStrict(pending) {
+  const status = await self.FocusLockCloud.status();
+  if (!status.signedIn || status.accountId !== pending.accountId) return false;
+  const result = await self.FocusLockCloud.savePrefs(pending.prefs, pending.accountId);
+  if (!result?.ok) return false;
+  await featureWrite(state => {
+    if (state.strictPending?.prefs?.updatedAt === pending.prefs.updatedAt) state.strictPending = null;
+    return state;
+  });
+  await syncCloud('edit');
+  return true;
+}
+async function changeFrog(message) {
+  return featureSerial(async () => {
+    const saved = await featureWrite(state => {
+      let frog = self.FocusLockFeatures.frogState(state.browserFrog);
+      if (message.type === 'frogConfigure') {
+        if (frog.locked) throw new Error('Finish today’s Frog before changing its settings.');
+        const required = Number(message.requiredMinutes), wake = Number(message.wakeHour);
+        if (!Number.isInteger(required) || required < 1 || required > 480 || !Number.isInteger(wake) || wake < 0 || wake > 23) throw new Error('Choose 1–480 minutes and a wake hour from 0–23.');
+        frog = self.FocusLockFeatures.frogState({ ...frog, enabled: message.enabled === true,
+          requiredSeconds: required * 60, wakeHour: wake });
+      } else if (message.type === 'frogSelect') {
+        const title = String(message.title || '').trim();
+        if (!frog.enabled || !frog.armed) throw new Error('Enable Eat the Frog at or after your wake hour first.');
+        if (!frog.locked) throw new Error('Today’s Frog is already complete. Choose another tomorrow.');
+        if (!title || title.length > 200) throw new Error('Enter a task title of up to 200 characters.');
+        if (frog.frog && state.focusTimer) throw new Error('Finish the running focus session before changing your task.');
+        frog.frog = { id: Store.uid('frog'), title }; frog.trackedSeconds = 0; frog.tickedOff = false;
+      } else {
+        if (!frog.frog) throw new Error('Choose your Frog task first.');
+        frog.tickedOff = message.tickedOff === true;
+      }
+      state.browserFrog = self.FocusLockFeatures.frogState(frog);
+      return state;
+    });
+    await recheckWebsites();
+    return { ok: true, frog: saved.browserFrog };
+  });
+}
+async function startFocusTimer(message) {
+  return featureSerial(async () => {
+    const minutes = Number(message.minutes);
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 480) throw new Error('Choose a focus duration from 1–480 minutes.');
+    let status;
+    try { status = await self.FocusLockCloud.status(); } catch (_) { status = { signedIn: false, accountId: '' }; }
+    const saved = await featureWrite(state => {
+      if (state.focusTimer) throw new Error('A focus session is already running.');
+      const frog = self.FocusLockFeatures.frogState(state.browserFrog);
+      state.focusTimer = { id: Store.uid('focus'), startedAt: nowMs(), targetMinutes: minutes,
+        accountId: status.signedIn ? status.accountId || '' : '',
+        ratio: Math.max(1, Math.min(20, Number(state.cloudPrefs?.workRatio) || Number(message.ratio) || 4)),
+        frogId: frog.locked ? frog.frog?.id || '' : '', frogCycle: frog.cycleDate,
+        title: frog.locked && frog.frog ? frog.frog.title : `Chrome focus ${minutes}m` };
+      return state;
+    });
+    await chrome.alarms.create('focuslock-focus', { when: saved.focusTimer.startedAt + minutes * 60000 });
+    return { ok: true, timer: saved.focusTimer };
+  });
+}
+async function finishFocusTimer(completed) {
+  return featureSerial(() => finishFocusTimerNow(completed));
+}
+async function finishFocusTimerNow(completed) {
+  const current = (await ensureState()).focusTimer;
+  if (!current) return { ok: true, minutes: 0 };
+  const seconds = self.FocusLockFeatures.elapsed(current);
+  if (completed && seconds < current.targetMinutes * 60) return { ok: false };
+  const minutes = Math.floor(seconds / 60);
+  await featureWrite(state => {
+    if (state.focusTimer?.id !== current.id) return state;
+    const frog = self.FocusLockFeatures.frogState(state.browserFrog);
+    if (frog.frog?.id === current.frogId && frog.cycleDate === current.frogCycle && frog.locked) frog.trackedSeconds += seconds;
+    state.browserFrog = self.FocusLockFeatures.frogState(frog);
+    state.focusTimer = null;
+    if (minutes >= 5 && current.accountId) {
+      state.pendingFocusSessions = state.pendingFocusSessions || [];
+      if (!state.pendingFocusSessions.some(row => row.id === current.id)) state.pendingFocusSessions.push({
+        id: current.id, accountId: current.accountId,
+        session: { sessionId: current.id, title: current.title, durationMinutes: minutes,
+          timestamp: current.startedAt, source: 'chrome-extension', earnedMinutesCredited: Math.max(1, Math.floor(minutes / current.ratio)) } });
+    }
+    return state;
+  });
+  try { await uploadFocusSessions(); } catch (_) { /* durable account-bound pending record remains */ }
+  return { ok: true, minutes, localOnly: !current.accountId, pending: (await ensureState()).pendingFocusSessions?.some(row => row.id === current.id) || false };
+}
+async function uploadFocusSessions() {
+  const status = await self.FocusLockCloud.status();
+  if (!status.signedIn || !status.accountId) return;
+  for (const row of (await ensureState()).pendingFocusSessions || []) {
+    if (row.accountId !== status.accountId) continue;
+    const result = await self.FocusLockCloud.logFocusSession(row.session, row.accountId);
+    if (!result?.ok) break;
+    await featureWrite(state => { state.pendingFocusSessions = state.pendingFocusSessions.filter(item => item.id !== row.id); return state; });
+  }
+}
+async function maintainFeatures(upload = true) {
+  if (!self.FocusLockFeatures) return;
+  return featureSerial(async () => {
+    const state = await ensureState();
+    const window = self.FocusLockFeatures.weeklyWindow(state.strictWeekly);
+    if (window && state.strictWeekly.lastWindow !== window.key) {
+      await featureWrite(state => { state.strictWeekly.lastWindow = window.key; return state; });
+      const current = await ensureState();
+      if (!strictIsActive(current) || (current.strictEndsAt && current.strictEndsAt < window.endsAt)) {
+        await commitStrictNow({ endsAt: window.endsAt, preset: 'weekly', nukeAfterFive: false });
+      }
+    }
+    if (state.focusTimer && self.FocusLockFeatures.elapsed(state.focusTimer) >= state.focusTimer.targetMinutes * 60) await finishFocusTimerNow(true);
+    const frog = self.FocusLockFeatures.frogState((await ensureState()).browserFrog);
+    if (JSON.stringify(frog) !== JSON.stringify((await ensureState()).browserFrog)) await featureWrite(state => { state.browserFrog = frog; return state; });
+    if (!upload) return;
+    try {
+      const pending = (await ensureState()).strictPending;
+      if (pending) await uploadStrict(pending);
+      await uploadFocusSessions();
+    } catch (_) { /* pending records remain durable and retry on reconnect/maintenance */ }
+  });
+}
 
 // ---------- helpers ----------
 function nowMs() { return Date.now(); }
@@ -62,6 +232,7 @@ function listIsLocked(list, t) {
 function listIsActive(list, state, t) {
   t = t || nowMs();
   if (!list.enabled) return { active: false, reason: 'disabled' };
+  if (strictIsActive(state, t)) return { active: true, reason: 'strict' };
   if (listIsLocked(list, t)) return { active: true, reason: 'frozen-lock' };
   const attached = state.schedules.filter(s => s.listId === list.id);
   if (attached.length === 0) {
@@ -104,6 +275,13 @@ function verdictFor(urlStr, state, t) {
   // Windows. Keep local extension lists as additional browser-only rules.
   const sharedSite = (state.cloudSites || []).find((site) =>
     site.isBlocked && self.FocusLockMatcher.matchesAny(urlStr, [site.domain]));
+  const frog = self.FocusLockFeatures?.frogState(state.browserFrog, t);
+  if (frog?.locked && !authUrl && (sharedSite || state.lists.some(list => list.enabled
+      && !(state.cloudSitesLoaded && ['list_social', 'list_video'].includes(list.id))
+      && !M.matchesAny(urlStr, list.exceptions || [])
+      && (list.mode === 'whitelist' ? !M.matchesAny(urlStr, list.sites) : M.matchesAny(urlStr, list.sites))))) {
+    return { blocked: true, mode: 'frog', listId: '__frog', listName: 'Eat the Frog', reason: 'frog' };
+  }
   const policyVerdict = self.FocusLockPolicy?.verdict(urlStr, state, t);
   if (policyVerdict) return policyVerdict;
   if (!state.cloudPolicy && sharedSite && (strictIsActive(state, t) || !domainAllowedBySnooze(state, shortDomain, t))) {
@@ -372,6 +550,7 @@ async function syncCloud(reason, liveResult) {
         }
       }
       if (strictIsActive(state)) {
+        if (!commitmentWasActive) state.strictOriginAccountId = state.cloudAccountId || '';
         state.strictHeldSites = [...new Set([...(state.strictHeldSites || []),
           ...(state.cloudSites || []).filter(site => site.isBlocked).map(site => site.domain)])];
       }
@@ -483,7 +662,8 @@ async function enforceTab(tabId, url) {
   const dest = chrome.runtime.getURL('blocked/blocked.html')
     + '?url=' + encodeURIComponent(url.slice(0, 800))
     + '&list=' + encodeURIComponent(v.listName || '')
-    + '&mode=' + encodeURIComponent(v.mode || '');
+    + '&mode=' + encodeURIComponent(v.mode || '')
+    + '&reason=' + encodeURIComponent(v.reason || '');
   try {
     if (tabId >= 0) await chrome.tabs.update(tabId, { url: dest });
   } catch (e) { /* tab gone */ }
@@ -554,6 +734,8 @@ chrome.webNavigation.onBeforeNavigate.addListener(async (details) => {
 
 chrome.alarms.onAlarm.addListener(async (alarm) => {
   await ensureState();
+  await maintainFeatures();
+  if (alarm.name === 'focuslock-focus') { await recheckWebsites(); return; }
   // Cloud sync has its own cadence (focuslock-sync, 4 hours); the
   // maintenance alarm drives blocking decisions and stays at 1 minute.
   if (alarm.name === 'focuslock-sync') {
@@ -696,7 +878,48 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse(result);
       }
     } else if (msg.type === 'frogStatus') {
-      sendResponse({ supported: false, frog: null });
+      sendResponse({ supported: true, ...self.FocusLockFeatures.frogState(state.browserFrog) });
+    } else if (msg.type === 'featureStatus' || msg.type === 'featureRetry') {
+      await maintainFeatures(msg.type === 'featureRetry');
+      const latest = await ensureState();
+      sendResponse({ ok: true, frog: self.FocusLockFeatures.frogState(latest.browserFrog),
+        timer: latest.focusTimer, pendingSessions: latest.pendingFocusSessions?.length || 0,
+        strictPending: Boolean(latest.strictPending), strictMode: strictIsActive(latest), strictEndsAt: latest.strictEndsAt,
+        strictSessionId: latest.cloudPrefs?.strictSessionId || '', accountId: latest.cloudAccountId || '',
+        strictOriginAccountId: latest.strictOriginAccountId || '',
+        strictWeekly: self.FocusLockFeatures.weeklyState(latest.strictWeekly) });
+    } else if (msg.type === 'strictCommit') {
+      sendResponse(await commitStrict(msg));
+    } else if (msg.type === 'strictWeeklySave') {
+      await featureSerial(async () => {
+        await featureWrite(state => {
+          if (strictIsActive(state)) throw new Error('Weekly activation cannot change during a commitment.');
+          const rule = self.FocusLockFeatures.weeklyState(msg.rule);
+          if (rule.enabled && !rule.days.length) throw new Error('Choose at least one weekday.');
+          // Preserve the consumed occurrence so approval never re-arms it.
+          rule.lastWindow = state.strictWeekly?.lastWindow || '';
+          state.strictWeekly = rule; return state;
+        });
+      });
+      await maintainFeatures();
+      sendResponse({ ok: true });
+    } else if (msg.type === 'frogConfigure' || msg.type === 'frogSelect' || msg.type === 'frogTick') {
+      sendResponse(await changeFrog(msg));
+    } else if (msg.type === 'focusTimerStart') {
+      sendResponse(await startFocusTimer(msg));
+    } else if (msg.type === 'focusTimerFinish') {
+      sendResponse(await finishFocusTimer(false));
+    } else if (msg.type === 'guardianGet' || msg.type === 'guardianSave' || msg.type === 'guardianRequest') {
+      if (msg.type === 'guardianSave' && strictIsActive(state)) throw new Error('A trusted person can only be changed before a commitment.');
+      sendResponse(await self.FocusLockCloud.guardian(msg));
+    } else if (msg.type === 'sharedRulesGet' || msg.type === 'sharedRuleSave') {
+      if (msg.type === 'sharedRuleSave') {
+        await syncCloud('edit');
+        if (strictIsActive(await ensureState())) throw new Error('Shared boundaries cannot change during Strict Mode.');
+      }
+      const result = await self.FocusLockCloud.sharedRules(msg);
+      if (result.ok && msg.type === 'sharedRuleSave') await syncCloud('boundary');
+      sendResponse(result);
     } else if (msg.type === 'savePrefs') {
       try {
         const result = await self.FocusLockCloud.savePrefs(msg.prefs || {});
@@ -755,6 +978,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (!/^https?:\/\//i.test(msg.url || '') || !domain || strictIsActive(state) || target
           || ['group-limit', 'daily-limit', 'schedule', 'global-limit'].includes(sharedMode)
           || M.matchesAny(msg.url, state.permanentSites || [])
+          || verdictFor(msg.url, state, nowMs()).mode === 'frog'
           || state.cloudNuke?.isActive || (state.nuclear.active && state.nuclear.until > nowMs())) {
         sendResponse({ ok: false, error: ['daily-limit', 'group-limit', 'global-limit'].includes(sharedMode)
           ? 'This shared daily limit cannot be paused.' : 'This block cannot be snoozed.' });
@@ -767,6 +991,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       mem.state = await Store.load();
       mem.lastFlushedDay = null;
       updateBadge(mem.state);
+      await recheckWebsites();
       sendResponse({ ok: true });
     } else {
       sendResponse({ ok: false });
@@ -801,7 +1026,7 @@ chrome.runtime.onStartup.addListener(async () => {
 // Retry durable cloud work promptly when connectivity returns. All boundary
 // enforcement continues locally while the network is unavailable.
 if (typeof self.addEventListener === 'function') {
-  self.addEventListener('online', () => { void syncCloud('reconnect'); });
+  self.addEventListener('online', () => { void syncCloud('reconnect').then(() => maintainFeatures()); });
 }
 
 // expose for tests
@@ -812,6 +1037,7 @@ self.FocusLockEngine = { verdictFor, listIsActive, scheduleActive, minutesUsedTo
 if (self.FocusLockCloud.startLivePolicy) {
   void (async () => {
     await syncCloud('worker-start');
+    await maintainFeatures();
     await self.FocusLockCloud.startLivePolicy({
       onPolicy: result => syncCloud('live', result),
       onIdentityChange: () => syncCloud('account-change'),

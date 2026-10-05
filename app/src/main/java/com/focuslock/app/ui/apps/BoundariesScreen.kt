@@ -19,12 +19,16 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Apps
+import androidx.compose.material.icons.rounded.Block
+import androidx.compose.material.icons.rounded.LocationOn
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Lock
@@ -75,6 +79,7 @@ import com.focuslock.app.ui.components.StaggeredFadeSlide
 import com.focuslock.app.ui.components.UiTokens
 import com.focuslock.app.ui.components.pressScaleModifier
 import com.focuslock.app.ui.strict.formatLockdownRemaining
+import com.focuslock.app.ui.permalock.PermalockScreen
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -142,6 +147,10 @@ fun BoundariesScreen(
     val limits by appLimits.limitsFlow.collectAsStateWithLifecycle(initialValue = emptyMap())
     // null = overview; a value = that picker tab is open.
     var pickerTab by rememberSaveable { mutableStateOf<PickerTab?>(null) }
+    var detail by rememberSaveable { mutableStateOf<String?>(null) }
+    val overviewListState = rememberLazyListState()
+    val homeOnly by app.homeLocationRepository.homeOnlyFlow.collectAsStateWithLifecycle(initialValue = false)
+    val homePlace by app.homeLocationRepository.homePlaceFlow.collectAsStateWithLifecycle(initialValue = null)
 
     // Live Strict Mode cooldown for accurate refusal copy; polls only while it is active.
     var lockdownRemainingMs by remember { mutableStateOf(0L) }
@@ -182,7 +191,9 @@ fun BoundariesScreen(
     }
     val installedApps = installedAppsState.orEmpty()
 
-    BackHandler(enabled = pickerTab != null) { pickerTab = null }
+    BackHandler(enabled = pickerTab != null || detail != null) {
+        if (pickerTab != null) pickerTab = null else detail = null
+    }
 
     // Cross-device "New bucket…" hand-off: keep the target locally (so it survives the
     // tab switch inside this screen), open the Applications picker, and clear it in
@@ -192,6 +203,7 @@ fun BoundariesScreen(
     LaunchedEffect(pendingMergeTarget) {
         val target = pendingMergeTarget ?: return@LaunchedEffect
         pendingMerge = target
+        detail = null
         pickerTab = PickerTab.APPLICATIONS
         onPendingMergeConsumed()
     }
@@ -288,13 +300,31 @@ fun BoundariesScreen(
         }
     }
 
+    if (detail == "permanent") {
+        PermalockScreen(onBack = { detail = null })
+        return
+    }
+    if (detail == "location") {
+        HomeBlockingScreen(onBack = { detail = null })
+        return
+    }
     when (val tab = pickerTab) {
         null -> BoundariesOverview(
+            listState = overviewListState,
             appsStorageLoaded = storedApps != null,
             websitesStorageLoaded = storedWebsites != null,
             blockedAppCount = blockedAppCount,
             blockedWebsiteCount = blockedWebsiteCount,
             activeLimitCount = activeLimitCount,
+            permanentCount = permanentPackages.size + permanentDomains.size,
+            permanentStoreLoaded = permanentStoreLoaded,
+            locationSummary = when {
+                homePlace == null -> "Everywhere · Home location not set"
+                homeOnly -> "Home only · ${homePlace?.label ?: "Home"}"
+                else -> "Everywhere · Home-only blocking is off"
+            },
+            onOpenPermanent = { detail = "permanent" },
+            onOpenLocation = { detail = "location" },
             boundariesFrozen = boundariesFrozen,
             lockdownMode = lockdownMode,
             lockdownRemainingMs = lockdownRemainingMs,
@@ -318,11 +348,17 @@ fun BoundariesScreen(
 
 @Composable
 private fun BoundariesOverview(
+    listState: LazyListState,
     appsStorageLoaded: Boolean,
     websitesStorageLoaded: Boolean,
     blockedAppCount: Int,
     blockedWebsiteCount: Int,
     activeLimitCount: Int,
+    permanentCount: Int,
+    permanentStoreLoaded: Boolean,
+    locationSummary: String,
+    onOpenPermanent: () -> Unit,
+    onOpenLocation: () -> Unit,
     boundariesFrozen: Boolean,
     lockdownMode: Boolean,
     lockdownRemainingMs: Long,
@@ -344,6 +380,7 @@ private fun BoundariesOverview(
     LaunchedEffect(Unit) { entered = true }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
+        state = listState,
         contentPadding = PaddingValues(
             start = UiTokens.ScreenPadding,
             end = UiTokens.ScreenPadding,
@@ -353,8 +390,8 @@ private fun BoundariesOverview(
         item(key = "boundaries-header", contentType = "screenHeader") {
             StaggeredFadeSlide(visible = entered, index = 0, screenKey = "boundaries_overview") {
                 ScreenHeader(
-                    title = "Your boundaries",
-                    subtitle = "Choose what waits until after your work."
+                    title = "Boundaries",
+                    subtitle = "Manage distractions and choose where blocking applies."
                 )
             }
         }
@@ -405,7 +442,7 @@ private fun BoundariesOverview(
 
         item(key = "boundaries-blocking-header", contentType = "sectionHeader") {
             StaggeredFadeSlide(visible = entered, index = 1, screenKey = "boundaries_overview") {
-                SectionHeader("Blocking")
+                SectionHeader("Everyday boundaries")
             }
         }
         item(key = "boundaries-blocking-spacer", contentType = "spacer") {
@@ -450,6 +487,35 @@ private fun BoundariesOverview(
                         )
                     }
                 }
+            }
+        }
+
+        item(key = "boundaries-permanent", contentType = "navigationCard") {
+            SectionHeader("Permanent commitments")
+            Spacer(Modifier.height(8.dp))
+            Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
+                BoundaryNavRow(
+                    title = "Permanent blocks",
+                    metadata = if (!permanentStoreLoaded) "Loading…" else if (permanentCount == 0) "Block apps or websites permanently" else "$permanentCount saved · No in-app removal",
+                    icon = Icons.Rounded.Block,
+                    iconContainer = MaterialTheme.colorScheme.errorContainer,
+                    iconTint = MaterialTheme.colorScheme.onErrorContainer,
+                    onClick = onOpenPermanent
+                )
+            }
+        }
+        item(key = "boundaries-location", contentType = "navigationCard") {
+            SectionHeader("Where blocking applies")
+            Spacer(Modifier.height(8.dp))
+            Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
+                BoundaryNavRow(
+                    title = "Blocking location",
+                    metadata = locationSummary,
+                    icon = Icons.Rounded.LocationOn,
+                    iconContainer = MaterialTheme.colorScheme.secondaryContainer,
+                    iconTint = MaterialTheme.colorScheme.onSecondaryContainer,
+                    onClick = onOpenLocation
+                )
             }
         }
 
@@ -619,14 +685,14 @@ private fun BoundaryNavRow(
                 text = title,
                 style = MaterialTheme.typography.titleMedium,
                 color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
             Text(
                 text = metadata,
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
+                maxLines = 3,
                 overflow = TextOverflow.Ellipsis
             )
         }

@@ -421,7 +421,9 @@ class FocusSyncManager(
             // are part of this fresh read instead of being wiped by a stale push, and
             // the LWW guard inside applyRemoteState refuses the re-stamp if anything
             // newer lands between this read and the commit.
-            val fresh = bank.withStateLock { bank.readAggregateState() }
+            val (fresh, localHistoryAtStateRead) = bank.withStateLock {
+                bank.readAggregateState() to bank.fullHistoryFlow.first().toList()
+            }
             val localBalance = fresh.balanceSeconds
             val localStateUpdatedAt = fresh.stateUpdatedAt
             val remoteStateUpdatedAt = snapshot.stateUpdatedAt
@@ -440,6 +442,7 @@ class FocusSyncManager(
             var pushed = 0
             var expiredUsageSkipped = 0
             val stepErrors = mutableListOf<String>()
+            var focusStateCommitted = false
 
             try {
             val remoteCounters = snapshot.state?.let { state ->
@@ -514,6 +517,10 @@ class FocusSyncManager(
                 pushed++
                 }
             }
+            // History rows are uploaded separately from aggregate credit state. Treat
+            // even an unchanged state as committed only after its sync decision ran
+            // successfully, so a partial state failure cannot publish newer credits.
+            focusStateCommitted = true
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 android.util.Log.w("FocusSyncManager", "focus-state sync step failed", e)
@@ -677,9 +684,16 @@ class FocusSyncManager(
 
             try {
             // Push only records not yet confirmed on the server (audit item 6).
-            val pushOutcome = pushNewWorkRecords(convex, snapshot.records)
-            pushed += pushOutcome.pushed
-            if (pushOutcome.failed) stepErrors += "work history: push interrupted — will retry"
+            if (focusStateCommitted) {
+                val pushOutcome = pushNewWorkRecords(convex, snapshot.records, localHistoryAtStateRead)
+                pushed += pushOutcome.pushed
+                if (pushOutcome.failed) stepErrors += "work history: push interrupted — will retry"
+            } else {
+                android.util.Log.w(
+                    "FocusSyncManager",
+                    "skipping work-record upload because focus state did not commit",
+                )
+            }
             pulled += bank.mergeRemoteWorkRecords(snapshot.records.map(RemoteRecord::toLocal))
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
@@ -852,9 +866,10 @@ class FocusSyncManager(
     private suspend fun pushNewWorkRecords(
         convex: ConvexSyncClient,
         remoteRecords: List<RemoteRecord>,
+        localHistory: List<TickTickWorkRecord>,
     ): RecordPushOutcome {
         val remoteIds = remoteRecords.asSequence().map { it.recordId }.toHashSet()
-        val pending = bank.fullHistoryFlow.first()
+        val pending = localHistory
             .filter { it.id !in remoteIds }
             .sortedWith(compareBy({ it.timestamp }, { it.id }))
         var pushed = 0

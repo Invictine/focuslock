@@ -86,7 +86,7 @@ private sealed interface PermalockLoadState {
  * means exactly that.
  */
 @Composable
-fun PermalockScreen() {
+fun PermalockScreen(onBack: (() -> Unit)? = null) {
     val permanentBlocks = FocusLockApplication.instance.permanentBlocksRepository
     val settings = FocusLockApplication.instance.settingsRepository
     val permanentPackages by permanentBlocks.packagesFlow
@@ -179,6 +179,7 @@ fun PermalockScreen() {
                 hasLegacyOnlyPermanents = hasLegacyOnlyPermanents,
                 onBlockApp = { pickerOpen = true },
                 onBlockWebsite = { websiteDialogOpen = true },
+                onBack = onBack,
             )
         }
         SnackbarHost(
@@ -286,6 +287,7 @@ private fun PermalockOverview(
     hasLegacyOnlyPermanents: Boolean,
     onBlockApp: () -> Unit,
     onBlockWebsite: () -> Unit,
+    onBack: (() -> Unit)?,
 ) {
     val context = LocalContext.current
     val appContext = remember(context) { context.applicationContext }
@@ -321,8 +323,9 @@ private fun PermalockOverview(
         item(key = "permalock-header", contentType = "screenHeader") {
             StaggeredFadeSlide(visible = entered, index = 0, screenKey = "permalock") {
                 ScreenHeader(
-                    title = "Permalock",
-                    subtitle = "Blocks that stay, with no way back in the app."
+                    title = "Permanent blocks",
+                    subtitle = "Apps and websites stay blocked indefinitely.",
+                    onBack = onBack
                 )
             }
         }
@@ -342,7 +345,7 @@ private fun PermalockOverview(
         item(key = "permalock-list-header", contentType = "sectionHeader") {
             Spacer(Modifier.height(UiTokens.ItemGap))
             Column(verticalArrangement = Arrangement.spacedBy(UiTokens.ItemGap)) {
-                SectionHeader(title = "Permanently blocked")
+                SectionHeader(title = "Apps")
                 if (hasLegacyOnlyPermanents) {
                     Text(
                         text = "Includes permanent blocks restored from a backup. They are enforced on this device and cannot be removed in FocusLock either.",
@@ -350,8 +353,8 @@ private fun PermalockOverview(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                if (permanentPackages.isEmpty() && permanentDomains.isEmpty()) {
-                    PermanentEmptyCard()
+                if (permanentPackages.isEmpty()) {
+                    PermanentGroupEmptyState("No apps permanently blocked yet.")
                 }
             }
         }
@@ -394,12 +397,15 @@ private fun PermalockOverview(
                 }
             }
         }
-        if (permanentDomains.isNotEmpty()) {
-            item(key = "permalock-websites-header") {
-                Spacer(Modifier.height(20.dp))
-                SectionHeader(title = "Websites")
-                Spacer(Modifier.height(8.dp))
+        item(key = "permalock-websites-header") {
+            Spacer(Modifier.height(20.dp))
+            SectionHeader(title = "Websites")
+            Spacer(Modifier.height(8.dp))
+            if (permanentDomains.isEmpty()) {
+                PermanentGroupEmptyState("No websites permanently blocked yet.")
             }
+        }
+        if (permanentDomains.isNotEmpty()) {
             val websites = permanentDomains.sorted()
             itemsIndexed(websites, key = { _, domain -> "website:$domain" }) { index, domain ->
                 Surface(
@@ -459,19 +465,14 @@ private fun PermalockExplainerCard(onBlockApp: () -> Unit, onBlockWebsite: () ->
                 )
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Permanent",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Text(
-                        text = "Permalock",
+                        text = "Cannot be undone",
                         style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
                         color = MaterialTheme.colorScheme.onSurface
                     )
                 }
             }
             Text(
-                text = "Apps and websites blocked here stay blocked. App blocks survive uninstalling and reinstalling the blocked app. No timers, credits, emergency passes, or in-app removal.",
+                text = "No credits or emergency passes. Apps stay blocked after reinstalling; websites include subdomains.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -479,7 +480,7 @@ private fun PermalockExplainerCard(onBlockApp: () -> Unit, onBlockWebsite: () ->
                 onClick = onBlockApp,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(52.dp),
+                    .heightIn(min = 52.dp),
                 shape = MaterialTheme.shapes.large
             ) {
                 Icon(
@@ -504,28 +505,13 @@ private fun PermalockExplainerCard(onBlockApp: () -> Unit, onBlockWebsite: () ->
 }
 
 @Composable
-private fun PermanentEmptyCard() {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-        shape = MaterialTheme.shapes.large,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
-            Text(
-                text = "No permanent blocks yet",
-                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Text(
-                text = "Once you block an app or website here, it stays blocked and FocusLock will not offer a way to remove it.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
+private fun PermanentGroupEmptyState(message: String) {
+    Text(
+        text = message,
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(vertical = 12.dp)
+    )
 }
 
 @Composable

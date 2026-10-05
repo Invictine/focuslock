@@ -1256,6 +1256,17 @@ internal fun AppPickerScreen(
                 )
             }
 
+            Text(
+                text = if (selectedTab == PickerTab.APPLICATIONS) {
+                    "Use credits or set a daily limit for each app."
+                } else {
+                    "Choose which websites need scroll-time credits."
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(bottom = 8.dp)
+            )
+
             // Merged groups: every existing bucket with today's combined total + limit,
             // plus the entry point for a new merge. Shared by both tabs.
             if (!selectionMode) {
@@ -2494,15 +2505,6 @@ private fun WebsiteRow(
                 }
             }
 
-            if (!selectionMode && !compactActions) {
-                PermanentLockButton(
-                    isPermanent = site.isPermanent,
-                    label = site.displayName,
-                    onClick = onPermanentToggle,
-                    enabled = !boundariesFrozen
-                )
-            }
-
             if (selectionMode) {
                 Checkbox(
                     checked = selected,
@@ -2567,12 +2569,6 @@ private fun WebsiteRow(
                 if (site.isCustom) IconButton(onClick = { onDeleteRequest(site) }) {
                     Icon(Icons.Rounded.Delete, contentDescription = "Remove ${site.domain}")
                 }
-                PermanentLockButton(
-                    isPermanent = site.isPermanent,
-                    label = site.displayName,
-                    onClick = onPermanentToggle,
-                    enabled = !boundariesFrozen
-                )
             }
         }
         }
@@ -2737,13 +2733,6 @@ private fun InstalledAppRow(
                     onClick = { onLimitClick(app) }
                 )
 
-                PermanentLockButton(
-                    isPermanent = app.isPermanent,
-                    label = app.appName,
-                    onClick = onPermanentToggle,
-                    enabled = !boundariesFrozen,
-                    supportsRemoval = false
-                )
             }
 
             if (selectionMode) {
@@ -2814,13 +2803,6 @@ private fun InstalledAppRow(
                     limitMinutes = limitMinutes,
                     usedMinutes = app.todayMinutes,
                     onClick = { onLimitClick(app) }
-                )
-                PermanentLockButton(
-                    isPermanent = app.isPermanent,
-                    label = app.appName,
-                    onClick = onPermanentToggle,
-                    enabled = !boundariesFrozen,
-                    supportsRemoval = false
                 )
             }
         }
