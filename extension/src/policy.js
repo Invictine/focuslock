@@ -38,13 +38,6 @@
     return m ? m.matchesAny(url, [site.domain]) : hostMatches(getHost(url), site.domain);
   }
 
-  function isStrict(state, t) {
-    const prefs = state.cloudPrefs || {};
-    const candidates = [state, prefs];
-    return candidates.some(source => source.strictMode === true &&
-      (!(finite(source.strictEndsAt) > 0) || finite(source.strictEndsAt) > t));
-  }
-
   function deltaForDay(current, baseline, date) {
     const day = record(current?.[date]) ? current[date] : {};
     const before = record(baseline?.[date]) ? baseline[date] : {};
@@ -199,10 +192,6 @@
     if (m?.matchesAny(url, state.permanentSites || [])) {
       return block('permanent', 'permanent', '__permanent', 'Permanent block');
     }
-    const strict = isStrict(state, t);
-    if (strict && m?.matchesAny(url, state.strictHeldSites || [])) {
-      return block('strict', 'strict', '__commitment', 'Strict Mode');
-    }
     const authUrl = root.FocusLockCloud?.isAuthUrl?.(url) === true;
     if (state.cloudNuke?.isActive === true && !authUrl) {
       return block('shared-nuke', 'shared-nuclear', '__shared_nuclear', 'Shared Nuclear Block');
@@ -226,8 +215,6 @@
     if (globalDailyCapExceeded(state, cloudState, date)) {
       return block('daily-limit', 'limit', '__global_daily_cap', 'Daily leisure cap');
     }
-    if (strict) return block('strict', 'strict', '__shared', 'Strict Mode');
-
     const schedule = (Array.isArray(cloudPolicy.schedules) ? cloudPolicy.schedules : [])
       .find(row => scheduleIsActive(row, t, site));
     if (schedule) return block('schedule', 'schedule', schedule.scheduleId || '__schedule', schedule.label || 'Scheduled block');
@@ -245,7 +232,7 @@
     if (!record(state.cloudPolicy) || !url || (m && m.isInternalUrl(url))) return false;
     if (m?.matchesAny(url, state.permanentSites || [])) return false;
     const authUrl = root.FocusLockCloud?.isAuthUrl?.(url) === true;
-    if (isStrict(state, t) || (state.cloudNuke?.isActive === true && !authUrl)) return false;
+    if (state.cloudNuke?.isActive === true && !authUrl) return false;
     const site = selectedSite(url, state);
     if (!site || domainSnoozed(state, getHost(url), t) || effectiveBalance(state) <= 0) return false;
     return verdict(url, state, t) === null;

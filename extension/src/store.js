@@ -23,8 +23,7 @@
         lockedUntil: Number(list.lockedUntil) > now ? list.lockedUntil : 0 })),
       schedules: (state?.schedules || []).filter(schedule =>
         !['timer', 'frozen', 'pomodoro'].includes(schedule.type) || Number(schedule.endTs) > now),
-      settings: state?.settings,
-      security: state?.security,
+      permanentSites: normalizePermanentSites(state?.permanentSites),
     };
   }
 
@@ -183,7 +182,7 @@
       blockedTotal: Math.max(0, finite(s.blockedTotal)),
       cloudSites, cloudSitesLoaded: s.cloudSitesLoaded === true,
       cloudSitesSyncedAt: Math.max(0, finite(s.cloudSitesSyncedAt)),
-      strictHeldSites: strings(s.strictHeldSites),
+      strictHeldSites: [], // Retire legacy commitment-held domains; Strict Mode is an edit lock only.
       nukeCommitments: Array.isArray(s.nukeCommitments) ? s.nukeCommitments
         .filter(hold => hold && typeof hold.accountId === 'string' && hold.accountId)
         .map(hold => ({ accountId: hold.accountId, startedAt: Math.max(0, finite(hold.startedAt)) })) : [],

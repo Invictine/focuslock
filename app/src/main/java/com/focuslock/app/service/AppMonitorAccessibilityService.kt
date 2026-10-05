@@ -228,7 +228,6 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         }
 
         private const val SCHEDULE_REFRESH_INTERVAL_MS = 30_000L
-        private const val STRICT_NUKE_ATTEMPTS = 5
         private const val POLICY_ACTIVITY_REFRESH_INTERVAL_MS = 60_000L
 
         /** TickTick foreground is where the frog gets done — never frog-blocked. */
@@ -832,51 +831,27 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 return@launch
             }
 
-            // 3a. Active block schedule: force blocking regardless of banked time.
-            if (scheduleActiveNow()) {
-                latestAppCheckDecision = "schedule"
-                Log.w(TAG, "Active block schedule — blocking $packageName")
-                recordBlock(packageName, "schedule")
-                triggerBlocker(packageName, website = null, reason = "schedule")
-                return@launch
-            }
-
             val balanceSec = bank.getBalanceSeconds()
             Log.d(TAG, "Blocked app launched: $packageName, remaining balance: $balanceSec s")
 
-            // STRICT MODE: block immediately even with a positive balance — skip the
-            // 2s doomscroll grace countdown entirely.
-            // NOTE: TickTickNotificationListener has no bypass — it only banks credits
-            // and broadcasts ACTION_CREDIT_UPDATED, which BlockerActivity consumes
-            // WITHOUT finish() while strict is on.
-            // Strict Mode can be activated by a persisted place/window rule as well as
-            // the manual commitment.  The automation read is deliberately off the hot
-            // DataStore path and fails open if location permission/provider state is
-            // unavailable.
-            val strict = try {
-                settings.isLockdownModeEnabled() ||
-                    app.strictModeAutomationRepository.isActivationActiveNow()
-            } catch (_: Exception) { false }
-            if (strict) {
-                latestAppCheckDecision = "strict"
-                recordBlock(packageName, "manual")
-                val attempt = try { settings.recordStrictBlockedAttempt(packageName) } catch (_: Exception) { 0 }
-                val nukeAfterFive = try { settings.lockdownNukeAfterFiveFlow.first() } catch (_: Exception) { false }
-                if (nukeAfterFive && attempt == STRICT_NUKE_ATTEMPTS) {
-                    try { settings.setNukeActive(true) } catch (e: Exception) {
-                        Log.w(TAG, "Failed to arm Nuke after strict attempts", e)
-                    }
-                    triggerNuke()
-                } else {
-                    triggerBlocker(packageName, website = null, reason = "strict")
+            // Strict Mode freezes boundary configuration only. Access follows the
+            // normal boundary, schedule, Frog, limit, and credit policies below.
+            when (val reason = AppBlockPolicy.blockReason(isBlocked, scheduleActiveNow(), balanceSec)) {
+                "schedule" -> {
+                    latestAppCheckDecision = "schedule"
+                    Log.w(TAG, "Active block schedule — blocking $packageName")
+                    recordBlock(packageName, reason)
+                    triggerBlocker(packageName, website = null, reason = reason)
                 }
-            } else if (balanceSec <= 0L) {
-                latestAppCheckDecision = "manual"
-                recordBlock(packageName, "manual")
-                triggerBlocker(packageName, website = null, reason = "manual")
-            } else {
+                "manual" -> {
+                    latestAppCheckDecision = "manual"
+                    recordBlock(packageName, reason)
+                    triggerBlocker(packageName, website = null, reason = reason)
+                }
+                else -> {
                 latestAppCheckDecision = "countdown"
                 startDoomscrollCountdown(packageName, website = null)
+                }
             }
         }
     }
@@ -1485,17 +1460,10 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         } else if (policyActivityKey?.startsWith("website:") == true) {
             stopPolicyActivityRefresh()
         }
-        val strict = if (!blocked || permanent || groupLimitExceeded) false else try {
-            settings.isLockdownModeEnabled() || app.strictModeAutomationRepository.isActivationActiveNow()
-        } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-            false
-        }
         val reason = WebsiteBlockPolicy.blockReason(
             blocked = blocked,
             permanent = permanent,
             groupLimitExceeded = groupLimitExceeded,
-            strict = strict,
             scheduleActive = blocked && scheduleActiveNow(),
             suppressed = isDomainSuppressed(cleanDomain),
             balanceSeconds = app.creditBankRepository.getBalanceSeconds(),

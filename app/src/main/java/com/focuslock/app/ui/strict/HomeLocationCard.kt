@@ -45,6 +45,7 @@ import com.focuslock.app.location.HomePlace
 fun HomeLocationCard(
     homePlace: HomePlace?,
     enabled: Boolean,
+    strictLocked: Boolean = false,
     status: HomeLocationStatus,
     onSaveHome: (HomePlace) -> Unit,
     onHomeOnlyChange: (Boolean) -> Unit,
@@ -96,6 +97,7 @@ fun HomeLocationCard(
     }
 
     fun beginEnable() {
+        if (strictLocked) return
         val fineGranted = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
         if (!fineGranted) {
             pendingEnable = true
@@ -118,6 +120,9 @@ fun HomeLocationCard(
     ) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Only block at home", style = MaterialTheme.typography.titleLarge)
+            if (strictLocked) {
+                Text("Strict Mode is active. Boundary settings are locked until it ends.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             Text(
                 "Only a fresh, precise location fix that confirms you are away pauses everyday blocking. If location is off, unavailable, unclear, or permission is missing, blocking stays active. Permanent blocks always stay active.",
                 style = MaterialTheme.typography.bodyMedium,
@@ -125,27 +130,27 @@ fun HomeLocationCard(
             )
             if (homePlace == null) {
                 Text("Home location is not set", style = MaterialTheme.typography.titleSmall)
-                Button(onClick = { onChooseLocation(null, homeLabel.ifBlank { "Home" }) }, modifier = Modifier.fillMaxWidth()) { Text("Choose home location") }
+                Button(onClick = { onChooseLocation(null, homeLabel.ifBlank { "Home" }) }, enabled = !strictLocked, modifier = Modifier.fillMaxWidth()) { Text("Choose home location") }
             } else {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
                         Text(homePlace.label.ifBlank { "Home" }, style = MaterialTheme.typography.titleMedium)
                         Text("${homePlace.radiusMeters.toInt()} m radius", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    TextButton(onClick = { onChooseLocation(StrictLocationSelection(homePlace.label, homePlace.latitude, homePlace.longitude, homePlace.radiusMeters), homeLabel) }) {
+                    TextButton(enabled = !strictLocked, onClick = { onChooseLocation(StrictLocationSelection(homePlace.label, homePlace.latitude, homePlace.longitude, homePlace.radiusMeters), homeLabel) }) {
                         Text("Edit")
                     }
                 }
                 TextButton(onClick = {
                     if (renaming) homeLabel = homePlace.label
                     renaming = !renaming
-                }) { Text(if (renaming) "Cancel rename" else "Rename") }
+                }, enabled = !strictLocked) { Text(if (renaming) "Cancel rename" else "Rename") }
                 if (renaming) {
-                    OutlinedTextField(value = homeLabel, onValueChange = { homeLabel = it }, label = { Text("Home label") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = homeLabel, onValueChange = { homeLabel = it }, enabled = !strictLocked, label = { Text("Home label") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                     TextButton(onClick = {
                         onSaveHome(homePlace.copy(label = homeLabel.ifBlank { "Home" }))
                         renaming = false
-                    }) { Text("Save label") }
+                    }, enabled = !strictLocked) { Text("Save label") }
                 }
                 Text(statusText(status, enabled), style = MaterialTheme.typography.bodyMedium)
                 if (enabled && (!preciseGranted || !backgroundGranted || !deviceLocationEnabled)) {
@@ -164,7 +169,7 @@ fun HomeLocationCard(
                         Text("Only block at home", style = MaterialTheme.typography.titleSmall)
                         Text("Applies to blocking on this phone", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                    Switch(checked = enabled, onCheckedChange = { if (it) beginEnable() else onHomeOnlyChange(false) })
+                    Switch(checked = enabled, enabled = !strictLocked, onCheckedChange = { if (it) beginEnable() else onHomeOnlyChange(false) })
                 }
                 if (enabled && !preciseGranted) {
                     TextButton(onClick = { beginEnable() }) { Text("Allow precise location") }

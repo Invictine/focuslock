@@ -88,7 +88,7 @@ import java.util.Calendar
 import java.util.UUID
 
 /**
- * Strict Mode tab. Owns the timed no-unlock commitment UI that used to live
+ * Strict Mode tab. Owns the timed boundary-lock commitment UI that used to live
  * inside SettingsScreen: the enable/disable confirmation dialogs, the error-container
  * status hero with a live cooldown countdown, and the consequences list.
  *
@@ -105,8 +105,6 @@ fun StrictModeScreen() {
     val blockedApps by settings.blockedAppsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
     val blockedWebsites by settings.blockedWebsitesFlow.collectAsStateWithLifecycle(initialValue = emptyList())
     val endsAt by settings.lockdownEndsAtFlow.collectAsStateWithLifecycle(initialValue = 0L)
-    val attempts by settings.lockdownAttemptCountFlow.collectAsStateWithLifecycle(initialValue = 0)
-    val nukeAfterFive by settings.lockdownNukeAfterFiveFlow.collectAsStateWithLifecycle(initialValue = false)
     val preset by settings.lockdownPresetFlow.collectAsStateWithLifecycle(initialValue = "deep_work")
     val automation = FocusLockApplication.instance.strictModeAutomationRepository
     val places by automation.placesFlow.collectAsStateWithLifecycle(initialValue = emptyList())
@@ -143,10 +141,7 @@ fun StrictModeScreen() {
                 StrictActiveCard(
                     settings = settings,
                     endsAt = endsAt,
-                    attempts = attempts,
-                    nukeAfterFive = nukeAfterFive,
                     onExtend = { scope.launch { settings.extendLockdown(maxOf(endsAt, System.currentTimeMillis()) + 60 * 60 * 1000L) } },
-                    onNukeAfterFiveChange = { enabled -> scope.launch { settings.setLockdownNukeAfterFive(enabled) } },
                     onDisableClick = {
                         scope.launch {
                             val canDisable = try { settings.canDisableLockdownMode() } catch (_: Exception) { true }
@@ -186,14 +181,12 @@ fun StrictModeScreen() {
                 )
                 else -> StrictManualActivation(
                     strictMode = strictMode,
-                    attempts = attempts,
                     preset = preset,
                     onPresetChange = { selected ->
                         durationHours = when (selected) { "deep_work" -> 2; "exam" -> 4; "sleep" -> 8; else -> 24 }
                         enableUntilTime = false
                         scope.launch {
                             settings.setLockdownPreset(selected)
-                            if (selected == "exam") settings.setLockdownNukeAfterFive(true)
                         }
                     },
                     onEnableClick = { showEnableDialog = true }
@@ -247,10 +240,6 @@ fun StrictModeScreen() {
                             picker.datePicker.minDate = System.currentTimeMillis()
                             picker.datePicker.maxDate = System.currentTimeMillis() + SettingsRepository.MAX_LOCKDOWN_DURATION_HOURS * 60 * 60 * 1000L
                             picker.show()
-                        },
-                        nukeAfterFive = nukeAfterFive,
-                        onNukeAfterFiveChange = { enabled ->
-                            scope.launch { settings.setLockdownNukeAfterFive(enabled) }
                         },
                     )
                 },
@@ -309,8 +298,6 @@ private fun StrictEnableOptions(
     month: Int,
     day: Int,
     onPickDate: () -> Unit,
-    nukeAfterFive: Boolean,
-    onNukeAfterFiveChange: (Boolean) -> Unit,
 ) {
     Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Choose how long", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
@@ -342,15 +329,6 @@ private fun StrictEnableOptions(
             Text("Choose from 1 hour to 30 days", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Text("Strict Mode ends automatically when this commitment expires.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("Nuke after five blocked launches")
-                Text("Start the 10-minute reset on the fifth attempt.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            Switch(nukeAfterFive, onCheckedChange = onNukeAfterFiveChange)
-        }
     }
 }
 
@@ -379,7 +357,6 @@ private fun StrictActivationSwitcher(selected: String, onSelect: (String) -> Uni
 @Composable
 private fun StrictManualActivation(
     strictMode: Boolean,
-    attempts: Int,
     preset: String,
     onPresetChange: (String) -> Unit,
     onEnableClick: () -> Unit
@@ -387,10 +364,6 @@ private fun StrictManualActivation(
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (!strictMode) {
             StrictOffCard(onEnableClick = onEnableClick)
-            if (attempts > 0) {
-                Text("Last commitment: $attempts blocked ${if (attempts == 1) "attempt" else "attempts"}.",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
         }
         StrictPreferencesCard(preset = preset, onPresetChange = onPresetChange)
     }
@@ -700,14 +673,14 @@ private fun StrictOffCard(onEnableClick: () -> Unit) {
                         color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
-                        text = "Ready when you need a hard reset",
+                        text = "Ready to lock your boundary settings",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
             Text(
-                text = "Choose 1 hour to 30 days or a date and time. Unlocks remain unavailable until your commitment ends.",
+                text = "Choose 1 hour to 30 days or a date and time. Boundary settings stay locked until your commitment ends.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -739,10 +712,7 @@ private fun StrictOffCard(onEnableClick: () -> Unit) {
 private fun StrictActiveCard(
     settings: SettingsRepository,
     endsAt: Long,
-    attempts: Int,
-    nukeAfterFive: Boolean,
     onExtend: () -> Unit,
-    onNukeAfterFiveChange: (Boolean) -> Unit,
     onDisableClick: () -> Unit
 ) {
     Card(
@@ -773,24 +743,6 @@ private fun StrictActiveCard(
                     )
                     StrictCooldownText(settings, endsAt)
                 }
-            }
-            Text(
-                "${attempts} blocked app ${if (attempts == 1) "attempt" else "attempts"} this session",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSecondaryContainer
-            )
-            if (attempts in 3..4) {
-                Text(if (attempts == 3) "You're at three attempts. Take a short pause before trying again."
-                    else "One more blocked attempt will start the 10-minute reset if Nuke is enabled.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error)
-            }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text("Nuke after 5 attempts", fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSecondaryContainer)
-                    Text("Start the 10-minute reset if you keep trying blocked apps.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSecondaryContainer)
-                }
-                Switch(checked = nukeAfterFive, onCheckedChange = onNukeAfterFiveChange)
             }
             TextButton(onClick = onExtend, modifier = Modifier.fillMaxWidth()) {
                 Text("Extend by 1 hour")
@@ -833,7 +785,7 @@ private fun StrictRulesCard() {
                 color = MaterialTheme.colorScheme.onSurface
             )
             Text(
-                text = "For the time you choose, blocked apps stay blocked and unlocks are unavailable.",
+                text = "For the time you choose, boundary settings are locked. Existing app and website rules continue as usual.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -850,22 +802,9 @@ private fun StrictRulesCard() {
                         "A trusted person configured before the commitment can approve an early exit by email."
                 ),
                 Triple(
-                    Icons.Rounded.Block,
-                    "No unlock paths",
-                    "Emergency unlocks and earned-credit unlocks are refused. Credits are " +
-                        "still banked, they just can't open a blocked app."
-                ),
-                Triple(
                     Icons.Rounded.Shield,
-                    "Boundaries stay locked",
-                    "Blocked apps and websites can't be unblocked until Strict Mode ends — " +
-                        "you can still add new blocks."
-                ),
-                Triple(
-                    Icons.Rounded.Timer,
-                    "No grace period",
-                    "Blocked apps and sites open the blocker immediately, even while you " +
-                        "still have leisure balance."
+                    "Boundary settings stay locked",
+                    "Apps, websites, groups, limits, and block schedules can't be changed until Strict Mode ends."
                 ),
                 Triple(
                     Icons.Rounded.Sync,

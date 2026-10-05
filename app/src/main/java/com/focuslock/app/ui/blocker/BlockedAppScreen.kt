@@ -44,7 +44,6 @@ import androidx.compose.ui.unit.dp
 internal fun BlockedAppScreen(
     appName: String,
     isWebsite: Boolean,
-    strictActive: Boolean,
     isPermanentBlock: Boolean,
     attempts: BlockAttemptCounts?,
     focusMinutes: Int?,
@@ -57,7 +56,6 @@ internal fun BlockedAppScreen(
     attemptLabel: String = "Blocked attempts"
 ) {
     val status = when {
-        strictActive -> "Strict mode is on"
         isPermanentBlock -> "Permanently blocked"
         else -> "Your boundary is active"
     }

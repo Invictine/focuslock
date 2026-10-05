@@ -29,7 +29,10 @@ import org.json.JSONObject
 
 private val Context.dataStore by preferencesDataStore(name = "focuslock_settings")
 
-class SettingsRepository(private val context: Context) {
+class SettingsRepository(
+    private val context: Context,
+    private val strictAutomationActive: suspend () -> Boolean = { false },
+) {
 
     private val json = Json { ignoreUnknownKeys = true }
     /** Shared, continuously warm mirror for permanent checks on the browser/app hot paths. */
@@ -437,13 +440,13 @@ class SettingsRepository(private val context: Context) {
     ) { locked, lockdown -> locked || lockdown }
 
     /**
-     * Defense-in-depth gate for removal paths (see [boundariesFrozenFlow]). Strict Mode
-     * freezes already-blocked boundaries until it ends; blocking (adding) stays allowed.
-     * No-ops log and return false when reads fail so a read hiccup can't block a write.
+     * Defense-in-depth gate for local boundary configuration paths. Strict Mode freezes
+     * blocked apps/sites, groups, limits, and schedules until it ends. Remote snapshot
+     * application uses separate methods so sync remains idempotent.
      */
-    private suspend fun isUnblockRefusedByStrictMode(): Boolean {
+    private suspend fun isBoundaryEditRefusedByStrictMode(): Boolean {
         val lockdown = try {
-            isLockdownModeEnabled()
+            isLockdownModeEnabled() || strictAutomationActive()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -451,7 +454,7 @@ class SettingsRepository(private val context: Context) {
             false
         }
         if (lockdown) {
-            Log.w("SettingsRepo", "Boundary unblock refused: Strict Mode is active")
+            Log.w("SettingsRepo", "Boundary edit refused: Strict Mode is active")
         }
         return lockdown
     }
@@ -507,9 +510,11 @@ class SettingsRepository(private val context: Context) {
      * re-stamps [PreferencesKeys.BLOCKED_APPS_UPDATED_AT] so the next LWW round keeps it.
      */
     suspend fun updateBlockedApps(apps: List<BlockedApp>, markLocalChange: Boolean = true) {
+        if (isBoundaryEditRefusedByStrictMode()) return
         migrateLegacyPermanentCommitments(incomingApps = apps)
         var written: List<BlockedApp>? = null
         val committed = editSettings { preferences ->
+            if (isLockdownActiveIn(preferences)) return@editSettings
             val merged = if (isLockdownActiveIn(preferences)) {
                 mergePreservingBlockedApps(
                     decodeBlockedApps(preferences[PreferencesKeys.BLOCKED_APPS_JSON]),
@@ -655,6 +660,7 @@ class SettingsRepository(private val context: Context) {
         var result: List<BlockedApp>? = null
         val committed = editSettings { preferences ->
             val current = decodeBlockedApps(preferences[PreferencesKeys.BLOCKED_APPS_JSON]).toMutableList()
+            if (isLockdownActiveIn(preferences)) return@editSettings
             if (mutate(current)) {
                 preferences[PreferencesKeys.BLOCKED_APPS_JSON] = json.encodeToString(current)
                 if (updatedAt != null) {
@@ -681,6 +687,7 @@ class SettingsRepository(private val context: Context) {
         var result: List<BlockedWebsite>? = null
         val committed = editSettings { preferences ->
             val current = decodeBlockedWebsites(preferences[PreferencesKeys.BLOCKED_WEBSITES_JSON]).toMutableList()
+            if (isLockdownActiveIn(preferences)) return@editSettings
             if (mutate(current)) {
                 preferences[PreferencesKeys.BLOCKED_WEBSITES_JSON] = json.encodeToString(current)
                 if (updatedAt != null) {
@@ -739,7 +746,7 @@ class SettingsRepository(private val context: Context) {
     }
 
     suspend fun setAppBlocked(packageName: String, blocked: Boolean) {
-        if (!blocked && isUnblockRefusedByStrictMode()) return
+        if (isBoundaryEditRefusedByStrictMode()) return
         editAppsAtomically { current ->
             val index = current.indexOfFirst { it.packageName == packageName }
             if (index != -1) {
@@ -752,7 +759,7 @@ class SettingsRepository(private val context: Context) {
     }
 
     suspend fun setAppBlockedFull(packageName: String, appName: String, category: String, blocked: Boolean) {
-        if (!blocked && isUnblockRefusedByStrictMode()) return
+        if (isBoundaryEditRefusedByStrictMode()) return
         editAppsAtomically { current ->
             val index = current.indexOfFirst { it.packageName == packageName }
             if (index != -1) {
@@ -774,9 +781,8 @@ class SettingsRepository(private val context: Context) {
 
     suspend fun setAppsBlockedFullBatch(updates: List<AppBlockUpdate>) {
         if (updates.isEmpty()) return
-        // Strict Mode freeze (defense-in-depth): drop unblock entries, keep all block entries.
-        val allowed = if (isUnblockRefusedByStrictMode()) updates.filter { it.isBlocked } else updates
-        if (allowed.isEmpty()) return
+        if (isBoundaryEditRefusedByStrictMode()) return
+        val allowed = updates
         editAppsAtomically { current ->
             val indexByPkg = current.mapIndexed { i, app -> app.packageName to i }.toMap().toMutableMap()
             for (u in allowed) {
@@ -804,9 +810,8 @@ class SettingsRepository(private val context: Context) {
     /** Single JSON rewrite for bulk blocked-flag flips when metadata is already stored. */
     suspend fun setAppsBlockedBatch(states: Map<String, Boolean>) {
         if (states.isEmpty()) return
-        // Strict Mode freeze (defense-in-depth): false = unblock and is dropped; true passes.
-        val allowedStates = if (isUnblockRefusedByStrictMode()) states.filterValues { it } else states
-        if (allowedStates.isEmpty()) return
+        if (isBoundaryEditRefusedByStrictMode()) return
+        val allowedStates = states
         editAppsAtomically { current ->
             var changed = false
             for (i in current.indices) {
@@ -830,9 +835,8 @@ class SettingsRepository(private val context: Context) {
     /** Single JSON rewrite for bulk website block/unblock presets. */
     suspend fun setWebsitesBlockedBatch(states: Map<String, Boolean>) {
         if (states.isEmpty()) return
-        // Strict Mode freeze (defense-in-depth): false = unblock and is dropped; true passes.
-        val allowedStates = if (isUnblockRefusedByStrictMode()) states.filterValues { it } else states
-        if (allowedStates.isEmpty()) return
+        if (isBoundaryEditRefusedByStrictMode()) return
+        val allowedStates = states
         editWebsitesAtomically { current ->
             var changed = false
             for (i in current.indices) {
@@ -854,6 +858,7 @@ class SettingsRepository(private val context: Context) {
      * Appends a permanent app commitment. Existing commitments cannot be disabled.
      */
     suspend fun setAppPermanent(packageName: String, permanent: Boolean) {
+        if (isBoundaryEditRefusedByStrictMode()) return
         val permanentStore = permanentBlocks
         permanentStore.warm()
         var appName = packageName
@@ -910,9 +915,11 @@ class SettingsRepository(private val context: Context) {
      * re-stamps [PreferencesKeys.BLOCKED_WEBSITES_UPDATED_AT] so the next LWW round keeps it.
      */
     suspend fun updateBlockedWebsites(websites: List<BlockedWebsite>, markLocalChange: Boolean = true) {
+        if (isBoundaryEditRefusedByStrictMode()) return
         migrateLegacyPermanentCommitments(incomingWebsites = websites)
         var written: List<BlockedWebsite>? = null
         val committed = editSettings { preferences ->
+            if (isLockdownActiveIn(preferences)) return@editSettings
             val merged = if (isLockdownActiveIn(preferences)) {
                 mergePreservingBlockedWebsites(
                     decodeBlockedWebsites(preferences[PreferencesKeys.BLOCKED_WEBSITES_JSON]),
@@ -979,7 +986,7 @@ class SettingsRepository(private val context: Context) {
     }
 
     suspend fun setWebsiteBlocked(domain: String, blocked: Boolean) {
-        if (!blocked && isUnblockRefusedByStrictMode()) return
+        if (isBoundaryEditRefusedByStrictMode()) return
         editWebsitesAtomically { current ->
             val index = current.indexOfFirst { it.domain.equals(domain, ignoreCase = true) }
             if (index != -1) {
@@ -992,6 +999,7 @@ class SettingsRepository(private val context: Context) {
     }
 
     suspend fun addCustomWebsite(domain: String): Boolean {
+        if (isBoundaryEditRefusedByStrictMode()) return false
         val cleaned = cleanDomain(domain)
         if (cleaned.isBlank()) return false
         var added = false
@@ -1013,7 +1021,7 @@ class SettingsRepository(private val context: Context) {
      * Strict Mode freezes it (defense-in-depth; the UI refuses it too).
      */
     suspend fun removeCustomWebsite(domain: String) {
-        if (isUnblockRefusedByStrictMode()) return
+        if (isBoundaryEditRefusedByStrictMode()) return
         editWebsitesAtomically { current ->
             var changed = false
             val kept = current.filterNot { it.domain.equals(domain, ignoreCase = true) && it.isCustom }
@@ -1042,6 +1050,7 @@ class SettingsRepository(private val context: Context) {
      * Appends a permanent website commitment. Existing commitments cannot be disabled.
      */
     suspend fun setWebsitePermanent(domain: String, permanent: Boolean) {
+        if (isBoundaryEditRefusedByStrictMode()) return
         val cleaned = cleanDomain(domain)
         if (cleaned.isBlank()) return
         val permanentStore = permanentBlocks

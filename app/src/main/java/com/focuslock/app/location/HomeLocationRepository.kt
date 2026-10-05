@@ -22,6 +22,7 @@ private val Context.homeLocationStore by preferencesDataStore(name = "focuslock_
 class HomeLocationRepository(
     context: Context,
     private val locationSource: DeviceLocationSource = DeviceLocationSource(context.applicationContext),
+    private val strictActivationActive: suspend () -> Boolean = { false },
 ) {
     private val appContext = context.applicationContext
     private val json = Json { ignoreUnknownKeys = true }
@@ -61,6 +62,7 @@ class HomeLocationRepository(
         .catch { error -> if (error is CancellationException) throw error else { Log.w("HomeLocation", "Could not read home-only setting", error); emit(false) } }
 
     suspend fun saveHome(place: HomePlace) {
+        if (com.focuslock.app.data.repository.isStrictAutomationActive(strictActivationActive)) return
         require(validPlace(place)) { "Home location is invalid" }
         appContext.homeLocationStore.edit { prefs ->
             prefs[placeKey] = json.encodeToString(place)
@@ -69,6 +71,7 @@ class HomeLocationRepository(
     }
 
     suspend fun setHomeOnly(enabled: Boolean) {
+        if (com.focuslock.app.data.repository.isStrictAutomationActive(strictActivationActive)) return
         appContext.homeLocationStore.edit { prefs ->
             require(!enabled || decodePlace(prefs[placeKey]) != null) { "Choose a home location before enabling home-only mode" }
             prefs[enabledKey] = enabled

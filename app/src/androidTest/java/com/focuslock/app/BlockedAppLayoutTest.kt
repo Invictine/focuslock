@@ -36,7 +36,6 @@ class BlockedAppLayoutTest {
     private data class Fixture(
         val appName: String,
         val isWebsite: Boolean,
-        val strictActive: Boolean,
         val isPermanentBlock: Boolean,
         val attempts: BlockAttemptCounts?,
         val focusMinutes: Int?,
@@ -62,7 +61,6 @@ class BlockedAppLayoutTest {
                         BlockedAppScreen(
                             appName = value.appName,
                             isWebsite = value.isWebsite,
-                            strictActive = value.strictActive,
                             isPermanentBlock = value.isPermanentBlock,
                             attempts = value.attempts,
                             focusMinutes = value.focusMinutes,
@@ -79,13 +77,13 @@ class BlockedAppLayoutTest {
         }
 
         assertHeroAndPrimaryActions()
-        composeRule.onNodeWithText("Strict mode is on").assertIsDisplayed()
+        composeRule.onNodeWithText("Your boundary is active").assertIsDisplayed()
         composeRule.onNodeWithText("Eat the Frog pending").assertIsDisplayed()
         composeRule.onNodeWithText("Today").assertIsDisplayed()
         composeRule.onNodeWithText("This week").assertIsDisplayed()
         saveScreenshot(composeRule, "blocked-app-strict.png")
 
-        // Normal app block has no strict/frog indicators while retaining the same hero.
+        // Ordinary boundary blocks retain the same hero and actions.
         composeRule.runOnIdle { fixture.value = normalFixture() }
         composeRule.waitForIdle()
         assertHeroAndPrimaryActions()
@@ -130,7 +128,6 @@ class BlockedAppLayoutTest {
     private fun strictFrogFixture() = Fixture(
         appName = "YouTube",
         isWebsite = false,
-        strictActive = true,
         isPermanentBlock = false,
         attempts = BlockAttemptCounts(today = 3, week = 11),
         focusMinutes = 40,
@@ -144,7 +141,6 @@ class BlockedAppLayoutTest {
     private fun normalFixture() = Fixture(
         appName = "Instagram",
         isWebsite = false,
-        strictActive = false,
         isPermanentBlock = false,
         attempts = BlockAttemptCounts(today = 2, week = 8),
         focusMinutes = 40,
@@ -158,7 +154,6 @@ class BlockedAppLayoutTest {
     private fun lightUsageFixture() = Fixture(
         appName = "YouTube",
         isWebsite = false,
-        strictActive = false,
         isPermanentBlock = false,
         attempts = BlockAttemptCounts(today = 3, week = 11),
         focusMinutes = 40,

@@ -79,7 +79,10 @@ const extensionSender = { id: 'focuslock-test', url: 'chrome-extension://focuslo
 const strictState = structuredClone(state);
 strictState.strictMode = true;
 context.self.FocusLockStore.load = async () => structuredClone(strictState);
-assert.equal((await send({ type: 'snooze', url: 'https://reddit.com/', minutes: 999 }, extensionSender)).ok, false);
+const strictSnooze = await send({ type: 'snooze', url: 'https://reddit.com/', minutes: 1 }, extensionSender);
+assert.equal(strictSnooze.ok, true, 'Strict Mode permits an otherwise valid boundary snooze');
+assert.ok(strictSnooze.until <= Date.now() + 5 * 60_000,
+  'Snooze duration remains capped at five minutes');
 const frozenState = structuredClone(state);
 frozenState.lists[0].lockedUntil = Date.now() + 60_000;
 context.self.FocusLockStore.load = async () => structuredClone(frozenState);
@@ -153,7 +156,6 @@ assert.equal(engine.verdictFor('https://notexample.com/', permanentState, 100).b
 const permanentOverrides = structuredClone(permanentState);
 permanentOverrides.strictMode = true;
 permanentOverrides.strictEndsAt = 0;
-permanentOverrides.strictHeldSites = ['example.com'];
 permanentOverrides.cloudNuke = { isActive: true, startedAt: 0 };
 permanentOverrides.cloudSites = [{ domain: 'example.com', isBlocked: false }];
 permanentOverrides.nuclear = { active: true, until: 9_999_999_999_999, allow: [] };
@@ -161,7 +163,7 @@ permanentOverrides.snoozes = { 'example.com': 9_999_999_999_999 };
 permanentOverrides.lists.push({ id: 'perm-exception', name: 'Exception list', mode: 'blacklist', enabled: true,
   alwaysOn: true, sites: ['example.com'], exceptions: ['example.com'], lockedUntil: 0, dailyLimitMin: 1 });
 assert.equal(engine.verdictFor('https://example.com/', permanentOverrides, 100).reason, 'permanent',
-  'Permanent wins over strict/held/nuke/nuclear/lists/snoozes/exceptions');
+  'Permanent wins over Nuke/Nuclear/lists/snoozes/exceptions');
 
 await resetState({ ...structuredClone(state), permanentSites: ['example.com'] });
 assert.equal((await send({ type: 'snooze', url: 'https://sub.example.com/' }, extensionSender)).ok, false,
@@ -182,11 +184,13 @@ context.self.FocusLockCloud.syncUsage = async current => {
 await vm.runInContext('syncCloud("test")', context);
 assert.equal(savedState.strictMode, true);
 assert.equal(savedState.cloudSites.length, 0, 'Held A rules do not enter B boundary list');
-assert.equal(engine.verdictFor('https://held.example/', savedState, fakeNow).blocked, true);
+assert.equal(engine.verdictFor('https://held.example/', savedState, fakeNow).blocked, false,
+  'A Strict commitment does not turn account A boundaries into blocks on account B');
 assert.equal(engine.verdictFor('https://held.example/', savedState, fakeNow + 60001).blocked, false);
 
 // Another account's inactive Nuke cannot release a held shared Nuke.
-await resetState({ ...structuredClone(state), cloudAccountId: 'A', cloudNuke: { isActive: true, startedAt: fakeNow } });
+await resetState({ ...structuredClone(state), strictMode: true, strictEndsAt: fakeNow + 60000,
+  cloudAccountId: 'A', cloudNuke: { isActive: true, startedAt: fakeNow } });
 await vm.runInContext('syncCloud("test")', context);
 assert.equal(savedState.cloudNuke.isActive, true);
 assert.equal(engine.verdictFor('https://docs.google.com/', savedState, fakeNow).mode, 'shared-nuke');
@@ -198,14 +202,24 @@ context.self.FocusLockCloud.syncUsage = async current => {
 await vm.runInContext('syncCloud("test")', context);
 assert.equal(savedState.cloudNuke.isActive, false, 'Only the originating account releases its shared Nuke');
 
-// Duplicate navigation callbacks cannot trigger the five-attempt Nuke early.
-await resetState({ ...structuredClone(state), strictMode: true, strictEndsAt: fakeNow + 60000 });
+// Strict Mode never escalates attempted navigation into local or shared Nuke.
+await resetState({ ...structuredClone(state), strictMode: true, strictEndsAt: fakeNow + 60000,
+  strictNukeAfterFive: true, cloudSites: [{ domain: 'reddit.com', isBlocked: true }] });
 const attemptsBeforeNavigation = savedState.strictAttempts || 0;
 const blockedBeforeNavigation = savedState.blockedTotal || 0;
+let escalatedNukes = 0;
+context.self.FocusLockCloud.activateNuke = async () => { escalatedNukes++; };
 await handlers.beforeNavigate({ tabId: 3, frameId: 0, url: 'https://reddit.com/' });
 await handlers.beforeNavigate({ tabId: 3, frameId: 0, url: 'https://reddit.com/' });
-assert.equal(savedState.strictAttempts, attemptsBeforeNavigation + 1);
-assert.equal(savedState.blockedTotal, blockedBeforeNavigation + 1);
+for (let attempt = 0; attempt < 5; attempt++) {
+  await handlers.beforeNavigate({ tabId: 10 + attempt, frameId: 0, url: `https://reddit.com/${attempt}` });
+}
+assert.equal(savedState.strictAttempts || 0, attemptsBeforeNavigation,
+  'Blocked-attempt telemetry is not attributed to Strict Mode');
+assert.equal(savedState.blockedTotal, blockedBeforeNavigation + 6,
+  'Ordinary boundary blocks continue to be logged');
+assert.equal(savedState.nuclear.active, false, 'Strict attempts do not activate local Nuclear');
+assert.equal(escalatedNukes, 0, 'Strict attempts do not activate shared Nuke');
 
 // A hung network check cannot delay a known cached block response.
 context.self.FocusLockCloud.syncUsage = () => new Promise(() => {});
@@ -267,9 +281,10 @@ context.__live = { ok: true, signedIn: true, userId: 'A', isCurrent: async () =>
 await vm.runInContext('syncCloud("live", __live)', context);
 assert.equal(policyReads, 0, 'Live updates apply directly without REST');
 assert.equal(savedState.strictMode, true);
-assert.equal(engine.verdictFor(active.url, savedState, fakeNow).blocked, true,
-  'Incoming mobile strict overrides available earned time');
-assert.equal((await send({ type: 'snooze', url: active.url }, extensionSender)).ok, false);
+assert.equal(engine.verdictFor(active.url, savedState, fakeNow).blocked, false,
+  'Incoming mobile Strict Mode does not override available earned time');
+assert.equal((await send({ type: 'snooze', url: active.url }, extensionSender)).ok, true,
+  'Snooze remains available during Strict Mode');
 let boundaryWrites = 0;
 context.self.FocusLockCloud.setWebsiteBlocked = async () => { boundaryWrites++; return { ok: true }; };
 context.self.FocusLockCloud.saveGroups = async () => { boundaryWrites++; return { ok: true }; };

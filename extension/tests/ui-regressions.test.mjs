@@ -110,15 +110,31 @@ await options.locator('#toast').waitFor({ state: 'visible' });
 assert.match(await options.locator('#toast').textContent(), /Strict Mode/i, 'Strict Mode blocks list creation');
 assert.equal(await options.locator('#lists .card').count(), 1, 'Strict Mode does not add a list');
 
-// Permalock: append-only under Strict Mode, duplicate/invalid input rejected,
-// no removal control, and a full reset keeps every permanent block.
+// Strict Mode locks every boundary edit, including adding a new permanent block.
 await options.locator('[data-boundary-back]').click();
+await options.locator('#permalockHubTile').click();
+assert.equal(await options.locator('#permaAdd').isDisabled(), true, 'Strict Mode locks permanent-boundary creation');
+await options.evaluate(() => {
+  const input = document.getElementById('permaInput'); input.value = 'locked.example';
+  const add = document.getElementById('permaAdd'); add.disabled = false; add.click();
+});
+await options.waitForFunction(() => /Strict Mode/i.test(document.getElementById('toast').textContent));
+assert.deepEqual(JSON.parse(await options.evaluate(() => localStorage.getItem('focuslock.v1'))).permanentSites, [],
+  'A stale permanent-boundary control cannot bypass the Strict Mode guard');
+
+// Permanent blocks remain append-only outside Strict Mode, with no removal path.
+await options.evaluate(() => {
+  const snapshot = JSON.parse(localStorage.getItem('focuslock.v1'));
+  snapshot.strictMode = false; snapshot.strictEndsAt = 0;
+  localStorage.setItem('focuslock.v1', JSON.stringify(snapshot));
+});
+await options.reload();
 await options.locator('#permalockHubTile').click();
 await options.locator('#permaInput').fill('https://www.Perma.example/path');
 await options.locator('#permaAdd').click();
 await options.waitForFunction(() => (JSON.parse(localStorage.getItem('focuslock.v1')).permanentSites || []).length === 1);
 assert.deepEqual(JSON.parse(await options.evaluate(() => localStorage.getItem('focuslock.v1'))).permanentSites, ['perma.example'],
-  'Strict Mode still allows adding a permanent block');
+  'Permanent blocks can be added after Strict Mode ends');
 assert.equal(await options.locator('#permaRows [data-del]').count(), 0, 'Permanent rows offer no remove control');
 assert.equal(await options.locator('#permaRows .badge.lock').count(), 1, 'Permanent rows carry the Permanent badge');
 const withPermaOrdinaryEntry = JSON.parse(await options.evaluate(() => localStorage.getItem('focuslock.v1')));
@@ -198,7 +214,7 @@ await blocked.goto('http://focuslock.test/extension/blocked/blocked.html?url=htt
 await blocked.locator('#frogCta').waitFor({ state: 'visible' });
 assert.match(await blocked.locator('#frogTitle').textContent(), /Read a chapter/);
 assert.match(await blocked.locator('#frogCta').getAttribute('href'), /options\.html\?tab=stats&frog=1/);
-assert.equal(await blocked.locator('#snoozeBtn').isHidden(), true, 'Strict Mode hides snooze before interaction');
+assert.equal(await blocked.locator('#snoozeBtn').isHidden(), false, 'Strict Mode does not itself prohibit snooze');
 await blocked.goto('http://focuslock.test/extension/blocked/blocked.html?url=https%3A%2F%2Fexample.com%2Farticle&list=Schedule&mode=schedule');
 assert.equal(await blocked.locator('#snoozeBtn').isHidden(), true, 'Scheduled block hides snooze before interaction');
 await blocked.goto('http://focuslock.test/extension/blocked/blocked.html?url=https%3A%2F%2Fexample.com%2Farticle&list=Eat%20the%20Frog&mode=frog');

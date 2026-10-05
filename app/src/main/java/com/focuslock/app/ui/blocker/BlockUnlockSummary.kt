@@ -5,16 +5,10 @@ import com.focuslock.app.data.model.FrogState
 /** Builds a truthful explanation of what must happen before a blocked app can open. */
 internal fun blockUnlockSummary(
     blockReason: String?,
-    strictActive: Boolean,
     frog: FrogState?,
     balanceSeconds: Long?
 ): String? {
     if (blockReason == "permanent") return "Focus time cannot unlock a permanent block."
-
-    if (strictActive || blockReason == "strict") {
-        val frogClause = if (frog?.locked == true) "${frogRequirement(frog)} " else ""
-        return "${frogClause}Strict mode must end before this app unlocks."
-    }
 
     when (blockReason) {
         "limit" -> return "Your daily limit resets tomorrow."

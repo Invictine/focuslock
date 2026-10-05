@@ -123,7 +123,7 @@ function render() {
       <div class="progress" role="progressbar" aria-label="Current website share of today" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.min(100, totalSeconds ? Math.round(localSeconds / totalSeconds * 100) : 0)}"><i style="width:${Math.min(100, totalSeconds ? localSeconds / totalSeconds * 100 : 0)}%"></i></div>
       <div class="site-actions">
         <button class="primary" id="block-site" ${!domain || strictActive ? 'disabled' : ''}>Block this site</button>
-        <button class="secondary" id="allow-site" ${!domain || strictActive ? 'disabled' : ''}>Allow 5 min</button>
+        <button class="secondary" id="allow-site" ${!domain ? 'disabled' : ''}>Allow 5 min</button>
       </div>
       ${strictActive ? '<p class="strict-status" role="status">Strict Mode is active. Boundaries are locked until it ends.</p>' : ''}
     </section>
@@ -184,7 +184,7 @@ function bindEvents(signedIn) {
       return state;
     });
       if (outcome !== 'blocked') {
-        flash(outcome === 'strict' ? 'Strict Mode is active. Settings are locked until it ends.' : outcome === 'locked' ? 'This block list is frozen and cannot be edited.' : 'Create a block list before blocking this site.');
+        flash(outcome === 'strict' ? 'Strict Mode is active. Boundaries are locked until it ends.' : outcome === 'locked' ? 'This block list is frozen and cannot be edited.' : 'Create a block list before blocking this site.');
         return;
       }
       await chrome.runtime.sendMessage({ type: 'refresh' });

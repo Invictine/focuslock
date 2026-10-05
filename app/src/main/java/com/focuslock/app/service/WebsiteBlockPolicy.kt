@@ -6,7 +6,6 @@ internal object WebsiteBlockPolicy {
         blocked: Boolean,
         permanent: Boolean,
         groupLimitExceeded: Boolean,
-        strict: Boolean,
         scheduleActive: Boolean,
         suppressed: Boolean,
         balanceSeconds: Long,
@@ -14,7 +13,6 @@ internal object WebsiteBlockPolicy {
         permanent -> "permanent"
         groupLimitExceeded -> "limit"
         !blocked -> null
-        strict -> "strict"
         scheduleActive -> "schedule"
         suppressed -> null
         balanceSeconds <= 0L -> "manual"

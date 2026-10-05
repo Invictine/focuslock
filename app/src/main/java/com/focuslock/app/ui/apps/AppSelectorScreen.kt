@@ -319,7 +319,8 @@ internal fun AppPickerScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val settings = FocusLockApplication.instance.settingsRepository
+    val app = FocusLockApplication.instance
+    val settings = app.settingsRepository
     val permanentBlocks = FocusLockApplication.instance.permanentBlocksRepository
     val appLimits = (context.applicationContext as FocusLockApplication).appLimitsRepository
 
@@ -327,9 +328,12 @@ internal fun AppPickerScreen(
     // as if it were the user's saved state.
     val storedApps by settings.blockedAppsFlow.collectAsStateWithLifecycle(initialValue = null)
     val storedWebsites by settings.blockedWebsitesFlow.collectAsStateWithLifecycle(initialValue = null)
-    // Combined freeze: Boundaries Lock OR Strict Mode (single source of truth).
-    val boundariesFrozen by settings.boundariesFrozenFlow.collectAsStateWithLifecycle(initialValue = false)
+    // Strict manual and automatic activations freeze boundary configuration only.
+    val boundariesFrozenBase by settings.boundariesFrozenFlow.collectAsStateWithLifecycle(initialValue = false)
+    val strictAutomationActive by app.strictModeAutomationRepository.activationActiveFlow.collectAsStateWithLifecycle(initialValue = false)
+    val boundariesFrozen = boundariesFrozenBase || strictAutomationActive
     val lockdownMode by settings.lockdownModeFlow.collectAsStateWithLifecycle(initialValue = false)
+    val strictBoundaryConfigLocked = lockdownMode || strictAutomationActive
     val limits by appLimits.limitsFlow.collectAsStateWithLifecycle(initialValue = emptyMap())
     val permanentPackagesState by permanentBlocks.packagesFlow.collectAsStateWithLifecycle(initialValue = null)
     val permanentDomainsState by permanentBlocks.domainsFlow.collectAsStateWithLifecycle(initialValue = null)
@@ -360,16 +364,19 @@ internal fun AppPickerScreen(
     }
     val removalLockedMessage = boundariesFrozenMessage(
         lockdownActive = lockdownMode,
+        strictAutomationActive = strictAutomationActive,
         lockdownRemainingMs = lockdownRemainingMs,
         boundariesLockSuffix = "turn it off in Settings to remove"
     )
     val limitLockedMessage = boundariesFrozenMessage(
         lockdownActive = lockdownMode,
+        strictAutomationActive = strictAutomationActive,
         lockdownRemainingMs = lockdownRemainingMs,
         boundariesLockSuffix = "turn it off in Settings to change limits."
     )
     val deleteLockedMessage = boundariesFrozenMessage(
         lockdownActive = lockdownMode,
+        strictAutomationActive = strictAutomationActive,
         lockdownRemainingMs = lockdownRemainingMs,
         boundariesLockSuffix = "turn it off in Settings to remove websites."
     )
@@ -549,9 +556,11 @@ internal fun AppPickerScreen(
     // Hoisted stable toggle lambdas — same instance for every row, keeps rows skippable.
     // Optimistic: the row state flips immediately; on persistence failure the override is
     // dropped (revert) and a snackbar explains why.
-    val onAppToggle: (AppRowItem, Boolean) -> Unit = remember(settings, scope, snackbarHostState) {
+    val onAppToggle: (AppRowItem, Boolean) -> Unit = remember(settings, scope, snackbarHostState, strictBoundaryConfigLocked) {
         { app, checked ->
-            if (app.isPermanent) {
+            if (strictBoundaryConfigLocked) {
+                scope.launch { snackbarHostState.showSnackbar("Strict Mode locks boundary changes until it ends.") }
+            } else if (app.isPermanent) {
                 // A permanent block is enforced regardless of the legacy isBlocked flag
                 // (the service ORs the dedicated store with the legacy mirror), and
                 // setAppBlockedFull preserves isPermanent. Refuse the flip so the switch
@@ -576,8 +585,12 @@ internal fun AppPickerScreen(
             }
         }
     }
-    val onWebsiteToggle: (String, Boolean) -> Unit = remember(settings, scope, snackbarHostState) {
-        { domain, checked ->
+    val onWebsiteToggle: (String, Boolean) -> Unit = remember(settings, scope, snackbarHostState, strictBoundaryConfigLocked) {
+        toggle@{ domain, checked ->
+            if (strictBoundaryConfigLocked) {
+                scope.launch { snackbarHostState.showSnackbar("Strict Mode locks boundary changes until it ends.") }
+                return@toggle
+            }
             websiteOverrides.value = websiteOverrides.value + (domain to checked)
             scope.launch {
                 val ok = try {
@@ -594,9 +607,11 @@ internal fun AppPickerScreen(
         }
     }
     // Optimistic permanent-block toggles — mirror the block overrides above.
-    val onAppPermanentToggle: (AppRowItem, Boolean) -> Unit = remember(settings, permanentBlocks, scope, snackbarHostState) {
+    val onAppPermanentToggle: (AppRowItem, Boolean) -> Unit = remember(settings, permanentBlocks, scope, snackbarHostState, strictBoundaryConfigLocked) {
         { app, permanent ->
-            if (!permanent) {
+            if (strictBoundaryConfigLocked) {
+                scope.launch { snackbarHostState.showSnackbar("Strict Mode locks boundary changes until it ends.") }
+            } else if (!permanent) {
                 scope.launch { snackbarHostState.showSnackbar("Permanent blocks cannot be removed in FocusLock.") }
             } else if (PermanentBlocksRepository.isProtectedPackage(context, app.packageName)) {
                 scope.launch { snackbarHostState.showSnackbar("That app is protected so you can always recover your phone.") }
@@ -605,8 +620,12 @@ internal fun AppPickerScreen(
             }
         }
     }
-    val onWebsitePermanentToggle: (String, Boolean) -> Unit = remember(settings, scope, snackbarHostState) {
-        { domain, permanent ->
+    val onWebsitePermanentToggle: (String, Boolean) -> Unit = remember(settings, scope, snackbarHostState, strictBoundaryConfigLocked) {
+        toggle@{ domain, permanent ->
+            if (strictBoundaryConfigLocked) {
+                scope.launch { snackbarHostState.showSnackbar("Strict Mode locks boundary changes until it ends.") }
+                return@toggle
+            }
             websitePermanentOverrides.value = websitePermanentOverrides.value + (domain to permanent)
             scope.launch {
                 val ok = try {
@@ -623,10 +642,10 @@ internal fun AppPickerScreen(
         }
     }
     val onWebsiteDeleteRequest: (BlockedWebsite) -> Unit = remember(
-        boundariesFrozen, deleteLockedMessage, scope, snackbarHostState
+        boundariesFrozen, strictBoundaryConfigLocked, deleteLockedMessage, scope, snackbarHostState
     ) {
         { site ->
-            if (boundariesFrozen) {
+            if (strictBoundaryConfigLocked || boundariesFrozen) {
                 scope.launch { snackbarHostState.showSnackbar(deleteLockedMessage) }
             } else {
                 pendingDeleteSite = site
@@ -634,10 +653,10 @@ internal fun AppPickerScreen(
         }
     }
     val onLimitClick: (AppRowItem) -> Unit = remember(
-        boundariesFrozen, limitLockedMessage, scope, snackbarHostState
+        boundariesFrozen, strictBoundaryConfigLocked, limitLockedMessage, scope, snackbarHostState
     ) {
         { app ->
-            if (boundariesFrozen && app.isBlocked) {
+            if (strictBoundaryConfigLocked || (boundariesFrozen && app.isBlocked)) {
                 scope.launch {
                     snackbarHostState.showSnackbar(limitLockedMessage)
                 }
@@ -918,24 +937,34 @@ internal fun AppPickerScreen(
         }
     }
     val openNewGroup: () -> Unit = {
-        val choices = selectedKeys.value.mapNotNull { resolveMemberChoice(it) }
-            .distinctBy { it.selectionKey }
-        groupEditor = GroupEditorRequest(initialMembers = choices)
+        if (strictBoundaryConfigLocked) {
+            scope.launch { snackbarHostState.showSnackbar("Strict Mode locks boundary changes until it ends.") }
+        } else {
+            val choices = selectedKeys.value.mapNotNull { resolveMemberChoice(it) }
+                .distinctBy { it.selectionKey }
+            groupEditor = GroupEditorRequest(initialMembers = choices)
+        }
     }
     val openEditGroup: (TargetGroup) -> Unit = { group ->
-        groupEditor = GroupEditorRequest(
-            groupId = group.groupId,
-            updatedAt = group.updatedAt,
-            initialName = group.name,
-            initialLimitMinutes = group.dailyLimitMinutes,
-            initialLimitEnabled = group.limitEnabled,
-            initialMembers = group.members.map {
-                GroupMemberChoice(it.targetKind, it.targetKey, it.targetLabel)
-            },
-        )
+        if (strictBoundaryConfigLocked) {
+            scope.launch { snackbarHostState.showSnackbar("Strict Mode locks boundary changes until it ends.") }
+        } else {
+            groupEditor = GroupEditorRequest(
+                groupId = group.groupId,
+                updatedAt = group.updatedAt,
+                initialName = group.name,
+                initialLimitMinutes = group.dailyLimitMinutes,
+                initialLimitEnabled = group.limitEnabled,
+                initialMembers = group.members.map {
+                    GroupMemberChoice(it.targetKind, it.targetKey, it.targetLabel)
+                },
+            )
+        }
     }
     val requestDeleteGroup: (TargetGroup) -> Unit = { group ->
-        pendingBulk = BulkAction(
+        if (strictBoundaryConfigLocked) {
+            scope.launch { snackbarHostState.showSnackbar("Strict Mode locks boundary changes until it ends.") }
+        } else pendingBulk = BulkAction(
             title = "Delete \"${group.name}\"?",
             message = "The merged bucket is removed. Its apps and websites keep their own blocking and limits.",
             confirmLabel = "Delete",
@@ -1484,6 +1513,7 @@ internal fun AppPickerScreen(
                                                 onAppPermanentToggle = onAppPermanentToggle,
                                                 onLimitClick = onLimitClick,
                                                 boundariesFrozen = boundariesFrozen,
+                                                strictBoundaryConfigLocked = strictBoundaryConfigLocked,
                                                 lockedMessage = removalLockedMessage,
                                                 selectionMode = selectionMode,
                                                 selected = selectedKeys.value.contains("app:${app.packageName.lowercase()}"),
@@ -1531,6 +1561,7 @@ internal fun AppPickerScreen(
                                                     onAppPermanentToggle = onAppPermanentToggle,
                                                     onLimitClick = onLimitClick,
                                                     boundariesFrozen = boundariesFrozen,
+                                                    strictBoundaryConfigLocked = strictBoundaryConfigLocked,
                                                     lockedMessage = removalLockedMessage,
                                                     selectionMode = selectionMode,
                                                     selected = selectedKeys.value.contains("app:${app.packageName.lowercase()}"),
@@ -1675,6 +1706,7 @@ internal fun AppPickerScreen(
                                     onDeleteRequest = onWebsiteDeleteRequest,
                                     modifier = Modifier.animateItem(),
                                     boundariesFrozen = boundariesFrozen,
+                                    strictBoundaryConfigLocked = strictBoundaryConfigLocked,
                                     lockedMessage = removalLockedMessage,
                                     selectionMode = selectionMode,
                                     selected = selectedKeys.value.contains("website:${site.domain.lowercase()}"),
@@ -1905,7 +1937,6 @@ internal fun AppPickerScreen(
                 scope.launch {
                     val ok = try {
                         appLimits.setLimit(app.packageName, minutes)
-                        true
                     } catch (_: Exception) {
                         false
                     }
@@ -1920,7 +1951,6 @@ internal fun AppPickerScreen(
                 scope.launch {
                     val ok = try {
                         appLimits.removeLimit(app.packageName)
-                        true
                     } catch (_: Exception) {
                         false
                     }
@@ -2356,6 +2386,7 @@ private fun AppRowWithOverrides(
     onAppPermanentToggle: (AppRowItem, Boolean) -> Unit,
     onLimitClick: (AppRowItem) -> Unit,
     boundariesFrozen: Boolean,
+    strictBoundaryConfigLocked: Boolean,
     lockedMessage: String,
     selectionMode: Boolean = false,
     selected: Boolean = false,
@@ -2381,6 +2412,7 @@ private fun AppRowWithOverrides(
         onLimitClick = onLimitClick,
         modifier = modifier,
         boundariesFrozen = boundariesFrozen,
+        strictBoundaryConfigLocked = strictBoundaryConfigLocked,
         lockedMessage = lockedMessage,
         selectionMode = selectionMode,
         selected = selected,
@@ -2407,6 +2439,7 @@ private fun WebsiteRow(
     onDeleteRequest: (BlockedWebsite) -> Unit,
     modifier: Modifier = Modifier,
     boundariesFrozen: Boolean = false,
+    strictBoundaryConfigLocked: Boolean = false,
     lockedMessage: String = "",
     selectionMode: Boolean = false,
     selected: Boolean = false,
@@ -2416,7 +2449,7 @@ private fun WebsiteRow(
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
     val compactActions = configuration.screenWidthDp < 400 || configuration.fontScale >= 1.2f
-    val switchEnabled = !(boundariesFrozen && site.isBlocked)
+    val switchEnabled = !strictBoundaryConfigLocked && !(boundariesFrozen && site.isBlocked)
     val rowEnabled = true
     val interactionSource = remember { MutableInteractionSource() }
     Card(
@@ -2640,6 +2673,7 @@ private fun InstalledAppRow(
     onLimitClick: (AppRowItem) -> Unit,
     modifier: Modifier = Modifier,
     boundariesFrozen: Boolean = false,
+    strictBoundaryConfigLocked: Boolean = false,
     lockedMessage: String = "",
     selectionMode: Boolean = false,
     selected: Boolean = false,
@@ -2652,7 +2686,7 @@ private fun InstalledAppRow(
     // Permanent rows are never flippable: the switch renders on/locked and every tap
     // routes through the toggle handler, which refuses with the permanent-block
     // snackbar. Frozen boundaries keep their toast refusal for other blocked rows.
-    val switchEnabled = !app.isPermanent && !(boundariesFrozen && app.isBlocked)
+    val switchEnabled = !strictBoundaryConfigLocked && !(boundariesFrozen && app.isBlocked) && !app.isPermanent
     val rowEnabled = true
     val interactionSource = remember { MutableInteractionSource() }
     Card(

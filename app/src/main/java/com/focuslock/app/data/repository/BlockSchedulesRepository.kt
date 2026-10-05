@@ -42,7 +42,10 @@ data class BlockSchedule(
  * cadence. The schedule list is mirrored into an in-memory cache, so repeated
  * calls only touch DataStore once on first use (or after a write).
  */
-class BlockSchedulesRepository(private val context: Context) {
+class BlockSchedulesRepository(
+    private val context: Context,
+    private val strictAutomationActive: suspend () -> Boolean = { false },
+) {
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -62,6 +65,7 @@ class BlockSchedulesRepository(private val context: Context) {
 
     /** Insert when [schedule]'s id is new, otherwise replace the existing entry. */
     suspend fun upsert(schedule: BlockSchedule) {
+        if (isStrictAutomationActive(strictAutomationActive)) return
         if (schedule.id.isBlank()) return
         var updated: List<BlockSchedule> = emptyList()
         context.blockSchedulesDataStore.edit { prefs ->
@@ -80,6 +84,7 @@ class BlockSchedulesRepository(private val context: Context) {
     }
 
     suspend fun delete(id: String) {
+        if (isStrictAutomationActive(strictAutomationActive)) return
         var updated: List<BlockSchedule> = emptyList()
         context.blockSchedulesDataStore.edit { prefs ->
             updated = decode(prefs[Keys.SCHEDULES_JSON]).filterNot { it.id == id }

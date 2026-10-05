@@ -38,6 +38,8 @@ fun HomeBlockingScreen(onBack: () -> Unit) {
     val homeRepository = FocusLockApplication.instance.homeLocationRepository
     val homePlace by homeRepository.homePlaceFlow.collectAsStateWithLifecycle(initialValue = null)
     val homeOnly by homeRepository.homeOnlyFlow.collectAsStateWithLifecycle(initialValue = false)
+    val lockdown by FocusLockApplication.instance.settingsRepository.lockdownModeFlow.collectAsStateWithLifecycle(initialValue = false)
+    val strictAutomationActive by FocusLockApplication.instance.strictModeAutomationRepository.activationActiveFlow.collectAsStateWithLifecycle(initialValue = false)
     var homeStatus by remember { mutableStateOf(HomeLocationStatus.UNAVAILABLE) }
     var showHomePicker by remember { mutableStateOf(false) }
     var homePickerSelection by remember { mutableStateOf<StrictLocationSelection?>(null) }
@@ -65,6 +67,7 @@ fun HomeBlockingScreen(onBack: () -> Unit) {
         HomeLocationCard(
             homePlace = homePlace,
             enabled = homeOnly,
+            strictLocked = lockdown || strictAutomationActive,
             status = homeStatus,
             onSaveHome = { place -> scope.launch {
                 homeRepository.saveHome(place)

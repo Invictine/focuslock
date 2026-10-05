@@ -29,8 +29,7 @@ object BlockedNotificationPolicy {
         if (GroupLimitPolicy.isExceeded(context, app, "app", packageName)) return true
         if (!runCatching { settings.isAppBlocked(packageName) }.getOrDefault(false)) return false
         val scheduled = runCatching { app.blockSchedulesRepository.isScheduleActiveNow() }.getOrDefault(false)
-        val strict = runCatching { settings.isLockdownModeEnabled() || app.strictModeAutomationRepository.isActivationActiveNow() }.getOrDefault(false)
-        if (scheduled || strict) return true
+        if (scheduled) return true
         return runCatching { app.creditBankRepository.getBalanceSeconds() <= 0L }.getOrDefault(false)
     }
 }

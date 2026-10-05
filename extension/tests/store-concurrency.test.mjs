@@ -81,6 +81,15 @@ strict.strictEndsAt = Date.now() + 60_000;
 await worker.save(strict);
 await assert.rejects(() => dashboard.save(staleBoundaryEdit), /Strict Mode/);
 assert.equal(data['focuslock.v1'].lists[0].enabled, true);
+const unrelatedSetting = await dashboard.load();
+unrelatedSetting.settings.idleTimeoutSec = 90;
+await dashboard.save(unrelatedSetting);
+assert.equal(data['focuslock.v1'].settings.idleTimeoutSec, 90,
+  'Strict Mode permits unrelated settings while boundary rules remain locked');
+const permanentEdit = await dashboard.load();
+permanentEdit.permanentSites.push('locked.example');
+await assert.rejects(() => dashboard.save(permanentEdit), /Strict Mode/,
+  'Strict Mode also protects permanent-boundary configuration');
 await worker.update(state => { state.stats['2026-09-27']['example.com'] = 60; });
 assert.equal(data['focuslock.v1'].stats['2026-09-27']['example.com'], 60,
   'Usage persists while strict boundary writes are locked');

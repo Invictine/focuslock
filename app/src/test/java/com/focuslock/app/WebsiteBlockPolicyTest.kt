@@ -7,10 +7,9 @@ import org.junit.Test
 
 class WebsiteBlockPolicyTest {
     @Test
-    fun sameDomainIsReevaluatedWhenPolicyChanges() {
+    fun sameDomainIsReevaluatedWhenBoundaryPolicyChanges() {
         assertNull(policy(blocked = true, balanceSeconds = 30))
         assertEquals("schedule", policy(blocked = true, scheduleActive = true, balanceSeconds = 30))
-        assertEquals("strict", policy(blocked = true, strict = true, balanceSeconds = 30))
     }
 
     @Test
@@ -19,8 +18,8 @@ class WebsiteBlockPolicyTest {
     }
 
     @Test
-    fun strictAndScheduleBlockWithPositiveCredit() {
-        assertEquals("strict", policy(blocked = true, strict = true, balanceSeconds = 60))
+    fun scheduleBlocksWithPositiveCreditButStrictDoesNotChangeAccess() {
+        assertNull(policy(blocked = true, balanceSeconds = 60))
         assertEquals("schedule", policy(blocked = true, scheduleActive = true, balanceSeconds = 60))
     }
 
@@ -38,14 +37,13 @@ class WebsiteBlockPolicyTest {
 
     @Test
     fun groupLimitPrecedesRegularBlockReasons() {
-        assertEquals("limit", policy(blocked = true, groupLimitExceeded = true, strict = true, balanceSeconds = 0))
+        assertEquals("limit", policy(blocked = true, groupLimitExceeded = true, balanceSeconds = 0))
     }
 
     private fun policy(
         blocked: Boolean,
         permanent: Boolean = false,
         groupLimitExceeded: Boolean = false,
-        strict: Boolean = false,
         scheduleActive: Boolean = false,
         suppressed: Boolean = false,
         balanceSeconds: Long,
@@ -53,7 +51,6 @@ class WebsiteBlockPolicyTest {
         blocked = blocked,
         permanent = permanent,
         groupLimitExceeded = groupLimitExceeded,
-        strict = strict,
         scheduleActive = scheduleActive,
         suppressed = suppressed,
         balanceSeconds = balanceSeconds,

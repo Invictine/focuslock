@@ -34,18 +34,6 @@ internal fun BlockerPresentation(
     val app = FocusLockApplication.instance
     val settings = app.settingsRepository
     val bank = app.creditBankRepository
-    val lockdown by settings.lockdownModeFlow.collectAsStateWithLifecycle(initialValue = false)
-    val automationStrict by produceState(false, blockReason) {
-        while (true) {
-            value = withContext(Dispatchers.IO) {
-                try { app.strictModeAutomationRepository.isActivationActiveNow() }
-                catch (e: CancellationException) { throw e }
-                catch (_: Exception) { false }
-            }
-            delay(15_000)
-        }
-    }
-    val strictActive = lockdown || automationStrict || blockReason == "strict"
     val frog by app.frogRepository.frogStateFlow.collectAsStateWithLifecycle(initialValue = null)
     val attempts by remember(blockedPackage) {
         app.blockLogRepository.eventsFlow.map { blockAttemptCounts(it, blockedPackage) }
@@ -80,12 +68,11 @@ internal fun BlockerPresentation(
     BlockedAppScreen(
         appName = appName,
         isWebsite = isWebsite,
-        strictActive = strictActive,
         isPermanentBlock = blockReason == "permanent",
         attempts = attempts,
         focusMinutes = focused,
         leisureSeconds = leisure,
-        unlockSummary = blockUnlockSummary(blockReason, strictActive, frog, balance),
+        unlockSummary = blockUnlockSummary(blockReason, frog, balance),
         frogPending = frog?.let { it.enabled && it.armed && !it.tickedOff } == true,
         appIcon = appIcon,
         onCloseApp = onCloseApp,

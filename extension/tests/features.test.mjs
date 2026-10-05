@@ -61,7 +61,8 @@ result = await w.send({ type: 'strictCommit', endsAt: now + 7200000, preset: 'ho
 assert.equal(result.ok, true, 'Can extend offline');
 const state = await w.store.load();
 state.lists[0].alwaysOn = false; state.schedules = [];
-assert.equal(w.engine.listIsActive(state.lists[0], state, now).active, true, 'Strict overrides list schedule gaps');
+assert.equal(w.engine.listIsActive(state.lists[0], state, now).active, false,
+  'Strict Mode does not activate a local list outside its configured schedule');
 accountId = 'B'; networkFailure = false;
 result = await w.send({ type: 'strictCommit', endsAt: now + 10800000, preset: 'hours' });
 assert.equal(result.ok, true);
@@ -77,8 +78,10 @@ assert.equal((await w.send({ type: 'featureStatus' })).strictMode, false, 'Commi
 
 await w.send({ type: 'frogConfigure', enabled: true, requiredMinutes: 1, wakeHour: 0 });
 await w.send({ type: 'frogSelect', title: 'Study chemistry' });
+await w.store.update(state => { state.strictMode = true; state.strictEndsAt = now + 60_000; return state; });
 assert.equal(w.engine.verdictFor('https://reddit.com/', await w.store.load(), now).mode, 'frog');
-assert.equal((await w.send({ type: 'snooze', url: 'https://reddit.com/' })).ok, false, 'Frog cannot be snoozed');
+assert.equal((await w.send({ type: 'snooze', url: 'https://reddit.com/' })).ok, false,
+  'Frog remains enforced and cannot be snoozed during Strict Mode');
 await w.send({ type: 'frogTick', tickedOff: true });
 assert.equal((await w.send({ type: 'frogStatus' })).locked, true);
 await w.send({ type: 'focusTimerStart', minutes: 1 });
@@ -103,7 +106,10 @@ await w.send({ type: 'featureRetry' }); assert.equal(uploads.size, 1, 'Stable se
 const local = new Date(now), currentMinute = local.getHours() * 60 + local.getMinutes();
 await w.send({ type: 'strictWeeklySave', rule: { enabled: true, days: [local.getDay()], startMinute: currentMinute - 1, endMinute: currentMinute + 30 } });
 assert.equal((await w.send({ type: 'featureStatus' })).strictMode, true, 'Saving inside a weekly window starts a commitment');
-assert.equal((await w.send({ type: 'strictWeeklySave', rule: { enabled: false } })).ok, false, 'Weekly activation cannot change while active');
+assert.equal((await w.send({ type: 'strictWeeklySave', rule: { enabled: false } })).ok, true,
+  'Future weekly activation can be edited without shortening the active commitment');
+assert.equal((await w.send({ type: 'featureStatus' })).strictMode, true,
+  'Changing future weekly activation does not release the active commitment');
 await w.store.update(state => { state.strictMode = false; state.strictEndsAt = now - 1; return state; });
 await w.send({ type: 'refresh' });
 assert.equal((await w.send({ type: 'featureStatus' })).strictMode, false, 'Approval release must not re-arm the same weekly occurrence');

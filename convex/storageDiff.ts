@@ -59,6 +59,26 @@ function sameContent<T extends Record<string, any>>(current: any, item: T): bool
   return true;
 }
 
+/** Strict Mode freezes configuration, while allowing identical sync retries. */
+export async function guardStrictBoundaryChanges<T extends Record<string, any>>(
+  ctx: any,
+  userId: string,
+  existing: any[],
+  incoming: T[],
+  identityParts: (item: T) => string[],
+): Promise<void> {
+  const prefs = await ctx.db.query("userPrefs")
+    .withIndex("by_user", (q: any) => q.eq("userId", userId)).first();
+  if (!prefs?.strictMode || (prefs.strictEndsAt ?? 0) <= Date.now()) return;
+  const currentByKey = new Map(existing.map((row) => [identityKey(row as T, identityParts), row]));
+  if (currentByKey.size !== incoming.length || incoming.some((item) => {
+    const current = currentByKey.get(identityKey(item, identityParts));
+    const content = Object.fromEntries(Object.entries(item).filter(([key]) =>
+      !key.startsWith("_") && key !== "userId" && key !== "updatedAt"));
+    return !current || !sameContent(current, content);
+  })) throw new Error("Boundaries cannot change during Strict Mode");
+}
+
 /** Apply a full collection snapshot while retaining storage identity for rows
  * whose content is unchanged. The caller performs stale-write and domain guards. */
 export async function applyCollectionDiff<T extends Record<string, any>>(

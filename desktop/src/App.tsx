@@ -1280,35 +1280,6 @@ function DesktopApp() {
   useEffect(() => {
     void refreshPermanentTargets();
   }, [refreshPermanentTargets]);
-  const activateNuke = useMutation(api.nuke.activate);
-  const strictEndsAt = Number(dashboard?.prefs?.strictEndsAt || 0);
-  const strictActive = Boolean(dashboard?.prefs?.strictMode) &&
-    (!strictEndsAt || strictEndsAt > Date.now());
-  const strictNukeAfterFive = Boolean(dashboard?.prefs?.strictNukeAfterFive);
-  useEffect(() => {
-    if (!tauriAvailable() || !strictActive) return;
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    listen<{ blocked?: boolean; appId?: string; browserDomain?: string }>(
-      "focuslock://activity-changed", (event) => {
-        if (!event.payload?.blocked) return;
-        const target = event.payload.browserDomain || event.payload.appId || "unknown";
-        const now = Date.now();
-        const key = "focuslock-strict-attempts";
-        let previous: { count: number; expiresAt: number; lastTarget: string; lastAt: number; nukeTriggered?: boolean } | null = null;
-        try { previous = JSON.parse(localStorage.getItem(key) || "null"); } catch { /* reset invalid cache */ }
-        const sameSession = previous && previous.expiresAt > now;
-        const count = sameSession ? previous!.count : 0;
-        if (sameSession && previous!.lastTarget === target && now - previous!.lastAt < 2_000) return;
-        const next = count + 1;
-        const triggerNuke = strictNukeAfterFive && next >= 5 && !(sameSession && previous!.nukeTriggered);
-        localStorage.setItem(key, JSON.stringify({ count: next, expiresAt: strictEndsAt || now + 24 * 60 * 60 * 1000,
-          lastTarget: target, lastAt: now, nukeTriggered: triggerNuke || (sameSession && previous!.nukeTriggered) }));
-        if (triggerNuke) void activateNuke({}).catch((error) => console.warn("[focuslock] nuke activation failed", error));
-      },
-    ).then((stop) => { if (disposed) stop(); else unlisten = stop; }).catch(() => undefined);
-    return () => { disposed = true; unlisten?.(); };
-  }, [strictActive, strictEndsAt, strictNukeAfterFive, activateNuke]);
   // Focus-page range selector. Lives here (above useQuery) so the query args can
   // depend on it; memoized so a re-render never resubscribes the query.
   const [usageRange, setUsageRange] = useState<UsageRange>("today");
@@ -3326,8 +3297,7 @@ function BoundariesPage({
   const saveGroups = useDurableMutation(syncApi.saveGroups);
   const apps: AppItem[] = dashboard?.apps || [];
   const sites: SiteItem[] = dashboard?.sites || [];
-  const strictActive = Boolean(dashboard?.prefs?.strictMode) &&
-    (!dashboard?.prefs?.strictEndsAt || dashboard.prefs.strictEndsAt > Date.now());
+  const strictActive = useStrictActive(Boolean(dashboard?.prefs?.strictMode), dashboard?.prefs?.strictEndsAt);
   // Full group list (editable source of truth). The range summary below only
   // supplies tracked seconds; listGroups keeps groups that have zero usage.
   const remoteGroups: TargetGroup[] | undefined = useQuery(
@@ -3387,6 +3357,7 @@ function BoundariesPage({
   }
 
   function openEditGroup(group: TargetGroup) {
+    if (!guardUnlock(false)) return;
     setGroupError(null);
     setPickerQuery("");
     setMergeNote(null);
@@ -3433,6 +3404,7 @@ function BoundariesPage({
 
   // Full-replace save: always send the whole list with a fresh updatedAt.
   async function persistGroups(next: TargetGroup[], message: string) {
+    if (!guardUnlock(false)) return;
     setBusy(true);
     setGroupError(null);
     try {
@@ -3729,7 +3701,7 @@ function BoundariesPage({
 
   // Boundaries Lock genuinely blocks removal/unblocking while ON, mirroring Android.
   function guardUnlock(isUnblocking: boolean): boolean {
-    if ((boundariesLock || strictActive) && isUnblocking) {
+    if (strictActive || (boundariesLock && isUnblocking)) {
       setNotice(strictActive
         ? "Strict Mode keeps these boundaries until the commitment ends."
         : "Boundaries Lock is ON — turn it off in Settings to change this.");
@@ -3760,6 +3732,7 @@ function BoundariesPage({
   }
 
   async function persistApps(toggled: BoundaryAppRow[], nextApps: BoundaryAppRow[], message: string) {
+    if (!guardUnlock(false)) return;
     setBusy(true);
     try {
       // Upload only server-known rows plus the toggled targets so observed-only
@@ -3779,6 +3752,7 @@ function BoundariesPage({
   }
 
   async function persistSites(nextSites: SiteItem[], message: string) {
+    if (!guardUnlock(false)) return;
     setBusy(true);
     try {
       const removed = sites.some((site) => !nextSites.some((next) => next.domain === site.domain));
@@ -3806,7 +3780,7 @@ function BoundariesPage({
       setNotice("Permanent blocks cannot be removed in FocusLock.");
       return;
     }
-    if (row.isBlocked && !guardUnlock(true)) return;
+    if (!guardUnlock(row.isBlocked)) return;
     const toggled = { ...row, isBlocked: !row.isBlocked };
     const nextApps = appRows.map((item) => (item.key === row.key ? toggled : item));
     await persistApps(
@@ -3817,7 +3791,7 @@ function BoundariesPage({
   }
 
   async function toggleSite(site: SiteItem) {
-    if (site.isBlocked && !guardUnlock(true)) return;
+    if (!guardUnlock(site.isBlocked)) return;
     const nextSites = sites.map((item) =>
       item.domain === site.domain ? { ...item, isBlocked: !item.isBlocked } : item,
     );
@@ -3890,6 +3864,7 @@ function BoundariesPage({
   }
 
   async function submitAddSite() {
+    if (!guardUnlock(false)) return;
     const normalized = normalizeDomainInput(siteInput);
     if (!normalized) {
       setSiteError("Enter a valid domain, like example.com or a full URL.");
@@ -3952,7 +3927,7 @@ function BoundariesPage({
 
       {(boundariesLock || strictActive) && (
         <p className="boundary-notice lock-notice">
-          {strictActive ? "Strict Mode is active" : "Boundaries Lock is on"} — blocked apps and websites can't be removed or unblocked.
+          {strictActive ? "Strict Mode is active — boundary settings are locked until the commitment ends." : "Boundaries Lock is on — blocked apps and websites can't be removed or unblocked."}
         </p>
       )}
 
@@ -3977,7 +3952,7 @@ function BoundariesPage({
             <button
               type="button"
               className="primary-button"
-              disabled={busy}
+              disabled={busy || strictActive}
               onClick={() => openCreateGroup()}
             >
               <Icon name="plus" /> New group
@@ -4020,7 +3995,7 @@ function BoundariesPage({
                       <button
                         type="button"
                         className="secondary-button"
-                        disabled={busy}
+                        disabled={busy || strictActive}
                         onClick={() => openEditGroup(group)}
                       >
                         Edit
@@ -4028,7 +4003,7 @@ function BoundariesPage({
                       <button
                         type="button"
                         className="site-delete"
-                        disabled={busy}
+                        disabled={busy || strictActive}
                         onClick={() => deleteGroup(group)}
                         aria-label={`Delete ${group.name}`}
                       >
@@ -4131,7 +4106,7 @@ function BoundariesPage({
         <button
           type="button"
           className="preset-chip social"
-          disabled={busy}
+          disabled={busy || strictActive}
           onClick={() =>
             kind === "apps"
               ? blockAppsInCategories(["Social", "Social Media"], "Social")
@@ -4143,7 +4118,7 @@ function BoundariesPage({
         <button
           type="button"
           className="preset-chip video"
-          disabled={busy}
+          disabled={busy || strictActive}
           onClick={() =>
             kind === "apps"
               ? blockAppsInCategories(["Entertainment", "Video"], "Video")
@@ -4246,7 +4221,7 @@ function BoundariesPage({
             <button
               type="button"
               className="primary-button"
-              disabled={selectedMembers.length < 2 || busy}
+              disabled={selectedMembers.length < 2 || busy || strictActive}
               onClick={() => openCreateGroup(selectedMembers)}
             >
               Merge selected
@@ -4301,7 +4276,7 @@ function BoundariesPage({
                 {row.permanent && <span className="permanent-badge">Permanent</span>}
                 <button
                   className={`switch ${row.isBlocked ? "on" : ""} ${row.permanent ? "permanent" : ""}`}
-                  disabled={busy}
+                  disabled={busy || strictActive}
                   aria-disabled={row.permanent || undefined}
                   title={
                     row.permanent
@@ -4363,7 +4338,7 @@ function BoundariesPage({
                 {site.isCustom && (
                   <button
                     className="site-delete"
-                    disabled={busy}
+                    disabled={busy || strictActive}
                     onClick={() => deleteSite(site)}
                     aria-label={`Remove ${site.domain}`}
                   >
@@ -4372,7 +4347,7 @@ function BoundariesPage({
                 )}
                 <button
                   className={`switch ${site.isBlocked ? "on" : ""}`}
-                  disabled={busy}
+                  disabled={busy || strictActive}
                   onClick={() => toggleSite(site)}
                   aria-label={`${site.isBlocked ? "Allow" : "Block"} ${site.domain}`}
                 >
@@ -4772,7 +4747,7 @@ function SettingsPage({
         globalDailyCapMinutes: prefs.globalDailyCapMinutes,
         strictEndsAt: next ? selectedEnd : 0,
         strictPreset: prefs.strictPreset || "custom",
-        strictNukeAfterFive: Boolean(prefs.strictNukeAfterFive),
+        strictNukeAfterFive: false,
         updatedAt: Math.max(Date.now(), prefs.updatedAt || 0),
       });
     } catch (err) {
@@ -4791,15 +4766,10 @@ function SettingsPage({
     if (error) return;
     setPrefsBusy(true);
     try {
-      await savePrefs({ strictMode: true, strictEndsAt: endsAt, strictPreset: prefs.strictPreset || "custom", strictNukeAfterFive: Boolean(prefs.strictNukeAfterFive), updatedAt: Date.now() });
+      await savePrefs({ strictMode: true, strictEndsAt: endsAt, strictPreset: prefs.strictPreset || "custom", strictNukeAfterFive: false, updatedAt: Date.now() });
     } catch (err) {
       setStrictError(err instanceof Error ? err.message : "Could not extend your commitment. Try again.");
     } finally { setPrefsBusy(false); }
-  }
-  async function setStrictNuke(next: boolean) {
-    setPrefsBusy(true);
-    try { await savePrefs({ strictNukeAfterFive: next, updatedAt: Date.now() }); }
-    finally { setPrefsBusy(false); }
   }
   async function setStrictPreset(preset: string) {
     const plan = preset === "exam" ? 4 : preset === "deep_work" ? 2 : preset === "sleep" ? 8 : 24;
@@ -4807,7 +4777,7 @@ function SettingsPage({
     setStrictPlan("duration");
     setPrefsBusy(true);
     try {
-      await savePrefs({ strictPreset: preset, strictNukeAfterFive: preset === "exam" || Boolean(prefs.strictNukeAfterFive), updatedAt: Date.now() });
+      await savePrefs({ strictPreset: preset, strictNukeAfterFive: false, updatedAt: Date.now() });
     } finally { setPrefsBusy(false); }
   }
   return (
@@ -4846,12 +4816,12 @@ function SettingsPage({
           <span className="setting-icon"><Icon name="clock" /></span>
           <div>
             <strong>Strict commitment</strong>
-            <p>{strictActive && prefs.strictEndsAt ? `Active until ${new Date(prefs.strictEndsAt).toLocaleString()}.` : "Choose how long Strict Mode stays active."}</p>
+            <p>{strictActive && prefs.strictEndsAt ? `Active until ${new Date(prefs.strictEndsAt).toLocaleString()}.` : "Lock boundary settings for a duration. App access follows your existing rules."}</p>
             <div className="setting-inline">
               <select value={prefs.strictPreset || "custom"} onChange={(e) => void setStrictPreset(e.target.value)} aria-label="Strict mode preset">
                 <option value="custom">Custom</option>
                 <option value="deep_work">Deep work · 2h</option>
-                <option value="exam">Exam · 4h + nuke</option>
+                <option value="exam">Exam · 4h</option>
                 <option value="sleep">Sleep · 8h</option>
               </select>
               <select value={strictPlan} onChange={(e) => setStrictPlan(e.target.value as "duration" | "until")} aria-label="Strict mode timing">
@@ -4874,15 +4844,6 @@ function SettingsPage({
           </div>
         </div>
         <ApprovalUnlockPanel />
-        <SettingRow
-          icon="lock"
-          title="Nuke after five attempts"
-          detail="After five blocked launches during this Strict Mode session, start the ten-minute reset on supported blockers."
-        >
-          <button className={`switch ${prefs.strictNukeAfterFive ? "on" : ""}`} onClick={() => void setStrictNuke(!prefs.strictNukeAfterFive)} disabled={prefsBusy} aria-label="Nuke after five blocked attempts">
-            <span />
-          </button>
-        </SettingRow>
         <SettingRow
           icon="globe"
           title="Website domains"
@@ -4954,7 +4915,7 @@ function SettingsPage({
         <SettingRow
           icon="lock"
           title="Strict mode"
-          detail={strictActive ? "Locked until the selected end time." : "Choose a duration above to start."}
+          detail={strictActive ? "Boundary settings are locked until the selected end time." : "Choose a duration above to lock boundary settings."}
         >
           <button
             className={`switch ${prefs.strictMode ? "on" : ""}`}

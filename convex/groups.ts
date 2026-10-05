@@ -1,6 +1,6 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
-import { validateUpdatedAt } from "./storageDiff";
+import { guardStrictBoundaryChanges, validateUpdatedAt } from "./storageDiff";
 
 async function requireUserId(ctx: any): Promise<string> {
   const identity = await ctx.auth.getUserIdentity();
@@ -241,6 +241,7 @@ export const saveGroups = mutation({
       .collect();
     const storedVersion = Math.max(version?.updatedAt ?? 0, ...existing.map((row) => row.updatedAt ?? 0));
     if (args.updatedAt < storedVersion) return { applied: false, updatedAt: storedVersion };
+    await guardStrictBoundaryChanges(ctx, userId, existing, canonical, (group) => [group.groupId]);
     const effectiveClock = Math.max(args.updatedAt, storedVersion + 1);
 
     // Diff by stable groupId so a collection sync does not churn every row.

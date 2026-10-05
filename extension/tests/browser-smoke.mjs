@@ -133,6 +133,11 @@ try {
     state.cloudSites = [{ domain: '127.0.0.1', isBlocked: true }];
     state.lists = [{ id: 'strict-ui', name: 'Local boundary', enabled: true, alwaysOn: true,
       mode: 'blacklist', sites: ['ui.example'], exceptions: [], dailyLimitMin: 0, lockedUntil: 0 }];
+    state.cloudPolicy = { state: { creditBalanceSeconds: 600, lastResetDate: FocusLockStore.todayKey(), totalScrollSecondsToday: 0 },
+      groups: [], limits: [], schedules: [] };
+    state.cloudLeisureBaseline = {};
+    state.leisureStats = {};
+    state.snoozes = {};
     await FocusLockStore.save(state);
     await chrome.runtime.sendMessage({ type: 'refresh' });
   });
@@ -145,16 +150,35 @@ try {
   await worker.evaluate(async () => {
     const state = await ensureState();
     await syncCloud('live', { ok: true, signedIn: true, userId: state.cloudAccountId,
-      isCurrent: async () => true, prefs: { strictMode: true, strictEndsAt: Date.now() + 3000 } });
+      isCurrent: async () => true, prefs: { strictMode: true, strictEndsAt: Date.now() + 60000 } });
   });
   await page.waitForFunction(() => document.getElementById('lockdownBadge').textContent === 'Strict Mode');
   assert.equal(await page.locator('#presetUnblock').isDisabled(), true);
   assert.equal(await page.locator('#newList').isDisabled(), true);
   assert.equal(await page.locator('#siteRows [data-del]').first().isDisabled(), true);
   checks.push('Incoming mobile Strict Mode locks the already-open boundary dashboard without a reload');
-  const denied = await page.evaluate(() => chrome.runtime.sendMessage({ type: 'snooze', url: 'http://127.0.0.1/', minutes: 999 }));
-  assert.equal(denied.ok, false, 'Strict mode must reject snooze at the worker boundary');
-  checks.push('Worker rejects a strict-mode snooze request');
+  const strictFunded = await context.newPage();
+  await strictFunded.goto(site);
+  await strictFunded.locator('h1').waitFor();
+  checks.push('Actual selected-site navigation succeeds under Strict Mode while earned credit remains');
+  await worker.evaluate(async () => {
+    const state = await ensureState();
+    state.cloudPolicy.state.creditBalanceSeconds = 0;
+    state.snoozes = {};
+    await FocusLockStore.save(state); mem.state = state;
+  });
+  const permittedCreditSnooze = await page.evaluate(() => chrome.runtime.sendMessage({ type: 'snooze', url: 'http://127.0.0.1/' }));
+  assert.equal(permittedCreditSnooze.ok, true, 'Strict Mode permits a snooze for an actual zero-credit block');
+  checks.push('A real zero-credit block can be snoozed during Strict Mode');
+  await strictFunded.close();
+  await page.evaluate(async () => {
+    const state = await FocusLockStore.load();
+    state.strictMode = false; state.strictEndsAt = Date.now() - 1;
+    state.cloudPrefs = { strictMode: false, strictEndsAt: 0 };
+    state.snoozes = {};
+    await FocusLockStore.save(state);
+    await chrome.runtime.sendMessage({ type: 'refresh' });
+  });
   await page.waitForFunction(() => !document.getElementById('presetUnblock').disabled, { timeout: 10000 });
   assert.equal(await page.locator('#siteRows [data-del]').first().isDisabled(), false);
   checks.push('Boundary controls unlock when the synced commitment expires');
@@ -172,7 +196,8 @@ try {
   await popup.goto(`chrome-extension://${id}/popup/popup.html`);
   await popup.locator('#block-site').waitFor({ timeout: 20000 });
   assert.equal(await popup.locator('.fatal').count(), 0);
-  assert.equal(await popup.locator('#allow-site').isDisabled(), true);
+  assert.equal(await popup.locator('#allow-site').isVisible(), true,
+    'The popup remains available during Strict Mode; actual snooze permission is checked by the worker');
   assert.match(await popup.locator('.current-site').textContent(), /Strict Mode is active/);
   await popup.screenshot({ path: path.join(out, 'popup-offline.png'), fullPage: true });
   checks.push('Real popup remains usable with network offline');
@@ -252,9 +277,10 @@ try {
   await page.locator('nav button[data-tab="strict"]').click();
   await page.waitForFunction(() => document.getElementById('strictCommit').textContent === 'Extend commitment');
   assert.equal(await page.locator('#guardianSave').isDisabled(), true);
-  assert.equal((await page.evaluate(() => chrome.runtime.sendMessage({ type: 'snooze', url: 'http://127.0.0.1/' }))).ok, false);
+  assert.equal((await page.evaluate(() => chrome.runtime.sendMessage({ type: 'snooze', url: 'http://127.0.0.1/' }))).ok, true,
+    'An actual zero-credit block remains snoozable during Strict Mode');
   await page.screenshot({ path: path.join(out, 'strict-active-390.png'), fullPage: true });
-  checks.push('Strict commitment starts through the actual UI, survives reload, locks guardian edits and rejects snoozes');
+  checks.push('Strict commitment starts through the actual UI, survives reload, locks guardian edits, and preserves policy-based snoozes');
   assert.deepEqual(errors, [], 'Dashboard has no uncaught page errors');
   const report = { realExtension: true, signedIn: false, seededPolicy: true, extensionId: id, checks, pageErrors: errors,
     limitations: ['Real signed-in cross-device sync requires the user account and Android device.'] };

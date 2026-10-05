@@ -10,7 +10,7 @@ This is a code and isolated-runtime hardening pass. It is not a claim of complet
 
 ## Fixes
 
-- Corrected daily allowance decisions, overnight schedule day ownership, and frozen/Strict Mode snooze enforcement.
+- Corrected daily allowance decisions, overnight schedule day ownership, and frozen-list/policy-based snooze enforcement while Strict Mode is active.
 - Limited mutating messages to this extension's pages and content-script verdict requests to the sender's own URL. Restricted local storage to trusted extension contexts.
 - Added malformed-state normalization and deterministic repeated regex matching.
 - Serialized storage writes across extension contexts with Web Locks. Merge unrelated changes, reject conflicting edits, and retain a separate baseline for each loaded state so delayed worker operations cannot restore older rules after a refresh. Comparisons tolerate Chrome's object-key reordering.
@@ -20,7 +20,7 @@ This is a code and isolated-runtime hardening pass. It is not a claim of complet
 - Preserved active commitments across account transitions and added shared Nuke reads using the existing authenticated backend query.
 - Added Convex deadlines, account/session checks after requests, HTTPS-only auth navigation, and durable retention of rejected stale writes.
 - Guarded dashboard import/edit/delete paths against active locks. Improved popup offline behavior, error feedback, keyboard focus, small-window layout, and the signed-out dashboard. A failed snooze no longer reports success.
-- Added Permalock: a device-local, append-only permanent block list enforced as the highest-priority verdict (above Strict, shared Nuke, Nuclear, and lists). Snoozes are rejected at the worker for permanent domains, imports/resets/storage saves cannot drop an entry, cloud sync never uploads or restores it, and the blocked page hides every escape route.
+- Added Permalock: a device-local, append-only permanent block list enforced as the highest-priority verdict (above shared Nuke, Nuclear, and ordinary lists). Snoozes are rejected at the worker for permanent domains, imports/resets/storage saves cannot drop an entry, cloud sync never uploads or restores it, and the blocked page hides every escape route.
 - Added a complete unpacked runtime build under `build/extension-unpacked`; `extension/dist` is only the script bundle directory. Narrowed website permissions to HTTP(S), disabled object embeds in extension CSP, and excluded configuration/secrets from the runtime package.
 - Updated compatible dependencies. The high-severity `image-size` advisory was removed by the update. Remaining npm advisories are recorded below.
 
@@ -40,7 +40,7 @@ npm --prefix extension run test:browser
 
 The browser smoke test loads the actual packaged manifest, service worker, and pages in a disposable Chromium profile. Its output is `build/extension-verification/browser-results.json`, with screenshots in the same directory. The separate UI fixture test writes `build/ui-verification/extension-results.json` and screenshots. Fixture auth and real signed-in sessions are explicitly different evidence.
 
-The isolated browser check covers actual navigation redirects and usage counting against a seeded policy with `signedIn: false`, saved boundary persistence, Strict Mode snooze rejection, offline blocking, popup fallback, and all five dashboard destinations at 1280, 840, and 390 pixels. Policy fixtures cover earned-time spend, group and per-target usage limits, schedules, and daily caps. Worker restart accounting and account transitions are regression fixtures; they are not a physical Android-to-Chrome acceptance test. The root task is still adding policy and backend tests, so final test counts are intentionally not recorded here.
+The isolated browser check covers actual navigation redirects and usage counting against seeded policies with `signedIn: false`, saved boundary persistence, funded-site access and zero-credit snooze during Strict Mode, offline policy blocking, popup fallback, and all five dashboard destinations at 1280, 840, and 390 pixels. Policy fixtures cover earned-time spend, group and per-target usage limits, schedules, and daily caps. Worker restart accounting and account transitions are regression fixtures; they are not a physical Android-to-Chrome acceptance test. The root task is still adding policy and backend tests, so final test counts are intentionally not recorded here.
 
 Platform references: [Chrome service-worker lifecycle](https://developer.chrome.com/docs/extensions/develop/concepts/service-workers/lifecycle), [Chrome storage access levels](https://developer.chrome.com/docs/extensions/reference/api/storage), and [Web Locks](https://www.w3.org/TR/web-locks/).
 

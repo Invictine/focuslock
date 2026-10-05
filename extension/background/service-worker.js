@@ -57,8 +57,6 @@ async function commitStrictNow(message) {
       state.strictPreset = ['hours', 'days', 'date', 'weekly'].includes(message.preset) ? message.preset : 'custom';
       state.strictNukeAfterFive = wasActive ? state.strictNukeAfterFive : message.nukeAfterFive === true;
       if (!wasActive) { state.strictAttempts = 0; state.strictSessionKey = `${now}:${end}`; }
-      state.strictHeldSites = [...new Set([...(state.strictHeldSites || []),
-        ...(state.cloudSites || []).filter(site => site.isBlocked).map(site => site.domain)])];
       state.strictPending = origin ? { accountId: origin,
         prefs: { strictMode: true, strictEndsAt: end, strictPreset: state.strictPreset,
           strictNukeAfterFive: state.strictNukeAfterFive, updatedAt: now } } : null;
@@ -232,7 +230,6 @@ function listIsLocked(list, t) {
 function listIsActive(list, state, t) {
   t = t || nowMs();
   if (!list.enabled) return { active: false, reason: 'disabled' };
-  if (strictIsActive(state, t)) return { active: true, reason: 'strict' };
   if (listIsLocked(list, t)) return { active: true, reason: 'frozen-lock' };
   const attached = state.schedules.filter(s => s.listId === list.id);
   if (attached.length === 0) {
@@ -263,10 +260,7 @@ function verdictFor(urlStr, state, t) {
     return { blocked: true, mode: 'permanent', listId: '__permanent', listName: 'Permanent block', reason: 'permanent' };
   }
 
-  // Held device commitments are separate from the active account's private data.
-  if (strictIsActive(state, t) && M.matchesAny(urlStr, state.strictHeldSites || [])) {
-    return { blocked: true, mode: 'strict', listId: '__commitment', listName: 'Strict Mode', reason: 'strict' };
-  }
+  // Active account boundaries are enforced independently of Strict Mode state.
   if (state.cloudNuke?.isActive && !authUrl) {
     return { blocked: true, mode: 'shared-nuke', listId: '__shared_nuclear', listName: 'Shared Nuclear Block', reason: 'shared-nuclear' };
   }
@@ -284,7 +278,7 @@ function verdictFor(urlStr, state, t) {
   }
   const policyVerdict = self.FocusLockPolicy?.verdict(urlStr, state, t);
   if (policyVerdict) return policyVerdict;
-  if (!state.cloudPolicy && sharedSite && (strictIsActive(state, t) || !domainAllowedBySnooze(state, shortDomain, t))) {
+  if (!state.cloudPolicy && sharedSite && !domainAllowedBySnooze(state, shortDomain, t)) {
     return { blocked: true, mode: 'blacklist', listId: '__shared', listName: 'Shared boundaries', reason: 'account' };
   }
 
@@ -303,7 +297,7 @@ function verdictFor(urlStr, state, t) {
     if (state.cloudSitesLoaded && (list.id === 'list_social' || list.id === 'list_video')) continue;
     const st = listIsActive(list, state, t);
     if (!st.active) continue;
-    if (!strictIsActive(state, t) && !listIsLocked(list, t) && domainAllowedBySnooze(state, shortDomain, t)) continue;
+    if (!listIsLocked(list, t) && domainAllowedBySnooze(state, shortDomain, t)) continue;
 
     if (list.mode === 'whitelist') {
       // allow-only: block unless URL is in the allowed sites
@@ -316,7 +310,7 @@ function verdictFor(urlStr, state, t) {
     // blacklist
     const matched = M.matchesAny(urlStr, list.sites);
     if (matched && !M.matchesAny(urlStr, list.exceptions || [])) {
-      if (list.dailyLimitMin > 0 && !strictIsActive(state, t)) {
+      if (list.dailyLimitMin > 0) {
         const used = minutesUsedForDay(day, list.sites);
         if (used >= list.dailyLimitMin) {
           return { blocked: true, mode: 'daily-limit', listId: list.id, listName: list.name, reason: 'daily-limit', schedule: st.schedule };
@@ -468,12 +462,6 @@ async function syncCloud(reason, liveResult) {
     const previousSites = JSON.stringify(state.cloudSites || []);
     const previousNuke = JSON.stringify(state.cloudNuke || null);
     const previousPolicy = JSON.stringify(state.cloudPolicy || null);
-    if (commitmentWasActive) {
-      state.strictHeldSites = [...new Set([...(state.strictHeldSites || []),
-        ...(state.cloudSites || []).filter(site => site.isBlocked).map(site => site.domain)])];
-    } else {
-      state.strictHeldSites = [];
-    }
     state.nukeCommitments = Array.isArray(state.nukeCommitments) ? state.nukeCommitments : [];
     if (state.cloudNuke?.isActive && state.cloudAccountId && state.nukeCommitments.length === 0) {
       state.nukeCommitments.push({ accountId: state.cloudAccountId, startedAt: state.cloudNuke.startedAt });
@@ -549,11 +537,7 @@ async function syncCloud(reason, liveResult) {
           }
         }
       }
-      if (strictIsActive(state)) {
-        if (!commitmentWasActive) state.strictOriginAccountId = state.cloudAccountId || '';
-        state.strictHeldSites = [...new Set([...(state.strictHeldSites || []),
-          ...(state.cloudSites || []).filter(site => site.isBlocked).map(site => site.domain)])];
-      }
+      if (strictIsActive(state) && !commitmentWasActive) state.strictOriginAccountId = state.cloudAccountId || '';
       if (liveResult && !await liveResult.isCurrent()) return { ok: false, signedIn: false };
       await Store.save(state);
       mem.state = state;
@@ -648,14 +632,6 @@ async function enforceTab(tabId, url) {
     state.blockedLog.unshift({ ts: nowMs(), url: url.slice(0, 500), domain, listId: v.listId, listName: v.listName });
     state.blockedLog = state.blockedLog.slice(0, 500);
     state.blockedTotal = (state.blockedTotal || 0) + 1;
-    if (strictIsActive(state)) {
-      state.strictAttempts = (state.strictAttempts || 0) + 1;
-      if (state.strictNukeAfterFive && state.strictAttempts === 5) {
-        state.nuclear = { ...(state.nuclear || {}), active: true, until: nowMs() + 10 * 60 * 1000 };
-        self.FocusLockCloud.activateNuke().then(() => syncCloud('edit')).catch((error) =>
-          console.warn('[focuslock] shared nuke activation failed', error));
-      }
-    }
     try { await Store.save(state); }
     catch (error) { console.warn('[focuslock] block logging could not be saved', error); }
   }
@@ -893,7 +869,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     } else if (msg.type === 'strictWeeklySave') {
       await featureSerial(async () => {
         await featureWrite(state => {
-          if (strictIsActive(state)) throw new Error('Weekly activation cannot change during a commitment.');
           const rule = self.FocusLockFeatures.weeklyState(msg.rule);
           if (rule.enabled && !rule.days.length) throw new Error('Choose at least one weekday.');
           // Preserve the consumed occurrence so approval never re-arms it.
@@ -975,7 +950,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         && (list.mode === 'whitelist' ? !M.matchesAny(msg.url, list.sites) : M.matchesAny(msg.url, list.sites))
         && !M.matchesAny(msg.url, list.exceptions || []));
       const sharedMode = self.FocusLockPolicy?.verdict(msg.url, state, nowMs())?.mode;
-      if (!/^https?:\/\//i.test(msg.url || '') || !domain || strictIsActive(state) || target
+      if (!/^https?:\/\//i.test(msg.url || '') || !domain || target
           || ['group-limit', 'daily-limit', 'schedule', 'global-limit'].includes(sharedMode)
           || M.matchesAny(msg.url, state.permanentSites || [])
           || verdictFor(msg.url, state, nowMs()).mode === 'frog'

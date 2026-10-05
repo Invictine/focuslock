@@ -37,7 +37,10 @@ data class AppLimit(
  * so suspend reads ([getLimit]) only touch DataStore once on first use and then
  * serve from memory. Writes keep the cache warm.
  */
-class AppLimitsRepository(private val context: Context) {
+class AppLimitsRepository(
+    private val context: Context,
+    private val strictAutomationActive: suspend () -> Boolean = { false },
+) {
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -60,8 +63,9 @@ class AppLimitsRepository(private val context: Context) {
      * existing `enabled` flag is preserved so a parked limit is not silently
      * re-enabled; pass an explicit value (e.g. config import) to override it.
      */
-    suspend fun setLimit(packageName: String, dailyMinutes: Int, enabled: Boolean? = null) {
-        if (packageName.isBlank()) return
+    suspend fun setLimit(packageName: String, dailyMinutes: Int, enabled: Boolean? = null): Boolean {
+        if (isStrictAutomationActive(strictAutomationActive)) return false
+        if (packageName.isBlank()) return false
         val minutes = dailyMinutes.coerceAtLeast(0)
         var updated: Map<String, AppLimit> = emptyMap()
         context.appLimitsDataStore.edit { prefs ->
@@ -77,9 +81,11 @@ class AppLimitsRepository(private val context: Context) {
         }
         _limits.value = updated
         loaded.value = true
+        return true
     }
 
-    suspend fun removeLimit(packageName: String) {
+    suspend fun removeLimit(packageName: String): Boolean {
+        if (isStrictAutomationActive(strictAutomationActive)) return false
         var updated: Map<String, AppLimit> = emptyMap()
         context.appLimitsDataStore.edit { prefs ->
             val current = decodeLimits(prefs[Keys.LIMITS_JSON]).toMutableMap()
@@ -89,6 +95,7 @@ class AppLimitsRepository(private val context: Context) {
         }
         _limits.value = updated
         loaded.value = true
+        return true
     }
 
     suspend fun getLimit(packageName: String): AppLimit? = currentLimits()[packageName]

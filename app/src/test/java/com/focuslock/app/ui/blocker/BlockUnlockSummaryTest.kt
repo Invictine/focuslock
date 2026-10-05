@@ -9,59 +9,52 @@ import org.junit.Test
 
 class BlockUnlockSummaryTest {
     @Test
-    fun permanentAndStrictBlocksTakePriorityOverAvailableBalance() {
+    fun permanentBlocksTakePriorityOverAvailableBalance() {
         assertEquals(
             "Focus time cannot unlock a permanent block.",
-            blockUnlockSummary("permanent", strictActive = true, frog = frog(locked = true), balanceSeconds = 500)
-        )
-        assertEquals(
-            "Strict mode must end before this app unlocks.",
-            blockUnlockSummary("strict", strictActive = true, frog = null, balanceSeconds = 500)
+            blockUnlockSummary("permanent", frog = frog(locked = true), balanceSeconds = 500)
         )
     }
 
     @Test
-    fun strictSummaryIncludesActiveFrogRequirement() {
-        assertEquals(
-            "1 min more focus on your frog. Tick it off when complete. Strict mode must end before this app unlocks.",
-            blockUnlockSummary("strict", strictActive = true, frog = frog(locked = true, trackedSeconds = 60, requiredSeconds = 120), balanceSeconds = 500)
-        )
+    fun strictModeDoesNotHideAvailableCredits() {
+        assertEquals("Leisure time is available.", blockUnlockSummary(null, frog = null, balanceSeconds = 500))
     }
 
     @Test
     fun dailyLimitScheduleAndNuclearReasonsStayTruthful() {
-        assertEquals("Your daily limit resets tomorrow.", blockUnlockSummary("limit", false, null, 10))
-        assertEquals("Your block schedule must end first.", blockUnlockSummary("schedule", false, null, 10))
-        assertEquals("The nuclear block must end first.", blockUnlockSummary("nuke", false, null, 10))
+        assertEquals("Your daily limit resets tomorrow.", blockUnlockSummary("limit", null, 10))
+        assertEquals("Your block schedule must end first.", blockUnlockSummary("schedule", null, 10))
+        assertEquals("The nuclear block must end first.", blockUnlockSummary("nuke", null, 10))
     }
 
     @Test
     fun frogRequirementUsesCeilingAndStillRequiresTickOff() {
         assertEquals(
             "2 min more focus on your frog. Tick it off when complete.",
-            blockUnlockSummary("frog", false, frog(locked = true, trackedSeconds = 61, requiredSeconds = 122), 60)
+            blockUnlockSummary("frog", frog(locked = true, trackedSeconds = 61, requiredSeconds = 122), 60)
         )
         assertEquals(
             "Focus target met. Tick off your frog to unlock.",
-            blockUnlockSummary("frog", false, frog(locked = true, trackedSeconds = 240, requiredSeconds = 180), 60)
+            blockUnlockSummary("frog", frog(locked = true, trackedSeconds = 240, requiredSeconds = 180), 60)
         )
-        assertEquals("Frog complete.", blockUnlockSummary("frog", false, frog(locked = true, trackedSeconds = 180, requiredSeconds = 180, tickedOff = true), 60))
+        assertEquals("Frog complete.", blockUnlockSummary("frog", frog(locked = true, trackedSeconds = 180, requiredSeconds = 180, tickedOff = true), 60))
     }
 
     @Test
     fun missingFrogStateIsLoadingAndMissingTaskPromptsSelection() {
-        assertNull(blockUnlockSummary("frog", false, null, 0))
+        assertNull(blockUnlockSummary("frog", null, 0))
         assertEquals(
             "Choose your frog, then focus for 2 min and tick it off.",
-            blockUnlockSummary("frog", false, frog(locked = true, task = null, requiredSeconds = 61), 0)
+            blockUnlockSummary("frog", frog(locked = true, task = null, requiredSeconds = 61), 0)
         )
     }
 
     @Test
     fun normalCreditBalanceExplainsAvailabilityOrOneMinuteNeeded() {
-        assertNull(blockUnlockSummary(null, false, null, null))
-        assertEquals("Leisure time is available.", blockUnlockSummary(null, false, null, 1))
-        assertEquals("Log 1 min more focus to earn leisure time.", blockUnlockSummary(null, false, null, 0))
+        assertNull(blockUnlockSummary(null, null, null))
+        assertEquals("Leisure time is available.", blockUnlockSummary(null, null, 1))
+        assertEquals("Log 1 min more focus to earn leisure time.", blockUnlockSummary(null, null, 0))
     }
 
     private fun frog(

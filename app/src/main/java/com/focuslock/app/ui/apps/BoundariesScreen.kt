@@ -102,12 +102,13 @@ private data class BlockedAppItem(
  */
 internal fun boundariesFrozenMessage(
     lockdownActive: Boolean,
+    strictAutomationActive: Boolean = false,
     lockdownRemainingMs: Long,
     boundariesLockSuffix: String
-): String = if (lockdownActive) {
-    "Strict Mode locks boundaries — ${formatLockdownRemaining(lockdownRemainingMs)} left"
-} else {
-    "Boundaries Lock is ON — $boundariesLockSuffix"
+): String = when {
+    lockdownActive -> "Strict Mode locks boundaries — ${formatLockdownRemaining(lockdownRemainingMs)} left"
+    strictAutomationActive -> "Scheduled Strict Mode locks boundary changes while active"
+    else -> "Boundaries Lock is ON — $boundariesLockSuffix"
 }
 
 /**
@@ -141,8 +142,10 @@ fun BoundariesScreen(
     val permanentStoreLoaded = permanentPackagesState != null && permanentDomainsState != null
     val permanentPackages = permanentPackagesState.orEmpty()
     val permanentDomains = permanentDomainsState.orEmpty()
-    // Combined freeze: Boundaries Lock OR Strict Mode (single source of truth).
-    val boundariesFrozen by settings.boundariesFrozenFlow.collectAsStateWithLifecycle(initialValue = false)
+    // Strict manual and automatic activations freeze boundary configuration only.
+    val boundariesFrozenBase by settings.boundariesFrozenFlow.collectAsStateWithLifecycle(initialValue = false)
+    val strictAutomationActive by app.strictModeAutomationRepository.activationActiveFlow.collectAsStateWithLifecycle(initialValue = false)
+    val boundariesFrozen = boundariesFrozenBase || strictAutomationActive
     val lockdownMode by settings.lockdownModeFlow.collectAsStateWithLifecycle(initialValue = false)
     val limits by appLimits.limitsFlow.collectAsStateWithLifecycle(initialValue = emptyMap())
     // null = overview; a value = that picker tab is open.
@@ -327,6 +330,7 @@ fun BoundariesScreen(
             onOpenLocation = { detail = "location" },
             boundariesFrozen = boundariesFrozen,
             lockdownMode = lockdownMode,
+            strictAutomationActive = strictAutomationActive,
             lockdownRemainingMs = lockdownRemainingMs,
             blockedApps = blockedAppRows,
             blockedWebsites = blockedWebsites,
@@ -361,6 +365,7 @@ private fun BoundariesOverview(
     onOpenLocation: () -> Unit,
     boundariesFrozen: Boolean,
     lockdownMode: Boolean,
+    strictAutomationActive: Boolean,
     lockdownRemainingMs: Long,
     blockedApps: List<BlockedAppItem>,
     blockedWebsites: List<BlockedWebsite>,
@@ -371,6 +376,7 @@ private fun BoundariesOverview(
 ) {
     val lockedMessage = boundariesFrozenMessage(
         lockdownActive = lockdownMode,
+        strictAutomationActive = strictAutomationActive,
         lockdownRemainingMs = lockdownRemainingMs,
         boundariesLockSuffix = "turn it off in Settings to remove"
     )

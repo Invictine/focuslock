@@ -6,14 +6,23 @@
   const toast = (t) => { const el = $('toast'); el.textContent = t; el.style.display = 'block'; clearTimeout(el._h); el._h = setTimeout(() => el.style.display = 'none', 2600); };
 
   // Check writes against the latest state, so stale controls cannot bypass a
-  // frozen list or Strict Mode. This protects every local dashboard mutation.
+  // frozen list or Strict Mode's boundary lock.
   const storeLoad = S.load.bind(S);
   const storeUpdate = S.update.bind(S);
   const storeSave = S.save.bind(S);
   const strictActive = (candidate) => candidate?.strictMode === true
     && (!Number(candidate.strictEndsAt) || Number(candidate.strictEndsAt) > Date.now());
+  const boundarySnapshot = (candidate) => JSON.stringify({
+    lists: (candidate?.lists || []).map((list) => ({ ...list,
+      lockedUntil: Number(list.lockedUntil) > Date.now() ? list.lockedUntil : 0 })),
+    schedules: (candidate?.schedules || []).filter((schedule) =>
+      !['timer', 'frozen', 'pomodoro'].includes(schedule.type) || Number(schedule.endTs) > Date.now()),
+    permanentSites: permanentSitesOf(candidate),
+  });
   function assertEditableState(before, after) {
-    if (strictActive(before)) throw new Error('Strict Mode is active. Settings are locked until it ends.');
+    if (strictActive(before) && boundarySnapshot(before) !== boundarySnapshot(after)) {
+      throw new Error('Strict Mode is active. Boundaries are locked until it ends.');
+    }
     for (const locked of before.lists || []) {
       if (!(Number(locked.lockedUntil) > Date.now())) continue;
       const updated = (after.lists || []).find((item) => item.id === locked.id);
@@ -30,25 +39,10 @@
       throw new Error('Permanent blocks cannot be removed.');
     }
   }
-  // Adding a permanent block is a commitment, not a settings edit, so it is
-  // allowed even while Strict Mode or Nuclear is active. The only difference
-  // this exemption accepts is growth of permanentSites; everything else must
-  // stay byte-identical.
-  function isPermalockAppend(before, after) {
-    const oldSites = permanentSitesOf(before);
-    const newSites = permanentSitesOf(after);
-    if (newSites.length < oldSites.length || oldSites.some((domain) => !newSites.includes(domain))) return false;
-    const rest = (candidate) => {
-      const copy = JSON.parse(JSON.stringify(candidate || {}));
-      delete copy.permanentSites;
-      return JSON.stringify(copy);
-    };
-    return rest(before) === rest(after);
-  }
   S.update = (mutator) => storeUpdate(async (before) => {
     const snapshot = JSON.parse(JSON.stringify(before));
     const after = (await mutator(before)) || before;
-    if (!isPermalockAppend(snapshot, after)) assertEditableState(snapshot, after);
+    assertEditableState(snapshot, after);
     assertPermanentPreserved(snapshot, after);
     return after;
   });
@@ -483,7 +477,6 @@
 
   $('lockdownStart').onclick = async () => {
     if (!state) return;
-    if (strictActive(await storeLoad())) return toast('Strict Mode is active. Settings are locked until it ends.');
     const mins = Math.max(1, Math.min(1440, Number($('lockdownMin').value) || 30));
     if (!confirm('Lock every list for ' + mins + ' minutes? Frozen locks cannot be undone early.')) return;
     await S.update(async (st) => {
@@ -1012,8 +1005,8 @@
       control.disabled = locked || frozen || groupLimit;
     });
     const createSave = $('createGroupSave'); if (createSave) createSave.disabled = locked || $('groupTargetOptions')?.querySelectorAll('[data-group-member]:checked').length < 2 || !$('groupName')?.value.trim();
-    const lockdownStart = $('lockdownStart'); if (lockdownStart) lockdownStart.disabled = locked;
-    const lockdownMin = $('lockdownMin'); if (lockdownMin) lockdownMin.disabled = locked;
+    const permaInput = $('permaInput'); if (permaInput) permaInput.disabled = locked;
+    const permaAdd = $('permaAdd'); if (permaAdd) permaAdd.disabled = locked;
   }
 
   function renderApps(apps) {
@@ -1161,7 +1154,7 @@
     $('groupLimitMinutes').disabled = !event.target.checked;
   });
   $('createGroupSave').addEventListener('click', async () => {
-    if (strictActive(await storeLoad())) return toast('Strict Mode is active. Settings are locked until it ends.');
+    if (strictActive(await storeLoad())) return toast('Strict Mode is active. Boundaries are locked until it ends.');
     const name = $('groupName').value.trim();
     const errorBox = $('createGroupError');
     errorBox.hidden = true;
@@ -1276,7 +1269,7 @@
     const btn = e.target.closest('[data-del]'); if (!btn) return;
     const parts = btn.dataset.del.split('|');
     const listId = parts[0], site = parts.slice(1).join('|');
-    if (strictActive(await storeLoad())) return toast('Strict Mode is active. Settings are locked until it ends.');
+    if (strictActive(await storeLoad())) return toast('Strict Mode is active. Boundaries are locked until it ends.');
     if (listId === '__shared') {
       const current = syncedSites().find(s => s.domain === site);
       const result = await chrome.runtime.sendMessage({ type: 'setSharedSite', domain: site, isBlocked: !current?.isBlocked });
@@ -1299,7 +1292,7 @@
   $('groupList').addEventListener('click', async (e) => {
     const button = e.target.closest('[data-group-save], [data-group-remove]');
     if (!button) return;
-    if (strictActive(await storeLoad())) return toast('Strict Mode is active. Settings are locked until it ends.');
+    if (strictActive(await storeLoad())) return toast('Strict Mode is active. Boundaries are locked until it ends.');
     const card = button.closest('[data-group-id]');
     const groupId = card?.dataset.groupId;
     const baseVersion = Number(dashboard?.groupsUpdatedAt || 0);
@@ -1363,7 +1356,7 @@
   $('addSiteModal').addEventListener('click', (e) => { if (e.target === $('addSiteModal')) closeAddSite(); });
   $('addSiteInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('addSiteConfirm').click(); } });
   $('addSiteConfirm').onclick = async () => {
-    if (strictActive(await storeLoad())) return toast('Strict Mode is active. Settings are locked until it ends.');
+    if (strictActive(await storeLoad())) return toast('Strict Mode is active. Boundaries are locked until it ends.');
     const err = $('addSiteError');
     const parsed = validateSite($('addSiteInput').value);
     if (parsed.error) { err.textContent = parsed.error; err.hidden = false; return; }
@@ -1507,6 +1500,7 @@
       if (strictChanged) {
         renderLockdown();
         applyStrictUiLock();
+        renderPermalock();
         if (!strictActive(state)) updateCreateGroupButton();
         wasStrictActive = strictActive(state);
       } else {

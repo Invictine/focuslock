@@ -84,7 +84,10 @@ data class UpsertResult(
  * most one group (first group wins), groups with fewer than two members are dropped,
  * and the limit is clamped to 1..1440 minutes.
  */
-class TargetGroupsRepository(private val context: Context) {
+class TargetGroupsRepository(
+    private val context: Context,
+    private val strictAutomationActive: suspend () -> Boolean = { false },
+) {
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -176,6 +179,7 @@ class TargetGroupsRepository(private val context: Context) {
      * claimed by another group, or the whole group when fewer than two members survived).
      */
     suspend fun upsertGroup(group: TargetGroup): UpsertResult {
+        if (isStrictAutomationActive(strictAutomationActive)) return UpsertResult(saved = false)
         val now = System.currentTimeMillis()
         val candidate = group.copy(updatedAt = if (group.updatedAt > 0L) group.updatedAt else now)
         val candidateId = candidate.groupId.trim()
@@ -229,6 +233,7 @@ class TargetGroupsRepository(private val context: Context) {
      * Returns false when the DataStore write failed (the group is still there).
      */
     suspend fun removeGroup(groupId: String): Boolean {
+        if (isStrictAutomationActive(strictAutomationActive)) return false
         val now = System.currentTimeMillis()
         var written: List<TargetGroup>? = null
         val committed = editGroups { prefs ->

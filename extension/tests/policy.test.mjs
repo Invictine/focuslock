@@ -40,11 +40,20 @@ assert.equal(policy.effectiveBalance(funded), 0, 'local spend exhausts the synce
 assert.equal(policy.verdict('https://youtube.com/', funded, monday0130).mode, 'earned-time');
 assert.equal(policy.isLeisure('https://youtube.com/', funded, monday0130), false);
 
-// Strict commitment takes precedence over positive credits and saved snoozes.
+// Strict commitments lock boundary edits but do not change browsing policy.
 const strict = state({ strictMode: true, strictEndsAt: monday0130 + 60_000,
   snoozes: { 'youtube.com': monday0130 + 60_000 } });
-assert.equal(policy.verdict('https://youtube.com/', strict, monday0130).reason, 'strict');
-assert.equal(policy.isLeisure('https://youtube.com/', strict, monday0130), false);
+assert.equal(policy.verdict('https://youtube.com/', strict, monday0130), null,
+  'Strict Mode does not block an otherwise funded boundary or cancel its snooze');
+assert.equal(policy.isLeisure('https://youtube.com/', strict, monday0130), false,
+  'Snoozed time is not counted as leisure usage');
+const strictNoCredit = state({ strictMode: true, strictEndsAt: monday0130 + 60_000,
+  cloudPolicy: { state: { creditBalanceSeconds: 0 }, groups: [], limits: [], schedules: [] } });
+assert.equal(policy.verdict('https://youtube.com/', strictNoCredit, monday0130).mode, 'earned-time',
+  'Strict Mode preserves the ordinary zero-credit block');
+strictNoCredit.snoozes['youtube.com'] = monday0130 + 60_000;
+assert.equal(policy.verdict('https://youtube.com/', strictNoCredit, monday0130), null,
+  'A snooze can pause an actual zero-credit block during Strict Mode');
 
 // A snooze permits an otherwise selected site without making it a leisure session.
 const snoozed = state({ snoozes: { 'youtube.com': monday0130 + 60_000 } });
@@ -61,6 +70,10 @@ const overnight = state({ cloudPolicy: {
     targetKey: 'youtube.com', days: [0], startMinute: 23 * 60, endMinute: 2 * 60, isEnabled: true }],
 } });
 assert.equal(policy.verdict('https://youtube.com/', overnight, monday0130).reason, 'schedule');
+overnight.strictMode = true;
+overnight.strictEndsAt = monday0130 + 60_000;
+assert.equal(policy.verdict('https://youtube.com/', overnight, monday0130).reason, 'schedule',
+  'Strict Mode leaves an active schedule block intact');
 
 // Merged usage includes app + synced website seconds, then only the local site
 // delta since the summary baseline. Overlapping member domains never double count.
@@ -101,6 +114,10 @@ const targetLimit = state({
   stats: { [today]: { 'youtube.com': 15 } },
 });
 assert.equal(policy.verdict('https://youtube.com/', targetLimit, monday0130).reason, 'limit');
+targetLimit.strictMode = true;
+targetLimit.strictEndsAt = monday0130 + 60_000;
+assert.equal(policy.verdict('https://youtube.com/', targetLimit, monday0130).reason, 'limit',
+  'Strict Mode leaves an exhausted target limit intact');
 
 // Blocked-now is an explicit boundary flag even with no daily cap configured.
 const blockedNowLimit = state({ cloudSites: [], cloudPolicy: {

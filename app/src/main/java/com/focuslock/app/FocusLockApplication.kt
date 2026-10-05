@@ -71,14 +71,17 @@ class FocusLockApplication : Application() {
         super.onCreate()
         instance = this
         creditBankRepository = CreditBankRepository(applicationContext)
-        settingsRepository = SettingsRepository(applicationContext)
-        appLimitsRepository = AppLimitsRepository(applicationContext)
-        blockSchedulesRepository = BlockSchedulesRepository(applicationContext)
+        strictModeAutomationRepository = StrictModeAutomationRepository(applicationContext)
+        val strictActivationActive: suspend () -> Boolean = {
+            settingsRepository.isLockdownModeEnabled() || strictModeAutomationRepository.isActivationActiveNow()
+        }
+        settingsRepository = SettingsRepository(applicationContext, strictActivationActive)
+        appLimitsRepository = AppLimitsRepository(applicationContext, strictActivationActive)
+        blockSchedulesRepository = BlockSchedulesRepository(applicationContext, strictActivationActive)
         blockLogRepository = BlockLogRepository(applicationContext)
         frogRepository = FrogRepository(applicationContext)
-        targetGroupsRepository = TargetGroupsRepository(applicationContext)
-        strictModeAutomationRepository = StrictModeAutomationRepository(applicationContext)
-        homeLocationRepository = HomeLocationRepository(applicationContext)
+        targetGroupsRepository = TargetGroupsRepository(applicationContext, strictActivationActive)
+        homeLocationRepository = HomeLocationRepository(applicationContext, strictActivationActive = strictActivationActive)
         permanentBlocksRepository = PermanentBlocksRepository(applicationContext)
         syncManager = FocusSyncManager(
             applicationContext,

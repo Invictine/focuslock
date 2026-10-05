@@ -1,7 +1,7 @@
 import { mutation, query, type QueryCtx } from "./_generated/server";
 import { v } from "convex/values";
 import { loadUsageSummary, loadKnownTargets } from "./usage";
-import { applyCollectionDiff, validateCollection, validateUpdatedAt } from "./storageDiff";
+import { applyCollectionDiff, guardStrictBoundaryChanges, validateCollection, validateUpdatedAt } from "./storageDiff";
 
 async function requireUserId(ctx: any): Promise<string> {
   const identity = await ctx.auth.getUserIdentity();
@@ -209,13 +209,7 @@ export const saveBlockedApps = mutation({
       .collect();
     const storedVersion = Math.max(version?.updatedAt ?? 0, ...existing.map((row) => row.updatedAt ?? 0));
     if (args.updatedAt < storedVersion) return { applied: false, updatedAt: storedVersion };
-    const prefs = await ctx.db.query("userPrefs")
-      .withIndex("by_user", (q) => q.eq("userId", userId)).first();
-    if (prefs?.strictMode && (prefs.strictEndsAt ?? 0) > Date.now() &&
-        existing.some((app) => app.isBlocked &&
-          !args.apps.some((incoming) => incoming.packageName === app.packageName && incoming.isBlocked))) {
-      throw new Error("Blocked apps cannot be removed during Strict Mode");
-    }
+    await guardStrictBoundaryChanges(ctx, userId, existing, args.apps, (app) => [app.packageName]);
     const effectiveClock = Math.max(args.updatedAt, storedVersion + 1);
     const changedRows = await applyCollectionDiff(ctx, "blockedApps", userId, existing, args.apps,
       (app) => [app.packageName], effectiveClock);
@@ -251,13 +245,7 @@ export const saveBlockedWebsites = mutation({
       .collect();
     const storedVersion = Math.max(version?.updatedAt ?? 0, ...existing.map((row) => row.updatedAt ?? 0));
     if (args.updatedAt < storedVersion) return { applied: false, updatedAt: storedVersion };
-    const prefs = await ctx.db.query("userPrefs")
-      .withIndex("by_user", (q) => q.eq("userId", userId)).first();
-    if (prefs?.strictMode && (prefs.strictEndsAt ?? 0) > Date.now() &&
-        existing.some((site) => site.isBlocked &&
-          !args.sites.some((incoming) => incoming.domain === site.domain && incoming.isBlocked))) {
-      throw new Error("Blocked websites cannot be removed during Strict Mode");
-    }
+    await guardStrictBoundaryChanges(ctx, userId, existing, args.sites, (site) => [site.domain]);
     const effectiveClock = Math.max(args.updatedAt, storedVersion + 1);
     const changedRows = await applyCollectionDiff(ctx, "blockedWebsites", userId, existing, args.sites,
       (site) => [site.domain], effectiveClock);
@@ -381,13 +369,6 @@ export const setBlockedWebsite = mutation({
     if (existing && args.updatedAt < existing.updatedAt) {
       return { applied: false, updatedAt: existing.updatedAt };
     }
-    if (existing?.isBlocked && !args.isBlocked) {
-      const prefs = await ctx.db.query("userPrefs")
-        .withIndex("by_user", (q) => q.eq("userId", userId)).first();
-      if (prefs?.strictMode && (prefs.strictEndsAt ?? 0) > Date.now()) {
-        throw new Error("Blocked websites cannot be removed during Strict Mode");
-      }
-    }
     const site = {
       domain,
       displayName: args.displayName.trim() || domain,
@@ -396,6 +377,10 @@ export const setBlockedWebsite = mutation({
       isCustom: true,
       updatedAt,
     };
+    // The per-site API must enforce the same freeze as full collection writes.
+    // Preserve optional legacy fields when this API does not expose them.
+    const incoming = existing ? { ...existing, ...site } : site;
+    await guardStrictBoundaryChanges(ctx, userId, existing ? [existing] : [], [incoming], (row) => [row.domain]);
     if (existing) await ctx.db.patch(existing._id, site);
     else await ctx.db.insert("blockedWebsites", { ...site, userId });
     await setCollectionVersion(ctx, userId, "blockedWebsites", updatedAt);
@@ -610,6 +595,7 @@ export const saveAppLimits = mutation({
       .collect();
     const storedVersion = Math.max(version?.updatedAt ?? 0, ...existing.map((row) => row.updatedAt ?? 0));
     if (args.updatedAt < storedVersion) return { applied: false, updatedAt: storedVersion };
+    await guardStrictBoundaryChanges(ctx, userId, existing, args.limits, (limit) => [limit.targetKind, limit.targetKey]);
     const effectiveClock = Math.max(args.updatedAt, storedVersion + 1);
     const changedRows = await applyCollectionDiff(ctx, "appLimits", userId, existing, args.limits,
       (limit) => [limit.targetKind, limit.targetKey], effectiveClock);
@@ -648,6 +634,7 @@ export const saveSchedules = mutation({
       .collect();
     const storedVersion = Math.max(version?.updatedAt ?? 0, ...existing.map((row) => row.updatedAt ?? 0));
     if (args.updatedAt < storedVersion) return { applied: false, updatedAt: storedVersion };
+    await guardStrictBoundaryChanges(ctx, userId, existing, args.schedules, (schedule) => [schedule.scheduleId]);
     const effectiveClock = Math.max(args.updatedAt, storedVersion + 1);
     const changedRows = await applyCollectionDiff(ctx, "blockSchedules", userId, existing, args.schedules,
       (schedule) => [schedule.scheduleId], effectiveClock);
@@ -782,6 +769,9 @@ export const savePrefs = mutation({
       }
       // A commitment can be extended, but another client cannot end or shorten it.
       if (existing.strictMode && (existing.strictEndsAt ?? 0) > Date.now()) {
+        if (patch.globalDailyCapMinutes !== undefined && patch.globalDailyCapMinutes !== existing.globalDailyCapMinutes) {
+          throw new Error("Boundaries cannot change during Strict Mode");
+        }
         if (patch.strictMode === false ||
             (typeof patch.strictEndsAt === "number" && patch.strictEndsAt < existing.strictEndsAt!)) {
           throw new Error("Strict Mode is committed until its end time");

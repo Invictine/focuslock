@@ -5,10 +5,12 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.delay
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -57,6 +59,14 @@ class StrictModeAutomationRepository(private val context: Context) {
     val recurringWindowsFlow: Flow<List<StrictRecurringWindow>> = context.strictAutomationStore.data
         .map { decodeWindows(it[Keys.WINDOWS]) }
         .onEach { _windows.value = it; loaded = true }
+
+    /** Live lock state for boundary editors; access enforcement does not consume this. */
+    val activationActiveFlow: Flow<Boolean> = flow {
+        while (true) {
+            emit(isStrictAutomationActive { isActivationActiveNow() })
+            delay(15_000L)
+        }
+    }
 
     suspend fun upsertPlace(rule: StrictPlaceRule) {
         if (rule.id.isBlank()) return

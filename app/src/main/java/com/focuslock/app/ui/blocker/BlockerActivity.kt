@@ -69,20 +69,6 @@ class BlockerActivity : ComponentActivity() {
     private val frogWriteScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
-     * STRICT MODE policy (no direct unlock into the blocked app):
-     * - verifyTickTickWork(): gated on lockdownModeFlow and refused for
-     *   permanent blocks; they finish() only after credits are granted/banked.
-     * - ACTION_CREDIT_UPDATED broadcast: consumed while permanent/lockdown without finish().
-     * - Back press is intercepted; FLAG_SECURE hides the recents preview; the accessibility
-     *   monitor re-fires this screen whenever a blocked app foregrounds again.
-     * - Website blocks may leave via continueToChrome(): 90s domain suppression + finish(),
-     *   which returns the user to the browser already sitting behind this screen.
-     */
-
-    /** Main-thread cache of lockdownModeFlow for the synchronous back-press callback. */
-    @Volatile private var lockdownModeCached = false
-
-    /**
      * App name shown on the lock screen. Rendered synchronously from binder-free
      * sources (domain, process-wide label cache, package id) and replaced by the real
      * label once the async PackageManager lookup lands — never a PM call before first
@@ -108,10 +94,6 @@ class BlockerActivity : ComponentActivity() {
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
         )
 
-        // Keep the back-press gate in sync with the DataStore value.
-        lifecycleScope.launch {
-            FocusLockApplication.instance.settingsRepository.lockdownModeFlow.collect { lockdownModeCached = it }
-        }
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
                 // FROG HARD LOCK: back never leaves the lock screen — the user must tick
@@ -120,12 +102,6 @@ class BlockerActivity : ComponentActivity() {
                     Toast.makeText(
                         this@BlockerActivity,
                         "Finish your frog to unlock your phone.",
-                        Toast.LENGTH_SHORT
-                    ).show()
-                } else if (lockdownModeCached || blockReason == "strict") {
-                    Toast.makeText(
-                        this@BlockerActivity,
-                        "Lockdown mode: unlocking disabled.",
                         Toast.LENGTH_SHORT
                     ).show()
                 } else {
@@ -197,23 +173,19 @@ class BlockerActivity : ComponentActivity() {
                     .putLong(KEY_BLOCK_STARTED_AT, System.currentTimeMillis())
                     .apply()
                 if (balanceAtPreviousBlock != Long.MIN_VALUE && balanceNow > balanceAtPreviousBlock) {
-                    val lockdown = isStrictActive()
-                    if (!lockdown) {
-                        val earnedMinutes = ((balanceNow - balanceAtPreviousBlock) + 59) / 60
-                        Toast.makeText(
-                            this@BlockerActivity,
-                            "Unlocked! +$earnedMinutes min earned since the last block.",
-                            Toast.LENGTH_LONG
-                        ).show()
-                        finish()
-                    }
+                    val earnedMinutes = ((balanceNow - balanceAtPreviousBlock) + 59) / 60
+                    Toast.makeText(
+                        this@BlockerActivity,
+                        "Unlocked! +$earnedMinutes min earned since the last block.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    finish()
                 }
             }
         }
 
         // Broadcast listener for automatic unlock when user earns credits in TickTick
-        // while this screen is alive. STRICT MODE: the broadcast is consumed WITHOUT
-        // finish() — see policy above. (When the user leaves this screen the receiver is
+        // while this screen is alive. (When the user leaves this screen the receiver is
         // gone; the balance check above covers that window.)
         creditReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
@@ -237,15 +209,6 @@ class BlockerActivity : ComponentActivity() {
                         Toast.makeText(
                             this@BlockerActivity,
                             "Permanently blocked: credits saved, this app stays locked.",
-                            Toast.LENGTH_LONG
-                        ).show()
-                        return@launch
-                    }
-                    val lockdown = isStrictActive()
-                    if (lockdown) {
-                        Toast.makeText(
-                            this@BlockerActivity,
-                            "Lockdown mode: unlocking disabled. Credits saved for later.",
                             Toast.LENGTH_LONG
                         ).show()
                         return@launch
@@ -486,16 +449,6 @@ class BlockerActivity : ComponentActivity() {
                 return@launch
             }
             val settings = FocusLockApplication.instance.settingsRepository
-            // LOCKDOWN MODE gate: work-verify must NOT finish() the blocker. Earned
-            // credits stay banked for after Lockdown Mode is turned off.
-            if (isStrictActive()) {
-                Toast.makeText(
-                    this@BlockerActivity,
-                    "Lockdown mode: unlocking disabled. Credits saved for later.",
-                    Toast.LENGTH_LONG
-                ).show()
-                return@launch
-            }
             val bank = FocusLockApplication.instance.creditBankRepository
             val token = settings.tickTickTokenFlow.first()
 
@@ -532,11 +485,9 @@ class BlockerActivity : ComponentActivity() {
         }
     }
 
-    // NOTE (finish() audit): every finish() except goHome(), continueToChrome() and the
-    // frog-completion auto-dismiss is gated on lockdownModeFlow. The frog dismiss fires
-    // only once the frog is COMPLETE (ticked + required focus tracked). Both exceptions
-    // only reveal what is already behind this screen: goHome() backgrounds to the
-    // launcher, continueToChrome() returns to the browser after a 90s domain suppression.
+    // NOTE (finish() audit): frog-completion auto-dismiss fires only once the frog is
+    // COMPLETE (ticked + required focus tracked). goHome() backgrounds to the launcher,
+    // while continueToChrome() returns to the browser after a 90s domain suppression.
     // The accessibility monitor re-fires this screen when a blocked app foregrounds
     // again, so neither grants lasting app access.
     private fun goHome() {
@@ -555,7 +506,7 @@ class BlockerActivity : ComponentActivity() {
      */
     private fun continueToChrome(domain: String?) {
         // FROG HARD LOCK: no website escape while the frog is unfinished.
-        if (isFrogBlocked() || blockReason == "strict" || lockdownModeCached) return
+        if (isFrogBlocked()) return
         if (!domain.isNullOrBlank()) {
             AppMonitorAccessibilityService.suppressDomain(domain, 90_000L)
         }
@@ -564,10 +515,6 @@ class BlockerActivity : ComponentActivity() {
 
     /** True when the current block reason is the eat-the-frog hard lock. */
     private fun isFrogBlocked(): Boolean = blockReason == FrogCoordinator.REASON_FROG
-
-    private suspend fun isStrictActive(): Boolean = blockReason == "strict" ||
-        FocusLockApplication.instance.settingsRepository.isLockdownModeEnabled() ||
-        FocusLockApplication.instance.strictModeAutomationRepository.isActivationActiveNow()
 
     /**
      * Starts the blocker-side frog focus session. Open-ended stopwatch bounded by the

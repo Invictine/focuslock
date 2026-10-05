@@ -9,15 +9,14 @@
   if (!strictPanel || !frogPanel) return;
   strictPanel.innerHTML = `
     <section class="card"><div class="listhead"><h2>Strict Mode</h2><span class="badge" id="strictBadge">Off</span></div>
-      <p class="d" id="strictDescription">Commit to your boundaries. Credits and emergency pauses cannot bypass them until the end time.</p>
+      <p class="d" id="strictDescription">Commit to keeping your boundary rules unchanged until the end time. Existing rules keep enforcing as configured.</p>
       <p id="strictUntil" class="mut"></p>
       <div id="strictActivation">
         <div class="days" role="group" aria-label="Commitment duration"><button type="button" data-strict-choice="hours" class="on" aria-pressed="true">Hours</button><button type="button" data-strict-choice="days" aria-pressed="false">Days</button><button type="button" data-strict-choice="date" aria-pressed="false">End date</button></div>
         <div data-strict-input="hours"><label for="strictHours">Hours (1–720)</label><input id="strictHours" type="number" min="1" max="720" value="2"></div>
         <div data-strict-input="days" hidden><label for="strictDays">Days (1–30)</label><input id="strictDays" type="number" min="1" max="30" value="1"></div>
         <div data-strict-input="date" hidden><label for="strictDate">End at your local date and time</label><input id="strictDate" type="datetime-local"></div>
-        <label id="strictNukeLabel"><input id="strictNuke" type="checkbox"> Activate Nuclear after five blocked attempts</label>
-        <p class="mut">Selected websites and enabled Chrome lists stay blocked. Rules can only be changed after the commitment ends. A signed-in commitment syncs to your account.</p>
+        <p class="mut">Boundary rules can only be changed after the commitment ends or with the configured approval. A signed-in commitment syncs to your account.</p>
         <div class="btnrow"><button id="strictCommit" class="go" type="button">Start commitment</button></div>
       </div>
       <p id="strictSyncState" class="mut" role="status"></p>
@@ -79,7 +78,7 @@
     catch (error) { announce(error.message); return; }
     if (choice !== 'date' && (!Number.isInteger(number) || number < 1)) { announce('Choose a positive whole number.'); return; }
     if (!confirm(`Commit until ${new Date(end).toLocaleString()}? You can extend this time, but cannot shorten it yourself.`)) return;
-    void action($('strictCommit'), { type: 'strictCommit', endsAt: end, preset: choice, nukeAfterFive: $('strictNuke').checked }, result => {
+    void action($('strictCommit'), { type: 'strictCommit', endsAt: end, preset: choice }, result => {
       announce(result.localOnly ? 'Commitment active on Chrome only.' : result.synced ? 'Commitment active and synced.' : 'Commitment active on Chrome. Account sync is pending.');
     });
   };
@@ -119,7 +118,6 @@
     $('strictUntil').textContent = active ? (status.strictEndsAt ? `Committed until ${new Date(status.strictEndsAt).toLocaleString()}.` : 'An existing open-ended commitment is active.') : '';
     $('strictActivation').hidden = active && !status.strictEndsAt;
     $('strictCommit').textContent = active ? 'Extend commitment' : 'Start commitment';
-    $('strictNukeLabel').hidden = active;
     $('strictSyncState').textContent = status.strictPending ? 'Active on Chrome · sync waiting for the account that started this commitment.'
       : active && !status.strictOriginAccountId ? 'This commitment is Chrome-local. Sign in before starting your next commitment to share it.'
       : 'Offline enforcement uses saved commitments. Signed-in changes sync to the originating account.';
@@ -128,7 +126,7 @@
     $('guardianEmail').disabled = active;
     $('guardianRequest').hidden = !active;
     $('guardianRequest').disabled = busy || !status.strictSessionId || status.strictPending || !status.strictOriginAccountId || status.strictOriginAccountId !== status.accountId;
-    document.querySelectorAll('#strictWeeklyDays input, #strictWeeklyStart, #strictWeeklyEnd, #strictWeeklyEnabled, #strictWeeklySave').forEach(input => { input.disabled = active || busy; });
+    document.querySelectorAll('#strictWeeklyDays input, #strictWeeklyStart, #strictWeeklyEnd, #strictWeeklyEnabled, #strictWeeklySave').forEach(input => { input.disabled = busy; });
     $('strictWeeklyStatus').textContent = status.strictWeekly?.enabled ? 'Weekly activation enabled on this computer.' : 'No automatic weekly activation.';
     if (!document.querySelector('#strictPanel details[open]') && status.strictWeekly) {
       const rule = status.strictWeekly;

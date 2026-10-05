@@ -8,7 +8,7 @@
   const sharedNuke = mode === 'shared-nuke' || (mode === 'nuclear' && /shared nuclear/i.test(list));
   const permanent = mode === 'permanent' || (!mode && /permanent/i.test(list));
   const dailyCapBlock = ['group-limit', 'daily-limit', 'global-limit'].includes(mode);
-  const noSnooze = permanent || sharedNuke || dailyCapBlock || ['strict', 'schedule', 'frozen', 'frog', 'nuclear'].includes(mode)
+  const noSnooze = permanent || sharedNuke || dailyCapBlock || ['schedule', 'frozen', 'frog', 'nuclear'].includes(mode)
     || reason === 'frozen-lock' || reason.startsWith('schedule:');
   document.getElementById('blockedUrl').textContent = url;
   document.getElementById('listPill').textContent =
