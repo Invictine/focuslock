@@ -72,6 +72,11 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     private var foregroundWindowClass: String? = null
 
     @Volatile
+    private var lastPlayStoreWindowClass: String? = null
+
+    private val billingWindowTracker = FrogBillingWindowTracker()
+
+    @Volatile
     private var lastAccessibilityEventPackage: String? = null
 
     @Volatile
@@ -315,6 +320,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         out.println("  lastEvent package=${lastAccessibilityEventPackage ?: "unknown"} type=${eventTypeName(lastAccessibilityEventType)}($lastAccessibilityEventType) timeMs=${lastAccessibilityEventTimeMs.takeIf { it > 0L } ?: "unknown"}")
         out.println("  foregroundPackage=${currentForegroundPackage ?: "unknown"}")
         out.println("  foregroundWindowClass=${foregroundWindowClass ?: "unknown"}")
+        out.println("  lastPlayStoreWindowClass=${lastPlayStoreWindowClass ?: "unknown"}")
         out.println("  frog locked=$frogLocked phase=${frogStateCache?.phase} toolsConfirmed=${frogStateCache?.toolsConfirmed} allowedTools=${frogStateCache?.allowedToolPackages?.size ?: 0}")
         out.println("  serviceScope active=${scopeJob?.isActive == true} cancelled=${scopeJob?.isCancelled == true}")
         out.println("  jobs homeLocation=${homeLocationJob?.isActive == true} scheduleTicker=${scheduleTickerJob?.isActive == true} permissionReturn=${permissionReturnJob?.isActive == true} frogLock=${frogLockJob?.isActive == true} targetGroups=${targetGroupsJob?.isActive == true} permanentBlocks=${permanentBlocksJob?.isActive == true} permanentWebsites=${permanentWebsitesJob?.isActive == true} countdown=${countdownJob?.isActive == true} policyActivityRefresh=${policyActivityRefreshJob?.isActive == true} policyBoundary=${policyBoundaryJob?.isActive == true} tickTickSession=${tickTickSessionJob?.isActive == true} removalScan=${removalScanJob?.isActive == true}")
@@ -498,7 +504,13 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             repeat(5) {
                 if (currentForegroundPackage != null) return@launch
                 val root = rootInActiveWindow
-                val foreground = try { root?.packageName?.toString() }
+                val foreground = try {
+                    root?.packageName?.toString()?.also { packageName ->
+                        foregroundWindowClass = billingWindowTracker.observe(
+                            packageName, root.windowId, root.className?.toString(),
+                        )
+                    }
+                }
                 finally { @Suppress("DEPRECATION") root?.recycle() }
                 if (foreground != null) {
                     currentForegroundPackage = foreground
@@ -574,18 +586,19 @@ class AppMonitorAccessibilityService : AccessibilityService() {
 
         if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             val previousPackage = currentForegroundPackage
-            val windowClass = event.className?.toString()
+            val eventWindowClass = event.className?.toString()
+            val windowClass = billingWindowTracker.observe(eventPackage, event.windowId, eventWindowClass)
+            if (eventPackage == "com.android.vending") lastPlayStoreWindowClass = eventWindowClass
             if (eventPackage != previousPackage) {
                 currentForegroundPackage = eventPackage
                 foregroundWindowClass = windowClass
                 currentActiveWebsite = null
                 handleForegroundPackageChanged(eventPackage, previousPackage)
-            } else if (eventPackage == "com.android.vending" &&
-                windowClass?.startsWith("com.") == true && windowClass != foregroundWindowClass
+            } else if (eventPackage == "com.android.vending" && windowClass != foregroundWindowClass
             ) {
                 // Billing and store browsing share a package. Recheck actual activity
                 // changes so dismissing a purchase never leaves store browsing exempt.
-                // Generic view/dialog events don't replace the containing activity.
+                // Generic events retain an activity only within that exact window.
                 foregroundWindowClass = windowClass
                 handleForegroundPackageChanged(eventPackage, previousPackage)
             }
