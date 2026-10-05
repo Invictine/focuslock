@@ -18,6 +18,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
@@ -70,6 +71,8 @@ internal fun FrogFocusScreen(
     onFrogComplete: () -> Unit,
     onFrogEnded: () -> Unit = {},
     repository: FrogRepository = FocusLockApplication.instance.frogRepository,
+    returnAppLabel: String? = null,
+    onReturnToApp: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val state by repository.frogStateFlow.collectAsStateWithLifecycle(initialValue = null)
@@ -123,6 +126,14 @@ internal fun FrogFocusScreen(
                         FrogShortcutGrid(context, shortcuts)
                     }
                 }
+                if (returnAppLabel != null && onReturnToApp != null) {
+                    OutlinedButton(
+                        onClick = onReturnToApp,
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                    ) {
+                        Text("Return to $returnAppLabel", style = MaterialTheme.typography.titleMedium)
+                    }
+                }
                 Button(
                     onClick = onOpenFocusLock,
                     modifier = Modifier.fillMaxWidth().heightIn(min = 58.dp),
@@ -151,8 +162,12 @@ private fun FrogShortcutGrid(context: Context, shortcuts: List<FrogShortcut>) {
                     if (intent == null) {
                         Toast.makeText(context, "${shortcut.label} is not installed yet.", Toast.LENGTH_SHORT).show()
                     } else {
-                        runCatching { context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                        runCatching {
+                            com.focuslock.app.service.AppRedirectRecovery.noteLaunch(shortcut.packageName)
+                            context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                        }
                             .onFailure {
+                                com.focuslock.app.service.AppRedirectRecovery.cancelLaunch(shortcut.packageName)
                                 Toast.makeText(context, "Couldn't open ${shortcut.label}. Try opening it from FocusLock.", Toast.LENGTH_SHORT).show()
                             }
                     }

@@ -77,6 +77,13 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     private val billingWindowTracker = FrogBillingWindowTracker()
 
     @Volatile
+    private var redirectCandidate: AppRedirectCandidate? = null
+    private val redirectAttemptLimiter = AppRedirectAttemptLimiter()
+    private var recoveringRedirect: AppRedirectCandidate? = null
+    private var lastExternalAppPackage: String? = null
+    private var restoredRedirect: AppRedirectCandidate? = null
+
+    @Volatile
     private var lastAccessibilityEventPackage: String? = null
 
     @Volatile
@@ -541,6 +548,16 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         ) return
 
         val eventPackage = event.packageName?.toString() ?: return
+        val restored = restoredRedirect
+        if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && restored != null &&
+            eventPackage == restored.targetPackage &&
+            SystemClock.elapsedRealtime() - restored.observedAtMs in 0..1_000L
+        ) {
+            val activePackage = activeWindowPackage()
+            // Back can finish before queued events from the closed destination arrive.
+            // Ignore only a demonstrably stale event; a real redirect is still checked.
+            if (activePackage != null && activePackage != eventPackage) return
+        }
         val isInstallerEvent = eventPackage in RemovalAttemptPolicy.installerPackages
         val isForegroundBrowserEvent = eventPackage in BROWSER_PACKAGES &&
             eventPackage == currentForegroundPackage
@@ -561,6 +578,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 if (previousPackage != null && previousPackage != eventPackage) {
                     currentForegroundPackage = eventPackage
                     foregroundWindowClass = null
+                    redirectCandidate = null
                     currentActiveWebsite = null
                     stopTrackingForPreviousPackage(previousPackage)
                 }
@@ -677,6 +695,24 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     }
 
     private fun handleForegroundPackageChanged(packageName: String, previousPackage: String?) {
+        // Keyboard/system chrome isn't the app that launched a redirect. Keep the
+        // last actual app through those overlays, but clear it on a launcher visit.
+        val transientWindow = packageName == "android" || packageName == "com.android.systemui" ||
+            packageName == resolveDefaultImePackage() || packageName == applicationContext.packageName
+        if (!transientWindow) {
+            if (FrogAppPolicy.isHome(this, packageName)) {
+                lastExternalAppPackage = null
+                redirectCandidate = null
+            } else if (previousPackage != packageName) {
+                if (previousPackage != null) {
+                    redirectCandidate = AppRedirectRecovery.candidate(
+                        lastExternalAppPackage ?: previousPackage, packageName,
+                        SystemClock.elapsedRealtime(), applicationContext.packageName,
+                    )
+                }
+                lastExternalAppPackage = packageName
+            }
+        }
         latestAppCheckTarget = packageName
         latestAppCheckDecision = "checking"
         // In-memory-only arm check (F1): a user who keeps the screen on across the wake
@@ -1561,6 +1597,9 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     private suspend fun triggerBlocker(blockedPackage: String, website: String? = null, reason: String? = null) {
         if (!FocusLockApplication.instance.homeLocationRepository.shouldEnforceNow(permanent = reason == "permanent")) return
         if (currentForegroundPackage != blockedPackage || !isScreenInteractive()) return
+        val candidate = redirectCandidate?.takeIf {
+            website == null && reason == FrogCoordinator.REASON_FROG && it.targetPackage == blockedPackage
+        }
         Log.w(TAG, "Lockout triggered for ${website ?: blockedPackage} (reason=${reason ?: "unknown"})")
         val intent = Intent(this, BlockerActivity::class.java).apply {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -1608,9 +1647,80 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 }
                 intent.putExtra(EXTRA_BLOCK_REASON, FrogCoordinator.REASON_FROG)
                 intent.removeExtra(BlockerActivity.EXTRA_BLOCKED_WEBSITE)
+                val sourceAllowed = candidate != null && candidate == redirectCandidate &&
+                    AppRedirectRecovery.canReturnTo(this@AppMonitorAccessibilityService, candidate.sourcePackage)
+                val nukeActive = try {
+                    FocusLockApplication.instance.settingsRepository.isNukeActive()
+                } catch (error: kotlinx.coroutines.CancellationException) {
+                    throw error
+                } catch (_: Exception) { true }
+                if (currentForegroundPackage != blockedPackage || activeWindowPackage() != blockedPackage) return@withContext
+                if (candidate != null && candidate == redirectCandidate &&
+                    AppRedirectPolicy.isEligible(
+                        candidate, currentForegroundPackage, SystemClock.elapsedRealtime(), sourceAllowed,
+                        frogLocked = state.locked, nukeActive = nukeActive, isWebsite = website != null,
+                    )
+                ) {
+                    if (recoveringRedirect?.targetPackage == blockedPackage) return@withContext
+                    // A direct package handoff is a recovery candidate, not permission
+                    // to use the destination. One Back preserves the source's screen.
+                    intent.putExtra(AppRedirectRecovery.EXTRA_RETURN_PACKAGE, candidate.sourcePackage)
+                    if (redirectAttemptLimiter.tryAcquire(candidate, SystemClock.elapsedRealtime()) &&
+                        performGlobalAction(GLOBAL_ACTION_BACK)
+                    ) {
+                        latestAppCheckDecision = "redirect_returning"
+                        recoveringRedirect = candidate
+                        try {
+                            repeat(5) {
+                                delay(100)
+                                if (!isScreenInteractive()) return@withContext
+                                val activePackage = activeWindowPackage()
+                                if (activePackage == candidate.sourcePackage) {
+                                    if (AppRedirectRecovery.canReturnTo(this@AppMonitorAccessibilityService, candidate.sourcePackage)) {
+                                        restoredRedirect = candidate.copy(observedAtMs = SystemClock.elapsedRealtime())
+                                        currentForegroundPackage = candidate.sourcePackage
+                                        foregroundWindowClass = null
+                                        currentActiveWebsite = null
+                                        lastExternalAppPackage = candidate.sourcePackage
+                                        redirectCandidate = null
+                                        handleForegroundPackageChanged(candidate.sourcePackage, blockedPackage)
+                                        latestAppCheckDecision = "redirect_returned"
+                                    }
+                                    return@withContext
+                                }
+                                if (activePackage != null && activePackage != blockedPackage) {
+                                    // A redirected activity may own a separate task, so
+                                    // Back lands on Home. Resume the permitted source
+                                    // once without clearing its in-app navigation.
+                                    if ((activePackage == applicationContext.packageName || FrogAppPolicy.isHome(this@AppMonitorAccessibilityService, activePackage)) &&
+                                        AppRedirectRecovery.canReturnTo(this@AppMonitorAccessibilityService, candidate.sourcePackage)
+                                    ) {
+                                        if (AppRedirectRecovery.launchResume(this@AppMonitorAccessibilityService, candidate.sourcePackage)) {
+                                            latestAppCheckDecision = "redirect_source_resuming"
+                                        }
+                                    }
+                                    return@withContext
+                                }
+                            }
+                        } finally {
+                            recoveringRedirect = null
+                        }
+                    }
+                    // A refused Back or repeated redirect gets an explicit clean-return
+                    // action. Never loop through Back/relaunch automatically.
+                    if (currentForegroundPackage != blockedPackage || activeWindowPackage() != blockedPackage) return@withContext
+                    latestAppCheckDecision = "redirect_return_available"
+                }
             }
             startActivity(intent)
         }
+    }
+
+    /** Main-thread check of the actual window, rather than a delayed event's package. */
+    private fun activeWindowPackage(): String? {
+        val root = runCatching { rootInActiveWindow }.getOrNull() ?: return null
+        return try { root.packageName?.toString() }
+        finally { if (canRecycleNodes) root.recycle() }
     }
 
     private suspend fun triggerNuke() {

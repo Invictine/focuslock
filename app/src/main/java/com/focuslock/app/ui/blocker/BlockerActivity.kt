@@ -24,6 +24,7 @@ import com.focuslock.app.FocusLockApplication
 import com.focuslock.app.data.model.TickTickWorkRecord
 import com.focuslock.app.data.model.WorkRecordSource
 import com.focuslock.app.service.AppMonitorAccessibilityService
+import com.focuslock.app.service.AppRedirectRecovery
 import com.focuslock.app.service.FrogCoordinator
 import com.focuslock.app.service.InstalledAppsRepository
 import com.focuslock.app.service.TickTickNotificationListener
@@ -88,6 +89,8 @@ class BlockerActivity : ComponentActivity() {
      * frame.
      */
     private val resolvedAppName = mutableStateOf("")
+    private val returnAppPackage = mutableStateOf<String?>(null)
+    private val returnAppLabel = mutableStateOf<String?>(null)
 
     // Current block target/reason, refreshed from the launch/new intent. Fields (not
     // onCreate locals) so a reused singleTask instance re-renders with the new reason
@@ -135,6 +138,7 @@ class BlockerActivity : ComponentActivity() {
         // "permanent" = always-block: no unlock paths are offered on this screen.
         // "frog" = eat-the-frog hard lock: no emergency/credit/verify escapes either.
         readBlockTargetFromIntent()
+        loadReturnAppFromIntent()
 
         // Revalidate the scope while the blocker is visible, including after a
         // permission change or leaving home. Keep the underlying commitment intact.
@@ -289,6 +293,8 @@ class BlockerActivity : ComponentActivity() {
                                 com.focuslock.app.service.FrogHomeLauncher.openRegularHome(this@BlockerActivity)
                                 finish()
                             },
+                            returnAppLabel = returnAppLabel.value,
+                            onReturnToApp = returnAppLabel.value?.let { { returnToPriorApp() } },
                         )
                     } else {
                         BlockerPresentation(
@@ -329,6 +335,7 @@ class BlockerActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         readBlockTargetFromIntent()
+        loadReturnAppFromIntent()
         // First-frame name from binder-free sources; the async label lookup follows.
         resolvedAppName.value = blockedWebsite ?: fastAppNameFromPackage(blockedPackage)
         val requestedPackage = blockedPackage
@@ -362,6 +369,59 @@ class BlockerActivity : ComponentActivity() {
             blockReason = "permanent"
         }
         if (isFrogBlocked()) com.focuslock.app.service.FrogHomeLauncher.captureFallback(this)
+    }
+
+    /** Exposes return navigation only for a currently allowed Frog source app. */
+    private fun loadReturnAppFromIntent() {
+        returnAppPackage.value = null
+        returnAppLabel.value = null
+        val requestedPackage = intent.getStringExtra(AppRedirectRecovery.EXTRA_RETURN_PACKAGE)
+            ?.takeIf { it.isNotBlank() }
+        if (!isFrogBlocked() || blockedWebsite != null || requestedPackage == null) return
+        lifecycleScope.launch {
+            val eligible = try {
+                AppRedirectRecovery.canReturnTo(this@BlockerActivity, requestedPackage)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                false
+            }
+            if (!eligible || !isFrogBlocked() || blockedWebsite != null ||
+                intent.getStringExtra(AppRedirectRecovery.EXTRA_RETURN_PACKAGE) != requestedPackage
+            ) return@launch
+            val label = withContext(Dispatchers.IO) {
+                InstalledAppsRepository.getAppLabel(applicationContext, requestedPackage)
+            }
+            if (isFrogBlocked() && blockedWebsite == null &&
+                intent.getStringExtra(AppRedirectRecovery.EXTRA_RETURN_PACKAGE) == requestedPackage
+            ) {
+                returnAppPackage.value = requestedPackage
+                returnAppLabel.value = label.takeIf { it.isNotBlank() && it != requestedPackage } ?: requestedPackage
+            }
+        }
+    }
+
+    private fun returnToPriorApp() {
+        val requestedPackage = returnAppPackage.value ?: return
+        if (!isFrogBlocked() || blockedWebsite != null) return
+        lifecycleScope.launch {
+            try {
+                if (!AppRedirectRecovery.canReturnTo(this@BlockerActivity, requestedPackage) ||
+                    !isFrogBlocked() || blockedWebsite != null || returnAppPackage.value != requestedPackage
+                ) {
+                    return@launch
+                }
+                if (AppRedirectRecovery.launchClean(this@BlockerActivity, requestedPackage)) {
+                    finish()
+                } else {
+                    Toast.makeText(this@BlockerActivity, "Couldn't return to that app.", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                Toast.makeText(this@BlockerActivity, "Couldn't return to that app.", Toast.LENGTH_SHORT).show()
+            }
+        }
     }
 
     /** True when the current block reason is the permanent (always-block) reason. */
