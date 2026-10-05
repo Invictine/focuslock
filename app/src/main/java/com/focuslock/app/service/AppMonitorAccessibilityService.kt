@@ -69,6 +69,9 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     private var currentForegroundPackage: String? = null
 
     @Volatile
+    private var foregroundWindowClass: String? = null
+
+    @Volatile
     private var lastAccessibilityEventPackage: String? = null
 
     @Volatile
@@ -311,6 +314,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         out.println("FocusLock AppMonitorAccessibilityService diagnostics:")
         out.println("  lastEvent package=${lastAccessibilityEventPackage ?: "unknown"} type=${eventTypeName(lastAccessibilityEventType)}($lastAccessibilityEventType) timeMs=${lastAccessibilityEventTimeMs.takeIf { it > 0L } ?: "unknown"}")
         out.println("  foregroundPackage=${currentForegroundPackage ?: "unknown"}")
+        out.println("  foregroundWindowClass=${foregroundWindowClass ?: "unknown"}")
         out.println("  frog locked=$frogLocked phase=${frogStateCache?.phase} toolsConfirmed=${frogStateCache?.toolsConfirmed} allowedTools=${frogStateCache?.allowedToolPackages?.size ?: 0}")
         out.println("  serviceScope active=${scopeJob?.isActive == true} cancelled=${scopeJob?.isCancelled == true}")
         out.println("  jobs homeLocation=${homeLocationJob?.isActive == true} scheduleTicker=${scheduleTickerJob?.isActive == true} permissionReturn=${permissionReturnJob?.isActive == true} frogLock=${frogLockJob?.isActive == true} targetGroups=${targetGroupsJob?.isActive == true} permanentBlocks=${permanentBlocksJob?.isActive == true} permanentWebsites=${permanentWebsitesJob?.isActive == true} countdown=${countdownJob?.isActive == true} policyActivityRefresh=${policyActivityRefreshJob?.isActive == true} policyBoundary=${policyBoundaryJob?.isActive == true} tickTickSession=${tickTickSessionJob?.isActive == true} removalScan=${removalScanJob?.isActive == true}")
@@ -544,6 +548,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 val previousPackage = currentForegroundPackage
                 if (previousPackage != null && previousPackage != eventPackage) {
                     currentForegroundPackage = eventPackage
+                    foregroundWindowClass = null
                     currentActiveWebsite = null
                     stopTrackingForPreviousPackage(previousPackage)
                 }
@@ -569,9 +574,19 @@ class AppMonitorAccessibilityService : AccessibilityService() {
 
         if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             val previousPackage = currentForegroundPackage
+            val windowClass = event.className?.toString()
             if (eventPackage != previousPackage) {
                 currentForegroundPackage = eventPackage
+                foregroundWindowClass = windowClass
                 currentActiveWebsite = null
+                handleForegroundPackageChanged(eventPackage, previousPackage)
+            } else if (eventPackage == "com.android.vending" &&
+                windowClass?.startsWith("com.") == true && windowClass != foregroundWindowClass
+            ) {
+                // Billing and store browsing share a package. Recheck actual activity
+                // changes so dismissing a purchase never leaves store browsing exempt.
+                // Generic view/dialog events don't replace the containing activity.
+                foregroundWindowClass = windowClass
                 handleForegroundPackageChanged(eventPackage, previousPackage)
             }
         }
@@ -713,6 +728,10 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             }
 
             if (isFrogLockActive()) {
+                if (FrogBillingPolicy.isBillingWindow(packageName, foregroundWindowClass)) {
+                    latestAppCheckDecision = "frog_billing_allowed"
+                    return@launch
+                }
                 val state = frogStateCache
                 if (state != null && FrogAppPolicy.shouldShowFocusScreen(this@AppMonitorAccessibilityService, packageName, state)) {
                     latestAppCheckDecision = "frog"
@@ -1550,6 +1569,12 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             // Apply the current policy at the actual launch boundary as well.
             val enforceFrog = reason != "permanent" && (reason == FrogCoordinator.REASON_FROG || isFrogLockActive())
             if (enforceFrog) {
+                // TickTick's pending purchase resumes inside the Play Store package.
+                // Permit only its billing activity; permanent/Nuke rules still win.
+                if (FrogBillingPolicy.isBillingWindow(blockedPackage, foregroundWindowClass)) {
+                    latestAppCheckDecision = "frog_billing_allowed"
+                    return@withContext
+                }
                 val state = frogStateCache
                 if (state == null || !FrogAppPolicy.shouldShowFocusScreen(this@AppMonitorAccessibilityService, blockedPackage, state)) {
                     latestAppCheckDecision = "frog_stale_policy"
