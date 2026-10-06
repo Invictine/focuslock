@@ -53,8 +53,15 @@ native acceptance testing.
   show its own unsaved-work confirmation; another close attempt gets a new
   60-second repair period rather than leaving the countdown at zero.
 - **Open extension settings** restarts its repair period and opens the affected
-  browser's management page, even after the previous window has closed.
-  If the browser selects another profile, switch to the affected profile before
+  browser's management page in a dedicated window, even after the previous
+  window has closed. It selects the last-used regular profile (or the last
+  active regular profile when Guest was used) to avoid the profile picker.
+  Chromium discards internal settings URLs passed on its command line, so the
+  launcher navigates its newly created blank window through the address bar.
+  It checks window identity and keyboard focus before entering the URL and
+  reports an error if the new window cannot be identified or focused.
+  Guest profiles cannot install extensions. If the selected regular profile
+  differs from the affected profile, switch to the affected profile before
   enabling the extension. Give it the required permissions and return to your
   browsing tab so the desktop can verify the connection.
 - Tracking cannot be paused while browser protection is required. Adding

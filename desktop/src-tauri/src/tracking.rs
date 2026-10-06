@@ -963,7 +963,7 @@ pub fn set_browser_protection_enabled(
 }
 
 #[tauri::command]
-pub fn open_browser_extension_settings(
+pub async fn open_browser_extension_settings(
     app_id: Option<String>,
     repair: State<'_, BrowserRepairRuntime>,
     state: State<'_, TrackerRuntime>,
@@ -979,18 +979,22 @@ pub fn open_browser_extension_settings(
     if !crate::browser_bridge::supported_browser(&target) {
         return Err("Use Chrome, Edge, Brave, Vivaldi, Opera, or Arc with the FocusLock extension.".into());
     }
-    let observed = get_running_windows().unwrap_or_default().into_iter()
-        .find(|window| window.app_id.eq_ignore_ascii_case(&target))
-        .and_then(|window| window.executable_path)
-        .or_else(|| state.browser_paths.lock().ok().and_then(|paths| paths.get(&target).cloned()));
-    let path = crate::browser_launch::resolve_executable(&target, observed.as_deref())
-        .ok_or("Could not locate the installed browser. Open its extensions page manually.")?;
-    // Reserve a fresh repair cycle before opening Chrome, including if its old
-    // window has just closed. The tracker consumes this before its next check.
-    state.browser_repair_resets.lock().map_err(|_| "Browser repair lock failed")?.push(target.clone());
-    std::process::Command::new(path).arg(crate::browser_launch::extensions_url(&target))
-        .spawn().map_err(|error| format!("Could not open extension settings: {error}"))?;
-    Ok(())
+    let browser_paths = state.browser_paths.clone();
+    let repair_resets = state.browser_repair_resets.clone();
+    // Window discovery and browser startup can take several seconds. Keep the
+    // webview responsive while the launcher waits for its dedicated window.
+    tauri::async_runtime::spawn_blocking(move || {
+        let observed = get_running_windows().unwrap_or_default().into_iter()
+            .find(|window| window.app_id.eq_ignore_ascii_case(&target))
+            .and_then(|window| window.executable_path)
+            .or_else(|| browser_paths.lock().ok().and_then(|paths| paths.get(&target).cloned()));
+        let path = crate::browser_launch::resolve_executable(&target, observed.as_deref())
+            .ok_or("Could not locate the installed browser. Open its extensions page manually.")?;
+        // Reserve a fresh repair cycle before opening Chrome, including if its old
+        // window has just closed. The tracker consumes this before its next check.
+        repair_resets.lock().map_err(|_| "Browser repair lock failed")?.push(target.clone());
+        crate::browser_launch::launch_extensions_page(&path, &target)
+    }).await.map_err(|error| format!("Could not open extension settings: {error}"))?
 }
 
 #[tauri::command]
