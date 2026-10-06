@@ -38,6 +38,8 @@ struct HostMessage {
 struct ExtensionWindow {
     id: i32,
     title: String,
+    #[serde(default)]
+    incognito: bool,
     left: i32,
     top: i32,
     width: i32,
@@ -226,7 +228,6 @@ pub fn read_window_health(
         if lease.browser_pid == pid
             && lease.app_id.eq_ignore_ascii_case(app_id)
             && lease.all_urls
-            && lease.incognito_allowed
             && !lease.window_handles.is_empty()
             && lease.window_handles.len() <= MAX_WINDOWS
             && age.is_some_and(|age| age <= LEASE_TTL_MS)
@@ -440,6 +441,10 @@ fn valid_message(message: &HostMessage) -> bool {
         })
 }
 
+fn should_attest_window(window: &ExtensionWindow, incognito_allowed: bool) -> bool {
+    !window.incognito || incognito_allowed
+}
+
 fn parse_message_payload(bytes: &[u8]) -> Result<HostMessage, serde_json::Error> {
     serde_json::from_slice(bytes)
 }
@@ -450,6 +455,9 @@ fn resolve_lease(message: &HostMessage, browser: &(u32, String)) -> Option<Brows
     let windows = platform::visible_windows(*browser_pid);
     let mut matched_counts = std::collections::HashMap::new();
     for reported in &message.windows {
+        if !should_attest_window(reported, message.incognito_allowed) {
+            continue;
+        }
         let candidates: Vec<_> = windows
             .iter()
             .filter(|native| window_matches(reported, native))
@@ -723,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn health_requires_fresh_exact_browser_window_and_permissions() {
+    fn health_requires_fresh_exact_browser_window_and_all_urls_permission() {
         let temp = tempdir().unwrap();
         let dir = temp.path().join("browser-leases");
         fs::create_dir_all(&dir).unwrap();
@@ -789,7 +797,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        assert!(!read_window_health(
+        assert!(read_window_health(
             temp.path(),
             44,
             123,
@@ -848,6 +856,7 @@ mod tests {
             windows: vec![ExtensionWindow {
                 id: 1,
                 title: "Example".into(),
+                incognito: false,
                 left: 0,
                 top: 0,
                 width: 100,
@@ -864,6 +873,31 @@ mod tests {
         let mut oversized_title = base;
         oversized_title.windows[0].title = "x".repeat(MAX_TITLE_CHARS + 1);
         assert!(!valid_message(&oversized_title));
+    }
+
+    #[test]
+    fn incognito_windows_are_attested_only_when_incognito_access_is_allowed() {
+        let normal = ExtensionWindow {
+            id: 1,
+            title: "Normal".into(),
+            incognito: false,
+            left: 0,
+            top: 0,
+            width: 100,
+            height: 100,
+        };
+        let incognito = ExtensionWindow {
+            incognito: true,
+            ..normal.clone()
+        };
+        assert!(should_attest_window(&normal, false));
+        assert!(!should_attest_window(&incognito, false));
+        assert!(should_attest_window(&incognito, true));
+        let legacy: ExtensionWindow = serde_json::from_str(
+            r#"{"id":1,"title":"Legacy","left":0,"top":0,"width":100,"height":100}"#,
+        )
+        .unwrap();
+        assert!(!legacy.incognito);
     }
 
     #[test]

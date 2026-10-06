@@ -113,6 +113,7 @@ type NativeStatus = {
   current?: NativeCurrent;
   lastError?: string | null;
   browserProtectionRequired?: boolean;
+  browserProtectionEnabled?: boolean;
   browserProtection?: { browser: string; healthy: boolean; graceRemainingSeconds: number; reason?: string | null } | null;
 };
 
@@ -1695,15 +1696,19 @@ function DesktopApp() {
     [],
   );
   useEffect(() => {
-    if (!tauriAvailable() || !dashboard) return;
-    const policy = browserProtectionPolicy(dashboard, groups || [], Boolean(frogLock?.locked));
+    if (!tauriAvailable()) return;
+    // Never leave a stale required policy behind after sign-out or while the
+    // account dashboard is unavailable.
+    const policy = auth.user && dashboard
+      ? browserProtectionPolicy(dashboard, groups || [], Boolean(frogLock?.locked))
+      : { required: false, lockedUntilMs: 0 };
     const json = JSON.stringify(policy);
     if (json === browserPolicyJsonRef.current) return;
     browserPolicyJsonRef.current = json;
     invoke("set_browser_protection_policy", policy).catch(() => {
       if (browserPolicyJsonRef.current === json) browserPolicyJsonRef.current = "";
     });
-  }, [dashboard, groups, frogLock]);
+  }, [auth.user, dashboard, groups, frogLock]);
   // Main-window navigation from Rust: `focuslock://navigate` { view: "home" }
   // switches back to the Focus (Home) tab — used by the blocker's "Eat the frog
   // now" action.
@@ -4849,6 +4854,7 @@ function SettingsPage({
   onSyncNow,
 }: any) {
   const [busy, setBusy] = useState(false);
+  const [browserProtectionBusy, setBrowserProtectionBusy] = useState(false);
   const [trackerNotice, setTrackerNotice] = useState<string | null>(null);
   const auth = useFocusAuth();
   const running = Boolean(snapshot?.running);
@@ -5027,16 +5033,48 @@ function SettingsPage({
         <SettingRow
           icon="shield"
           title="Browser extension protection"
-          detail="Website rules are enforced by the extension. FocusLock checks that it is connected and gives 60 seconds to install or enable it before closing the affected browser. Allow it on all websites and in incognito."
+          detail={auth.user
+            ? "Optional website-rule protection. When enabled, FocusLock checks the extension connection and closes the affected browser window after a 60-second grace period if it stays unavailable. Allow access to all websites; incognito access is optional."
+            : status?.browserProtectionEnabled
+              ? "Protection is paused until you sign in. You can turn it off here."
+              : "Sign in to enable optional browser extension protection."}
         >
-          <span className="setting-value" role="status">
-            {!status?.browserProtectionRequired ? "Waiting for website rules" :
-              !status.browserProtection ? "Waiting for browser" :
-              status.browserProtection.healthy ? `${status.browserProtection.browser} · Connected` :
-              status.browserProtection.reason === "browser_unsupported" ? "Use a supported browser" :
-              status.browserProtection.graceRemainingSeconds > 0 ? `Enable extension · ${status.browserProtection.graceRemainingSeconds}s` :
-              "Browser closes if extension stays unavailable"}
-          </span>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span className="setting-value" role="status">
+              {!status?.browserProtectionEnabled ? "Off" :
+                !auth.user ? "On · paused until sign-in" :
+                !status.browserProtectionRequired ? "On · no website rules to monitor" :
+                !status.browserProtection ? "On · checking browser" :
+                status.browserProtection.healthy ? `${status.browserProtection.browser} · Connected` :
+                status.browserProtection.reason === "browser_unsupported" ? "Supported browser unavailable" :
+                status.browserProtection.graceRemainingSeconds > 0 ? `Connection unavailable · ${status.browserProtection.graceRemainingSeconds}s` :
+                "Connection unavailable"}
+            </span>
+            <button
+              className={`switch ${status?.browserProtectionEnabled ? "on" : ""}`}
+              type="button"
+              role="switch"
+              aria-label="Browser extension protection"
+              aria-checked={Boolean(status?.browserProtectionEnabled)}
+              disabled={browserProtectionBusy || (!auth.user && !status?.browserProtectionEnabled)}
+              onClick={async () => {
+                if (browserProtectionBusy || !tauriAvailable()) return;
+                const enabled = !status?.browserProtectionEnabled;
+                if (enabled && !auth.user) return;
+                setBrowserProtectionBusy(true);
+                try {
+                  await invoke<boolean>("set_browser_protection_enabled", { enabled });
+                  await refresh();
+                } catch (error) {
+                  setTrackerNotice(`Could not update browser protection: ${String(error)}`);
+                } finally {
+                  setBrowserProtectionBusy(false);
+                }
+              }}
+            >
+              <span />
+            </button>
+          </div>
         </SettingRow>
         <SettingRow
           icon="clock"

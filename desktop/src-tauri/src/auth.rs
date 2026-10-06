@@ -76,6 +76,11 @@ pub struct BrowserAuthRuntime {
 }
 
 impl BrowserAuthRuntime {
+    pub fn is_signed_in(&self) -> bool {
+        self.session.lock().map(|session| session.as_ref()
+            .is_some_and(|value| !value.refresh_token.is_empty())).unwrap_or(false)
+    }
+
     pub fn load(path: PathBuf) -> Self {
         let session = fs::read_to_string(&path)
             .ok()

@@ -6,11 +6,12 @@ extension is available; it does not cover websites with a second blocker.
 Explicit application boundaries, including a browser executable selected as an
 app, still use the native app blocker.
 
-The companion check runs while website boundaries, website limits, or schedules
-require protection. Desktop Eat the Frog is temporarily disabled and does not
-activate the companion check. Rules and an active Strict Mode deadline persist
-in the desktop activity store. The local check needs no cloud heartbeat or
-account sign-in.
+The companion check is optional and defaults to off, including on upgrades.
+It runs only while signed in, enabled in Settings, and website boundaries,
+limits, or schedules require protection. Desktop Eat the Frog is temporarily
+disabled and does not activate the check. Strict Mode freezes boundary edits;
+it does not force this checker on. Signing out pauses it without a cloud
+heartbeat, and turning it off clears the repair notice.
 
 ## Setup
 
@@ -18,10 +19,10 @@ account sign-in.
    updated desktop app. It registers the current user's
    `com.focuslock.browser` native messaging host on startup.
 2. Install or enable FocusLock in each browser profile you use.
-3. Give it access to all websites and enable **Allow in incognito** (or the
-   browser's equivalent).
-4. Settings → Windows tracking → Browser extension protection shows the most
-   recently used browser's connection state.
+3. Give it access to all websites. **Allow in incognito** is optional for
+   normal windows; enable it if you want the extension in incognito windows.
+4. Sign in and enable Settings → Windows tracking → Browser extension
+   protection. The switch shows the current browser connection state.
 
 Chrome, Edge, Brave, Vivaldi, Opera/Opera GX, and Arc use the Chromium bridge.
 Firefox has no FocusLock extension yet, so its warning asks you to use a
@@ -40,23 +41,27 @@ native acceptance testing.
   60 seconds to install or enable the extension. The notice leaves the browser
   usable. Extension settings and browser settings remain available.
 - The countdown continues when another app takes focus. Switching windows,
-  profiles, or processes does not renew an unresolved browser deadline.
-  Closing the notice does not cancel the countdown.
+  profiles, or processes does not reset an existing window's countdown. A
+  newly opened window gets its own full 60 seconds. Closing the notice does
+  not cancel the countdown.
 - A valid extension connection cancels that window's pending close. A later
-  outage starts a fresh countdown after all outstanding windows of that browser
-  have recovered. Restoring one profile does not cancel another profile's close.
+  outage starts a fresh countdown for that window. Restoring one profile
+  does not cancel another profile's close.
 - At the deadline, FocusLock asks the affected browser window to close using
   Windows' normal close message, after checking its handle, PID, and executable.
   It does not terminate unrelated browser profiles or processes. A browser may
-  show its own unsaved-work confirmation; unresolved closes are retried.
-- **Open extension settings** opens the affected browser's management page.
+  show its own unsaved-work confirmation; another close attempt gets a new
+  60-second repair period rather than leaving the countdown at zero.
+- **Open extension settings** restarts its repair period and opens the affected
+  browser's management page, even after the previous window has closed.
   If the browser selects another profile, switch to the affected profile before
   enabling the extension. Give it the required permissions and return to your
   browsing tab so the desktop can verify the connection.
 - Tracking cannot be paused while browser protection is required. Adding
   website rules resumes a paused tracker. Closing the main window minimizes it
   while protection is active. Removing the rules outside a commitment restores
-  normal closing.
+  normal closing. Turning the optional checker off also restores normal
+  closing; active Strict Mode does not prevent disabling it.
 
 The repair notice is hidden using the same Windows visibility API that shows
 it, so recovery leaves no success dialog on screen. Its webview renders nothing
@@ -114,3 +119,6 @@ visibility check: the compact window was physically visible while repair was
 needed and no longer visible after recovery or browser closure. The recovered
 webview contained no success dialog. Checking only a null health/repair state
 is insufficient to verify that a native window has disappeared.
+
+These changes concern FocusLock's desktop host and browser companion only;
+the shared Void launcher has no checker or account flow to backport.

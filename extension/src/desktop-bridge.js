@@ -57,6 +57,7 @@
         const report = {
           id: Number(window.id),
           title: String(activeTab.title || '').slice(0, MAX_TITLE_LENGTH),
+          incognito: window.incognito === true,
           left: Number(window.left) || 0,
           top: Number(window.top) || 0,
           width: Number(window.width) || 0,

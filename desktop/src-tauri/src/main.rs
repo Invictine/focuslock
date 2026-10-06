@@ -5,6 +5,7 @@ mod auth;
 mod blocker;
 mod browser_bridge;
 mod browser_guard;
+mod browser_launch;
 mod browser_warning;
 mod tracking;
 mod windows_capture;
@@ -104,6 +105,7 @@ fn main() {
             tracking::get_running_apps,
             tracking::set_tracker_config,
             tracking::set_browser_protection_policy,
+            tracking::set_browser_protection_enabled,
             tracking::open_browser_extension_settings,
             browser_warning::get_browser_repair_state,
             tracking::set_blocked_targets,

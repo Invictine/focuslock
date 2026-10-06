@@ -355,6 +355,11 @@ struct TrackingStore {
     #[serde(default)]
     browser_protection_required: bool,
     #[serde(default)]
+    browser_protection_enabled: bool,
+    /// Revalidated from native auth on every tracker pass; never restored from disk.
+    #[serde(skip)]
+    browser_protection_signed_in: bool,
+    #[serde(default)]
     browser_protection_locked_until_ms: u64,
     usage: BTreeMap<String, UsageEntry>,
     /// Set by `record` when usage data changed; the worker persists only when
@@ -371,8 +376,8 @@ struct TrackingStore {
 
 impl TrackingStore {
     fn browser_protection_active(&self) -> bool {
-        self.browser_protection_required || !self.blocked_targets.domains.is_empty()
-            || self.browser_protection_locked_until_ms > now_ms()
+        self.browser_protection_enabled && self.browser_protection_signed_in
+            && self.browser_protection_required
     }
     fn new() -> Self {
         let name = std::env::var("COMPUTERNAME")
@@ -392,6 +397,8 @@ impl TrackingStore {
             blocked_reasons: HashMap::new(),
             permanent_targets: Vec::new(),
             browser_protection_required: false,
+            browser_protection_enabled: false,
+            browser_protection_signed_in: false,
             browser_protection_locked_until_ms: 0,
             usage: BTreeMap::new(),
             dirty: false,
@@ -467,6 +474,7 @@ pub struct TrackerStatus {
     pub current: Option<ActivityObservation>,
     pub last_error: Option<String>,
     pub browser_protection_required: bool,
+    pub browser_protection_enabled: bool,
     pub browser_protection: Option<BrowserProtectionStatus>,
 }
 
@@ -488,6 +496,8 @@ pub struct BrowserProtectionStatus {
 }
 
 pub struct TrackerRuntime {
+    browser_repair_resets: Arc<Mutex<Vec<String>>>,
+    browser_paths: Arc<Mutex<HashMap<String, String>>>,
     browser_protection: Arc<Mutex<Option<BrowserProtectionStatus>>>,
     running: Arc<AtomicBool>,
     store: Arc<Mutex<TrackingStore>>,
@@ -505,7 +515,7 @@ pub struct TrackerRuntime {
 
 impl TrackerRuntime {
     pub fn browser_protection_active(&self) -> bool {
-        self.store.lock().map(|s| s.browser_protection_active()).unwrap_or(true)
+        self.store.lock().map(|s| s.browser_protection_active()).unwrap_or(false)
     }
     pub fn load(store_path: PathBuf) -> Result<Self, String> {
         let store = load_store(&store_path)?;
@@ -514,6 +524,8 @@ impl TrackerRuntime {
             &store.blocked_reasons,
         ));
         Ok(Self {
+            browser_repair_resets: Arc::new(Mutex::new(Vec::new())),
+            browser_paths: Arc::new(Mutex::new(HashMap::new())),
             browser_protection: Arc::new(Mutex::new(None)),
             running: Arc::new(AtomicBool::new(false)),
             store: Arc::new(Mutex::new(store)),
@@ -537,6 +549,8 @@ impl TrackerRuntime {
         let store_path = self.store_path.clone();
         let matcher = self.matcher.clone();
         let browser_protection = self.browser_protection.clone();
+        let browser_repair_resets = self.browser_repair_resets.clone();
+        let browser_paths = self.browser_paths.clone();
         let repair_runtime = app.try_state::<BrowserRepairRuntime>().map(|state| state.inner().clone());
         let worker = thread::Builder::new()
             .name("focuslock-activity-tracker".into())
@@ -548,11 +562,30 @@ impl TrackerRuntime {
                 let lease_dir = store_path.parent().unwrap_or(Path::new(".")).to_path_buf();
                 let guard_started = std::time::Instant::now();
                 while running.load(Ordering::SeqCst) {
+                    let signed_in = app.try_state::<crate::auth::BrowserAuthRuntime>()
+                        .is_some_and(|auth| auth.is_signed_in());
                     let (config, device, protection_required) = match store.lock() {
-                        Ok(s) => (s.config.clone(), s.device.clone(), s.browser_protection_active()),
+                        Ok(mut s) => {
+                            s.browser_protection_signed_in = signed_in;
+                            (s.config.clone(), s.device.clone(), s.browser_protection_active())
+                        },
                         Err(_) => break,
                     };
                     let foreground = capture_foreground(config.capture_browser_domains);
+                    if let Ok(Some(window)) = &foreground {
+                        if crate::browser_guard::is_browser(&window.app_id) {
+                            if let Some(path) = &window.executable_path {
+                                if let Ok(mut paths) = browser_paths.lock() {
+                                    paths.insert(window.app_id.to_ascii_lowercase(), path.clone());
+                                }
+                            }
+                        }
+                    }
+                    if let Ok(mut resets) = browser_repair_resets.lock() {
+                        for app_id in resets.drain(..) {
+                            guard.reset_browser(&app_id, guard_started.elapsed().as_millis() as u64);
+                        }
+                    }
                     update_browser_repair_guard(
                         &app,
                         repair_runtime.as_ref(),
@@ -596,7 +629,7 @@ impl TrackerRuntime {
                                         checked_at_ms: now_ms(),
                                     });
                                 }
-                            } else if !protection_required {
+                            } else {
                                 if let Ok(mut status) = browser_protection.lock() { *status = None; }
                             }
                             // Explicit app blocks keep precedence (including Frog and permanent).
@@ -753,7 +786,9 @@ impl TrackerRuntime {
     }
     fn status(&self) -> TrackerStatus {
         let browser_protection_required = self.store.lock()
-            .map(|s| s.browser_protection_active()).unwrap_or(true);
+            .map(|s| s.browser_protection_active()).unwrap_or(false);
+        let browser_protection_enabled = self.store.lock()
+            .map(|s| s.browser_protection_enabled).unwrap_or(false);
         let enforcement_active = self
             .store
             .lock()
@@ -773,6 +808,7 @@ impl TrackerRuntime {
             current: self.current.lock().ok().and_then(|v| v.clone()),
             last_error: self.last_error.lock().ok().and_then(|v| v.clone()),
             browser_protection_required,
+            browser_protection_enabled,
             browser_protection,
         }
     }
@@ -882,18 +918,15 @@ pub fn stop_tracking(
 pub fn set_browser_protection_policy(
     app: AppHandle,
     required: bool,
-    locked_until_ms: u64,
+    locked_until_ms: Option<u64>,
     state: State<'_, TrackerRuntime>,
 ) -> Result<bool, String> {
     let mut store = state.store.lock().map_err(|_| "Tracking store lock was poisoned")?;
-    // An active commitment survives stale cloud refreshes and desktop restarts.
-    let locked = store.browser_protection_locked_until_ms > now_ms();
-    // The deadline itself retains protection; keeping `required=true` here
-    // would strand protection after expiry if no further cloud update arrives.
+    // Strict freezes boundary edits; it does not force this optional checker on.
+    let _ = locked_until_ms;
     store.browser_protection_required = required;
-    store.browser_protection_locked_until_ms = if locked {
-        store.browser_protection_locked_until_ms.max(locked_until_ms)
-    } else { locked_until_ms };
+    store.browser_protection_locked_until_ms = 0;
+    store.browser_protection_signed_in = app.state::<crate::auth::BrowserAuthRuntime>().is_signed_in();
     persist_store(&state.store_path, &store)?;
     let active = store.browser_protection_active();
     drop(store);
@@ -903,9 +936,37 @@ pub fn set_browser_protection_policy(
 }
 
 #[tauri::command]
+pub fn set_browser_protection_enabled(
+    app: AppHandle,
+    enabled: bool,
+    state: State<'_, TrackerRuntime>,
+    repair: State<'_, BrowserRepairRuntime>,
+) -> Result<bool, String> {
+    let signed_in = app.state::<crate::auth::BrowserAuthRuntime>().is_signed_in();
+    if enabled && !signed_in { return Err("Sign in to enable the extension checker".into()); }
+    let mut store = state.store.lock().map_err(|_| "Tracking store lock was poisoned")?;
+    let previous = store.browser_protection_enabled;
+    store.browser_protection_enabled = enabled;
+    store.browser_protection_signed_in = signed_in;
+    store.browser_protection_locked_until_ms = 0;
+    if let Err(error) = persist_store(&state.store_path, &store) {
+        store.browser_protection_enabled = previous;
+        return Err(error);
+    }
+    drop(store);
+    if enabled { state.start(app); }
+    else {
+        repair.set(None);
+        crate::browser_warning::sync_window(&app, None);
+    }
+    Ok(enabled)
+}
+
+#[tauri::command]
 pub fn open_browser_extension_settings(
     app_id: Option<String>,
     repair: State<'_, BrowserRepairRuntime>,
+    state: State<'_, TrackerRuntime>,
 ) -> Result<(), String> {
     let target = app_id.or_else(|| {
         repair.shared_state().lock().ok().and_then(|state| {
@@ -918,20 +979,17 @@ pub fn open_browser_extension_settings(
     if !crate::browser_bridge::supported_browser(&target) {
         return Err("Use Chrome, Edge, Brave, Vivaldi, Opera, or Arc with the FocusLock extension.".into());
     }
-    let browser = get_running_windows()?.into_iter().find(|window| window.app_id.eq_ignore_ascii_case(&target))
-        .ok_or("Browser window is no longer open")?;
-    let path = browser.executable_path.ok_or("Browser executable is unavailable")?;
-    if Path::new(&path).file_name().and_then(|name| name.to_str()).is_none_or(|name| !name.eq_ignore_ascii_case(&target)) {
-        return Err("Browser executable does not match".into());
-    }
-    let url = match target.as_str() {
-        "msedge.exe" => "edge://extensions/",
-        "brave.exe" => "brave://extensions/",
-        "vivaldi.exe" => "vivaldi://extensions/",
-        "opera.exe" | "opera_gx.exe" => "opera://extensions/",
-        _ => "chrome://extensions/",
-    };
-    std::process::Command::new(path).arg(url).spawn().map_err(|error| format!("Could not open extension settings: {error}"))?;
+    let observed = get_running_windows().unwrap_or_default().into_iter()
+        .find(|window| window.app_id.eq_ignore_ascii_case(&target))
+        .and_then(|window| window.executable_path)
+        .or_else(|| state.browser_paths.lock().ok().and_then(|paths| paths.get(&target).cloned()));
+    let path = crate::browser_launch::resolve_executable(&target, observed.as_deref())
+        .ok_or("Could not locate the installed browser. Open its extensions page manually.")?;
+    // Reserve a fresh repair cycle before opening Chrome, including if its old
+    // window has just closed. The tracker consumes this before its next check.
+    state.browser_repair_resets.lock().map_err(|_| "Browser repair lock failed")?.push(target.clone());
+    std::process::Command::new(path).arg(crate::browser_launch::extensions_url(&target))
+        .spawn().map_err(|error| format!("Could not open extension settings: {error}"))?;
     Ok(())
 }
 
@@ -1164,12 +1222,23 @@ fn update_browser_repair_guard(
     crate::browser_warning::sync_window(app, repair_state.as_ref());
 
     for window in due {
+        // A settings click, sign-out, or disabled switch may arrive while the
+        // sample was being collected. Recheck before sending a close request.
+        let Some(tracker) = app.try_state::<TrackerRuntime>() else { continue };
+        let resetting = tracker.browser_repair_resets.lock().map(|resets|
+            resets.iter().any(|id| id.eq_ignore_ascii_case(&window.app_id))).unwrap_or(true);
+        if resetting || !tracker.browser_protection_active()
+            || !app.try_state::<crate::auth::BrowserAuthRuntime>().is_some_and(|auth| auth.is_signed_in())
+            || crate::browser_bridge::read_window_health(
+                lease_dir, window.window_handle, window.process_id, &window.app_id, now_ms()) {
+            continue;
+        }
         if let Err(error) = request_browser_window_close(
             window.window_handle,
             window.process_id,
             &window.app_id,
         ) {
-            // Keep the original deadline and retry on the next tracker pass.
+            // The next repair cycle gets its own full grace interval.
             guard.retry_close(window.window_handle);
             if let Ok(mut last) = last_error.lock() {
                 *last = Some(error);
@@ -1449,21 +1518,43 @@ mod tests {
         assert!(runtime.ensure_pause_allowed().is_ok());
     }
     #[test]
-    fn browser_protection_survives_restart_and_cannot_be_paused() {
+    fn browser_checker_requires_opt_in_and_native_sign_in_after_restart() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("usage.json");
         let mut store = TrackingStore::new();
         store.browser_protection_required = true;
+        store.browser_protection_enabled = true;
+        store.browser_protection_signed_in = true;
+        assert!(store.browser_protection_active());
         persist_store(&path, &store).unwrap();
         let runtime = TrackerRuntime::load(path).unwrap();
+        assert!(runtime.status().browser_protection_enabled);
+        assert!(!runtime.status().browser_protection_required);
+        assert!(runtime.ensure_pause_allowed().is_ok());
+        runtime.store.lock().unwrap().browser_protection_signed_in = true;
         assert!(runtime.status().browser_protection_required);
         assert!(runtime.ensure_pause_allowed().unwrap_err().contains("Browser extension protection"));
-        // A queued removal cannot release an active commitment; expiry can.
         let mut store = runtime.store.lock().unwrap();
         store.browser_protection_required = false;
         store.browser_protection_locked_until_ms = now_ms() + 60_000;
-        assert!(store.browser_protection_active());
-        store.browser_protection_locked_until_ms = 1;
+        store.blocked_targets.domains.push("example.com".into());
+        assert!(!store.browser_protection_active(), "Strict and blocked domains do not force this option on");
+        store.browser_protection_required = true;
+        store.browser_protection_enabled = false;
+        assert!(!store.browser_protection_active());
+        store.browser_protection_enabled = true;
+        store.browser_protection_signed_in = false;
+        assert!(!store.browser_protection_active());
+    }
+
+    #[test]
+    fn legacy_store_defaults_checker_to_off_despite_stale_policy() {
+        let mut value = serde_json::to_value(TrackingStore::new()).unwrap();
+        value.as_object_mut().unwrap().remove("browserProtectionEnabled");
+        value["browserProtectionRequired"] = serde_json::json!(true);
+        value["browserProtectionLockedUntilMs"] = serde_json::json!(u64::MAX);
+        let store: TrackingStore = serde_json::from_value(value).unwrap();
+        assert!(!store.browser_protection_enabled);
         assert!(!store.browser_protection_active());
     }
 }

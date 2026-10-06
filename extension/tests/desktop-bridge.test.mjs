@@ -21,6 +21,8 @@ function harness(overrides = {}) {
   const windows = [
     { id: 10, type: 'normal', state: 'normal', left: 11, top: 12, width: 900, height: 700,
       tabs: [{ active: true, title: 'Example page', url: 'https://private.example/path' }] },
+    { id: 13, type: 'normal', state: 'normal', incognito: true, left: 20, top: 30, width: 800, height: 600,
+      tabs: [{ active: true, title: 'Private page', url: 'https://private.example/secret' }] },
     { id: 11, type: 'popup', state: 'normal', tabs: [{ active: true, title: 'Popup' }] },
     { id: 12, type: 'normal', state: 'minimized', tabs: [{ active: true, title: 'Hidden' }] }
   ];
@@ -51,7 +53,7 @@ function harness(overrides = {}) {
       contains: async query => { chrome.lastPermissionQuery = query; return true; },
       onAdded: event(), onRemoved: event()
     },
-    extension: { isAllowedIncognitoAccess: async () => true },
+    extension: { isAllowedIncognitoAccess: async () => overrides.incognitoAllowed !== false },
     alarms: {
       create: (...args) => { chrome.alarm = args; },
       clear: async name => { chrome.clearedAlarm = name; return true; },
@@ -103,7 +105,10 @@ test('sends native heartbeat with visible window titles and permission state, ne
   assert.equal(ports[0].host, 'com.focuslock.browser');
   assert.deepEqual(JSON.parse(JSON.stringify(ports[0].messages[0])), {
     type: 'heartbeat', version: 1, allUrls: true, incognitoAllowed: true,
-    windows: [{ id: 10, title: 'Example page', left: 11, top: 12, width: 900, height: 700 }]
+    windows: [
+      { id: 10, title: 'Example page', incognito: false, left: 11, top: 12, width: 900, height: 700 },
+      { id: 13, title: 'Private page', incognito: true, left: 20, top: 30, width: 800, height: 600 }
+    ]
   });
   assert.equal(JSON.stringify(chrome.lastPermissionQuery), JSON.stringify({
     origins: ['http://*/*', 'https://*/*']
@@ -123,6 +128,16 @@ test('caps reports and titles', async () => {
   await tick();
   assert.equal(ports[0].messages[0].windows.length, 128);
   assert.equal(ports[0].messages[0].windows[0].title.length, 512);
+  bridge.stop();
+});
+
+test('reports normal windows when incognito access is disabled', async () => {
+  const { bridge, chrome, ports } = harness({ incognitoAllowed: false });
+  bridge.start(chrome);
+  await tick();
+  const heartbeat = JSON.parse(JSON.stringify(ports[0].messages[0]));
+  assert.equal(heartbeat.incognitoAllowed, false);
+  assert.ok(heartbeat.windows.some(window => window.id === 10 && window.incognito === false));
   bridge.stop();
 });
 

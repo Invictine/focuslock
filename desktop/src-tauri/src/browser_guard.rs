@@ -38,11 +38,10 @@ struct PendingWindow {
     last_close_attempt_ms: Option<u64>,
 }
 
-/// Keeps a separate, nonrenewable deadline for each observed browser HWND.
+/// Keeps a separate repair cycle for each observed browser HWND.
 /// A healthy profile can cancel only its own window's pending deadline.
 #[derive(Debug, Default)]
 pub struct BrowserGuard {
-    incidents: HashMap<String, u64>,
     pending: HashMap<isize, PendingWindow>,
 }
 
@@ -59,7 +58,6 @@ impl BrowserGuard {
         now_ms: u64,
     ) -> (Option<BrowserRepairState>, Vec<BrowserWindowSample>) {
         if !required {
-            self.incidents.clear();
             self.pending.clear();
             return (None, Vec::new());
         }
@@ -70,7 +68,6 @@ impl BrowserGuard {
             })
         });
 
-        let mut healthy_browsers = Vec::new();
         for window in windows {
             if window.window_handle == 0 || window.process_id == 0 {
                 continue;
@@ -88,7 +85,6 @@ impl BrowserGuard {
                 {
                     self.pending.remove(&window.window_handle);
                 }
-                healthy_browsers.push(base_app_id(&window.app_id));
                 continue;
             }
 
@@ -97,8 +93,6 @@ impl BrowserGuard {
             } else {
                 "extension_missing"
             };
-            let browser_id = base_app_id(&window.app_id);
-            let started_at_ms = *self.incidents.entry(browser_id).or_insert(now_ms);
             let same_identity = self
                 .pending
                 .get(&window.window_handle)
@@ -113,24 +107,11 @@ impl BrowserGuard {
                         process_id: window.process_id,
                         app_id: window.app_id.clone(),
                         browser: window.browser.clone(),
-                        started_at_ms,
+                        started_at_ms: now_ms,
                         reason,
                         last_close_attempt_ms: None,
                     },
                 );
-            }
-        }
-
-        // Only an actual healthy lease can resolve an executable incident.
-        // Empty enumeration, closed windows, or a newly opened HWND cannot
-        // silently buy another grace period.
-        for browser_id in healthy_browsers {
-            if !self
-                .pending
-                .values()
-                .any(|pending| base_app_id(&pending.app_id) == browser_id)
-            {
-                self.incidents.remove(&browser_id);
             }
         }
 
@@ -146,6 +127,9 @@ impl BrowserGuard {
                     return None;
                 }
                 pending.last_close_attempt_ms = Some(now_ms);
+                // A close request is one repair attempt. If the window stays
+                // open, give the user a fresh repair interval before retrying.
+                pending.started_at_ms = now_ms;
                 Some(BrowserWindowSample {
                     window_handle: *hwnd,
                     process_id: pending.process_id,
@@ -187,6 +171,18 @@ impl BrowserGuard {
     pub fn retry_close(&mut self, hwnd: isize) {
         if let Some(pending) = self.pending.get_mut(&hwnd) {
             pending.last_close_attempt_ms = None;
+        }
+    }
+
+    /// Restart the repair grace for all pending windows of a browser. Used
+    /// when the user opens extension settings to repair the browser setup.
+    pub fn reset_browser(&mut self, app_id: &str, now_ms: u64) {
+        let app_id = base_app_id(app_id);
+        for pending in self.pending.values_mut() {
+            if base_app_id(&pending.app_id) == app_id {
+                pending.started_at_ms = now_ms;
+                pending.last_close_attempt_ms = None;
+            }
         }
     }
 }
@@ -258,21 +254,16 @@ mod tests {
         assert!(due.is_empty());
 
         let (_, due) = guard.update(true, &[], &known(&all), 60_000);
-        assert_eq!(due.len(), 2);
-        assert_eq!(
-            due.iter()
-                .map(|window| window.window_handle)
-                .collect::<Vec<_>>(),
-            [10, 11]
-        );
-        let (_, due) = guard.update(true, &[], &known(&all), 61_999);
+        assert_eq!(due.iter().map(|window| window.window_handle).collect::<Vec<_>>(), [10]);
+        let (state, due) = guard.update(true, &[], &known(&all), 61_999);
         assert!(due.is_empty());
-        let (_, due) = guard.update(true, &[], &known(&all), 62_000);
-        assert_eq!(
-            due.len(),
-            2,
-            "queued close requests are retried while unhealthy"
-        );
+        assert_eq!(state.unwrap().grace_remaining_seconds, 19);
+        let (_, due) = guard.update(true, &[], &known(&all), 80_000);
+        assert_eq!(due.iter().map(|window| window.window_handle).collect::<Vec<_>>(), [11]);
+        let (_, due) = guard.update(true, &[], &known(&all), 120_000);
+        assert_eq!(due.iter().map(|window| window.window_handle).collect::<Vec<_>>(), [10]);
+        let (_, due) = guard.update(true, &[], &known(&all), 140_000);
+        assert_eq!(due.iter().map(|window| window.window_handle).collect::<Vec<_>>(), [11]);
     }
 
     #[test]
@@ -340,12 +331,12 @@ mod tests {
     }
 
     #[test]
-    fn closing_and_reopening_browser_does_not_renew_unresolved_executable_deadline() {
+    fn closing_and_reopening_browser_starts_a_fresh_window_grace() {
         let mut guard = BrowserGuard::default();
         let old = sample(10, 100, "chrome.exe", false);
         guard.update(true, &[old.clone()], &known(&[old]), 0);
-        // Browser closes; the HWND can be forgotten, but no healthy lease was
-        // observed, so the Chrome incident remains unresolved.
+        // A newly observed HWND is a new repair incident even if Chrome's
+        // extension lease has not yet recovered.
         assert!(guard.update(true, &[], &HashMap::new(), 20_000).0.is_none());
         let reopened = sample(11, 200, "chrome.exe", false);
         let (state, due) = guard.update(
@@ -354,9 +345,41 @@ mod tests {
             &known(&[reopened.clone()]),
             40_000,
         );
-        assert_eq!(state.unwrap().grace_remaining_seconds, 20);
+        assert_eq!(state.unwrap().grace_remaining_seconds, 60);
         assert!(due.is_empty());
-        let (_, due) = guard.update(true, &[], &known(&[reopened]), 60_000);
+        let (_, due) = guard.update(true, &[], &known(&[reopened]), 100_000);
+        assert_eq!(due.len(), 1);
+    }
+
+    #[test]
+    fn opening_extension_settings_resets_only_that_browser_grace() {
+        let mut guard = BrowserGuard::default();
+        let chrome = sample(10, 100, "chrome.exe", false);
+        let edge = sample(11, 101, "msedge.exe", false);
+        let both = [chrome.clone(), edge.clone()];
+        guard.update(true, &both, &known(&both), 0);
+        guard.reset_browser("C:\\Apps\\Chrome.exe", 50_000);
+        let (_, due) = guard.update(true, &[], &known(&both), 60_000);
+        assert_eq!(due.iter().map(|window| window.window_handle).collect::<Vec<_>>(), [11]);
+        let (state, due) = guard.update(true, &[], &known(&both), 100_000);
+        assert!(due.is_empty());
+        assert_eq!(state.unwrap().grace_remaining_seconds, 10);
+        let (_, due) = guard.update(true, &[], &known(&both), 110_000);
+        assert_eq!(due.iter().map(|window| window.window_handle).collect::<Vec<_>>(), [10]);
+    }
+
+    #[test]
+    fn failed_close_attempt_starts_another_full_repair_interval() {
+        let mut guard = BrowserGuard::default();
+        let chrome = sample(10, 100, "chrome.exe", false);
+        let known = known(&[chrome.clone()]);
+        guard.update(true, &[chrome], &known, 0);
+        let (_, due) = guard.update(true, &[], &known, GRACE_MS);
+        assert_eq!(due.len(), 1);
+        let (state, due) = guard.update(true, &[], &known, GRACE_MS + 1);
+        assert!(due.is_empty());
+        assert_eq!(state.unwrap().grace_remaining_seconds, 60);
+        let (_, due) = guard.update(true, &[], &known, GRACE_MS * 2);
         assert_eq!(due.len(), 1);
     }
 

@@ -15,9 +15,12 @@ describe("native browser protection policy", () => {
     expect(browserProtectionPolicy({ apps: [{ isBlocked: true }], limits: [{ targetKind: "app", dailyLimitMinutes: 30 }] }, [], false).required).toBe(false);
     expect(browserProtectionPolicy({}, [], true).required).toBe(false);
   });
-  it("carries only a currently active commitment deadline", () => {
+  it("does not lock the optional checker to a Strict Mode commitment", () => {
     const dashboard = { sites: [{ isBlocked: true }], prefs: { strictMode: true, strictEndsAt: 2000 } };
-    expect(browserProtectionPolicy(dashboard, [], false, 1000).lockedUntilMs).toBe(2000);
+    expect(browserProtectionPolicy(dashboard, [], false, 1000).lockedUntilMs).toBe(0);
     expect(browserProtectionPolicy(dashboard, [], false, 3000).lockedUntilMs).toBe(0);
+  });
+  it("clears the required policy when no signed-in dashboard is available", () => {
+    expect(browserProtectionPolicy(undefined, [], false).required).toBe(false);
   });
 });

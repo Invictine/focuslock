@@ -90,23 +90,23 @@ export default function BrowserRepairPage() {
             <p className="browser-repair-copy">
               {unsupported
                 ? `${name} is not supported for website boundaries. Switch to Chrome, Edge, Brave, Vivaldi, Opera, or Arc.`
-                : `FocusLock’s extension is missing or disabled in this ${name} profile. Install or enable it to keep this browser open.`}
+                : `FocusLock can’t confirm an extension connection in this ${name} profile. Check that the extension is installed, enabled, and allowed to access all websites.`}
             </p>
             {!unsupported && (
               <>
                 <p className="browser-repair-guidance">
-                  Allow FocusLock on all websites and in incognito.
+                  Allow FocusLock on all websites. Incognito access is optional; turn it on only if you want protection there.
                 </p>
                 <div className="browser-repair-countdown" role="timer" aria-label={`${seconds} seconds until ${name} closes`}>
                   <strong>{seconds}</strong>
-                  <span>{name} will close in {seconds} seconds</span>
+                  <span>{name} may close in {seconds} seconds if the connection stays unavailable</span>
                 </div>
               </>
             )}
             {unsupported && (
               <div className="browser-repair-countdown">
                 <strong>{seconds}</strong>
-                <span>{name} will close in {seconds} seconds</span>
+                <span>{name} may close in {seconds} seconds if the connection stays unavailable</span>
               </div>
             )}
             {actionError && <p className="browser-repair-error" role="alert">{actionError}</p>}
