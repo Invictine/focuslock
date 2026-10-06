@@ -51,6 +51,18 @@ pub fn sync_window(app: &AppHandle, state: Option<&BrowserRepairState>) {
         #[cfg(not(windows))]
         let _ = window.show();
     } else {
+        // ShowWindow bypasses Tauri's cached visibility. Hide through the same
+        // native API so a recovered notice cannot remain on screen.
+        #[cfg(windows)]
+        if let Ok(hwnd) = window.hwnd() {
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::ShowWindow(
+                    windows::Win32::Foundation::HWND(hwnd.0),
+                    windows::Win32::UI::WindowsAndMessaging::SW_HIDE,
+                );
+            }
+        }
+        #[cfg(not(windows))]
         let _ = window.hide();
     }
 }

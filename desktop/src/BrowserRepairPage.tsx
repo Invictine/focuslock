@@ -76,6 +76,10 @@ export default function BrowserRepairPage() {
   const unsupported = repair?.reason === "browser_unsupported";
   const seconds = Math.max(0, Math.ceil(repair?.graceRemainingSeconds ?? 0));
 
+  // The native monitor hides the notice on recovery. Leave its webview empty
+  // between incidents rather than displaying a lingering success dialog.
+  if (!repair && !loadFailed) return null;
+
   return (
     <main className="browser-repair-shell" aria-live="polite">
       <section className="browser-repair-card">
@@ -118,13 +122,7 @@ export default function BrowserRepairPage() {
             <h1>Checking connection…</h1>
             <p className="browser-repair-copy">FocusLock is checking the extension status in your browser.</p>
           </>
-        ) : (
-          <>
-            <p className="browser-repair-eyebrow">Browser extension</p>
-            <h1>Connection restored</h1>
-            <p className="browser-repair-copy">FocusLock’s extension is responding again.</p>
-          </>
-        )}
+        ) : null}
       </section>
     </main>
   );

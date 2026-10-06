@@ -340,6 +340,65 @@ async function foregroundPid(pid) {
   return result.status === 0;
 }
 
+async function visibleQaWindows(pid) {
+  const script = `
+    Add-Type -TypeDefinition @'
+    using System;
+    using System.Collections.Generic;
+    using System.Runtime.InteropServices;
+    using System.Text;
+    public static class FocusLockQaWindowProbe {
+      [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left; public int Top; public int Right; public int Bottom; }
+      public sealed class WindowInfo {
+        public long Handle { get; set; }
+        public string Title { get; set; }
+        public int Width { get; set; }
+        public int Height { get; set; }
+      }
+      private delegate bool EnumWindowsProc(IntPtr handle, IntPtr state);
+      [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr state);
+      [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr handle);
+      [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr handle, out uint processId);
+      [DllImport("user32.dll", SetLastError = true)] private static extern bool GetWindowRect(IntPtr handle, out RECT rect);
+      [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr handle, StringBuilder text, int maxCount);
+      public static WindowInfo[] ForProcess(uint wantedProcessId) {
+        var windows = new List<WindowInfo>();
+        EnumWindows((handle, state) => {
+          uint ownerProcessId;
+          GetWindowThreadProcessId(handle, out ownerProcessId);
+          if (ownerProcessId != wantedProcessId || !IsWindowVisible(handle)) return true;
+          RECT rect;
+          if (!GetWindowRect(handle, out rect)) return true;
+          var title = new StringBuilder(512);
+          GetWindowText(handle, title, title.Capacity);
+          windows.Add(new WindowInfo {
+            Handle = handle.ToInt64(), Title = title.ToString(),
+            Width = rect.Right - rect.Left, Height = rect.Bottom - rect.Top
+          });
+          return true;
+        }, IntPtr.Zero);
+        return windows.ToArray();
+      }
+    }
+'@
+    $windows = @([FocusLockQaWindowProbe]::ForProcess([uint32]${Number(pid)}))
+    if ($windows.Count -eq 0) { '[]' } else { ConvertTo-Json -InputObject $windows -Compress }
+  `;
+  const result = spawnSync('powershell.exe', [
+    '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64'),
+  ], { encoding: 'utf8', windowsHide: true, timeout: 7000 });
+  if (result.status !== 0) throw new Error(`Could not enumerate visible windows for QA process ${pid}: ${result.stderr || result.stdout}`);
+  const output = result.stdout.trim();
+  if (!output) return [];
+  const parsed = JSON.parse(output);
+  return Array.isArray(parsed) ? parsed : [parsed];
+}
+
+function compactQaWindows(windows) {
+  return windows.filter(window => window.Title === 'FocusLock browser protection' &&
+    window.Width > 0 && window.Height > 0 && window.Width < 800 && window.Height < 600);
+}
+
 async function foregroundChrome(profileDir) {
   const encodedProfile = `'${profileDir.replace(/'/g, "''")}'`;
   const script = `
@@ -426,6 +485,25 @@ async function waitForRepairPage(timeoutMs = 15_000) {
       ? { done: true, value: { page, inspection } }
       : { done: false, inspection };
   }, { timeoutMs, intervalMs: 400, log });
+}
+
+async function waitForNativeRepairVisibility(expectedVisible, label, timeoutMs = 5000) {
+  return poll(label, async () => {
+    const windows = await visibleQaWindows(qaPid);
+    const compact = compactQaWindows(windows);
+    const matches = expectedVisible ? compact.length > 0 : compact.length === 0;
+    return matches
+      ? { done: true, value: { windows, compact } }
+      : { done: false, windows, compact };
+  }, { timeoutMs, intervalMs: 250, progressMs: 2000, log });
+}
+
+async function repairPageText(page) {
+  try {
+    return await page.evaluate(() => String(document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 500));
+  } catch {
+    return null;
+  }
 }
 
 function assertRepairState(state, label) {
@@ -751,6 +829,7 @@ try {
   }
   const warningScreenshot = path.join(outputDir, `browser-repair-countdown-${RUN_ID}.png`);
   await repairWindow.page.screenshot({ path: warningScreenshot, timeout: 5000 });
+  const nativeRepairVisible = await waitForNativeRepairVisibility(true, 'native repair HWND becomes visible');
   const blockerDuringRepair = await blockerState();
   if (blockerDuringRepair.visible) throw new Error(`A native blocker appeared during extension repair: ${JSON.stringify(blockerDuringRepair)}`);
   const browserRetainedFocus = await testPage.evaluate(() => document.hasFocus());
@@ -759,6 +838,8 @@ try {
     state: firstRepair,
     page: repairWindow.inspection,
     screenshot: warningScreenshot,
+    actualVisibleWindows: nativeRepairVisible.windows,
+    actualCompactRepairWindows: nativeRepairVisible.compact,
     browserRetainedFocus,
     blocker: blockerDuringRepair,
   };
@@ -776,7 +857,19 @@ try {
   const recoveredBlocker = await blockerState();
   if (recoveredBlocker.visible) throw new Error(`A native blocker appeared after extension recovery: ${JSON.stringify(recoveredBlocker)}`);
   if (testPage.isClosed()) throw new Error('The browser closed after the extension was re-enabled before the deadline.');
-  report.checks.reenabledBeforeDeadline = { repairState: repairCleared, blocker: recoveredBlocker, browserStillOpen: true };
+  const nativeRepairHiddenAfterRecovery = await waitForNativeRepairVisibility(false, 'native repair HWND is hidden after extension recovery');
+  const repairTextAfterRecovery = await repairPageText(repairWindow.page);
+  if (/connection restored/i.test(repairTextAfterRecovery || '')) {
+    throw new Error(`The repair window still shows a stale success message after recovery: ${repairTextAfterRecovery}`);
+  }
+  report.checks.reenabledBeforeDeadline = {
+    repairState: repairCleared,
+    blocker: recoveredBlocker,
+    browserStillOpen: true,
+    actualVisibleWindows: nativeRepairHiddenAfterRecovery.windows,
+    repairPageText: repairTextAfterRecovery,
+    staleConnectionRestoredMessage: false,
+  };
 
   await phase('verify an unextended second profile has an independent, non-renewing deadline');
   const secondProfileDir = path.join(outputDir, `qa-profile-secondary-${RUN_ID}`);
@@ -846,6 +939,11 @@ try {
     const state = await repairState();
     return state === null ? { done: true, value: state } : { done: false, state };
   }, { timeoutMs: 10_000, intervalMs: 300, log });
+  const nativeRepairHiddenAfterClosure = await waitForNativeRepairVisibility(false, 'native repair HWND is hidden after browser closure');
+  const repairTextAfterClosure = await repairPageText(repairWindow.page);
+  if (/connection restored/i.test(repairTextAfterClosure || '')) {
+    throw new Error(`The repair window still shows a stale success message after browser closure: ${repairTextAfterClosure}`);
+  }
   const blockerAfterClosure = await blockerState();
   if (blockerAfterClosure.visible) throw new Error(`A native website blocker appeared after browser recovery enforcement: ${JSON.stringify(blockerAfterClosure)}`);
   report.checks.browserClosedAtDeadline = {
@@ -853,6 +951,9 @@ try {
     qaAppStillRunning: childIsRunning(qaChild),
     healthyProfileStillOpen: !testPage.isClosed(),
     repairState: stateAfterClosure,
+    actualVisibleWindows: nativeRepairHiddenAfterClosure.windows,
+    repairPageText: repairTextAfterClosure,
+    staleConnectionRestoredMessage: false,
     blocker: blockerAfterClosure,
   };
 

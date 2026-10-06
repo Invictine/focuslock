@@ -25,6 +25,15 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 const DEFAULT_REASON: &str = "blocked";
+// Matches desktop/src/features.ts. Frog is temporarily suspended on desktop.
+const DESKTOP_FROG_ENABLED: bool = false;
+
+fn remove_disabled_frog_targets(targets: &mut BlockedTargets, reasons: &mut HashMap<String, String>) {
+    if DESKTOP_FROG_ENABLED { return; }
+    targets.app_ids.retain(|id| reasons.get(id).is_none_or(|reason| reason != "frog"));
+    targets.domains.retain(|id| reasons.get(id).is_none_or(|reason| reason != "frog"));
+    reasons.retain(|_, reason| reason != "frog");
+}
 
 /// Reason carried by a device-local permanent block. Permanence lives in
 /// `TrackingStore::permanent_targets` (never in Convex), so this reason also
@@ -1014,6 +1023,7 @@ pub fn set_blocked_targets(
     // the reason so frog/limit/blocked can never downgrade it.
     let permanent = store.permanent_targets.clone();
     merge_permanent_targets(&mut normalized, &mut normalized_reasons, &permanent);
+    remove_disabled_frog_targets(&mut normalized, &mut normalized_reasons);
     let matcher = BlockedMatcher::new(&normalized, &normalized_reasons);
     store.blocked_targets = normalized.clone();
     store.blocked_reasons = normalized_reasons;
@@ -1072,6 +1082,7 @@ fn load_store(path: &Path) -> Result<TrackingStore, String> {
     store.permanent_targets.retain(|id| !is_protected_app_id(id));
     let permanent = store.permanent_targets.clone();
     merge_permanent_targets(&mut store.blocked_targets, &mut store.blocked_reasons, &permanent);
+    remove_disabled_frog_targets(&mut store.blocked_targets, &mut store.blocked_reasons);
     // Enforce the retention window once at startup; stale days beyond it are
     // rewritten out of the file on the next dirty persist.
     store.prune_old_days();
@@ -1170,6 +1181,33 @@ fn update_browser_repair_guard(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suspended_frog_removes_legacy_blocks_without_releasing_permanent_targets() {
+        let path = std::env::temp_dir().join(format!("focuslock-frog-suspended-{}.json", Uuid::new_v4()));
+        let mut store = TrackingStore::new();
+        store.blocked_targets = BlockedTargets {
+            app_ids: vec!["frog-only.exe".into(), "permanent.exe".into(), "limited.exe".into()],
+            domains: vec!["frog.example".into(), "boundary.example".into()],
+        };
+        store.blocked_reasons = HashMap::from([
+            ("frog-only.exe".into(), "frog".into()),
+            ("permanent.exe".into(), "frog".into()),
+            ("limited.exe".into(), "limit".into()),
+            ("frog.example".into(), "frog".into()),
+            ("boundary.example".into(), "blocked".into()),
+        ]);
+        store.permanent_targets = vec!["permanent.exe".into()];
+        persist_store(&path, &store).unwrap();
+        let restored = load_store(&path).unwrap();
+        assert_eq!(restored.blocked_targets.app_ids, ["limited.exe", "permanent.exe"]);
+        assert_eq!(restored.blocked_targets.domains, ["boundary.example"]);
+        assert_eq!(restored.blocked_reasons.get("permanent.exe").map(String::as_str), Some(PERMANENT_REASON));
+        assert_eq!(restored.blocked_reasons.get("limited.exe").map(String::as_str), Some("limit"));
+        assert!(!restored.blocked_reasons.values().any(|reason| reason == "frog"));
+        let _ = fs::remove_file(path);
+    }
+
     fn observation(idle: bool, domain: Option<&str>) -> ActivityObservation {
         ActivityObservation {
             captured_at_ms: 1,

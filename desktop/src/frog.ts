@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { DESKTOP_FROG_ENABLED } from "./features";
 
 // ---------------------------------------------------------------------------
 // "Eat the frog" — desktop port of the Android reference:
@@ -353,6 +354,21 @@ export function readFrogState(nowMillis: number = Date.now()): FrogState {
   const requiredMinutes = clampRequiredMinutes(prefs.requiredMinutes);
   const requiredSeconds = requiredMinutes * 60;
   const today = frogCycleDate(nowMillis, prefs.wakeHour);
+  if (!DESKTOP_FROG_ENABLED) {
+    return {
+      cycleDate: today,
+      enabled: false,
+      armed: false,
+      phase: "not_armed",
+      frog: null,
+      tickedOff: false,
+      trackedSeconds: 0,
+      requiredSeconds,
+      locked: false,
+      requiredMinutes,
+      wakeHour: clampWakeHour(prefs.wakeHour),
+    };
+  }
   // Stale OR newer cycle date (clock moved back / wake hour moved forward):
   // emit the reset view, exactly like FrogRepository.currentState. The reset is
   // only persisted when the stored date is strictly older (rolloverIfNeeded).
@@ -401,6 +417,7 @@ export function readFrogState(nowMillis: number = Date.now()): FrogState {
  * or newer stored date changes nothing.
  */
 export function rolloverIfNeeded(nowMillis: number = Date.now()): boolean {
+  if (!DESKTOP_FROG_ENABLED) return false;
   const prefs = readPrefs();
   const today = frogCycleDate(nowMillis, prefs.wakeHour);
   if (!shouldRolloverFrogCycle(prefs.cycleDate, today)) return false;
@@ -416,18 +433,21 @@ export function rolloverIfNeeded(nowMillis: number = Date.now()): boolean {
 }
 
 export function setEnabled(enabled: boolean): void {
+  if (!DESKTOP_FROG_ENABLED) return;
   rolloverIfNeeded();
   writePrefs({ ...readPrefs(), enabled: Boolean(enabled) });
 }
 
 /** Persists required focus minutes, clamped to the Android 1..480 range. */
 export function setRequiredMinutes(minutes: number): void {
+  if (!DESKTOP_FROG_ENABLED) return;
   rolloverIfNeeded();
   writePrefs({ ...readPrefs(), requiredMinutes: clampRequiredMinutes(minutes) });
 }
 
 /** Persists the wake hour, clamped to 0..23. */
 export function setWakeHour(hour: number): void {
+  if (!DESKTOP_FROG_ENABLED) return;
   rolloverIfNeeded();
   writePrefs({ ...readPrefs(), wakeHour: clampWakeHour(hour) });
 }
@@ -438,6 +458,7 @@ export function setWakeHour(hour: number): void {
  * actually flipped armed false -> true.
  */
 export function armIfDue(nowMillis: number = Date.now()): boolean {
+  if (!DESKTOP_FROG_ENABLED) return false;
   rolloverIfNeeded(nowMillis);
   const prefs = readPrefs();
   if (
@@ -455,6 +476,7 @@ export function armIfDue(nowMillis: number = Date.now()): boolean {
  * re-selecting the same task is idempotent.
  */
 export function selectFrog(task: FrogTask, nowMillis: number = Date.now()): void {
+  if (!DESKTOP_FROG_ENABLED) return;
   rolloverIfNeeded(nowMillis);
   const prefs = readPrefs();
   const next = sanitizeFrogTask(task);
@@ -469,18 +491,21 @@ export function selectFrog(task: FrogTask, nowMillis: number = Date.now()): void
 
 /** Clears the selected frog and its progress, returning the phase to pick_frog. */
 export function clearFrog(nowMillis: number = Date.now()): void {
+  if (!DESKTOP_FROG_ENABLED) return;
   rolloverIfNeeded(nowMillis);
   writePrefs({ ...readPrefs(), selectedJson: "", tickedOff: false, trackedSeconds: 0 });
 }
 
 /** Marks the selected frog done (default) or not done; tracked time untouched. */
 export function tickOffFrog(tickedOff: boolean = true, nowMillis: number = Date.now()): void {
+  if (!DESKTOP_FROG_ENABLED) return;
   rolloverIfNeeded(nowMillis);
   writePrefs({ ...readPrefs(), tickedOff: Boolean(tickedOff) });
 }
 
 /** Overwrites the tracked focus seconds (never negative). */
 export function setTrackedSeconds(seconds: number, nowMillis: number = Date.now()): void {
+  if (!DESKTOP_FROG_ENABLED) return;
   rolloverIfNeeded(nowMillis);
   writePrefs({
     ...readPrefs(),
@@ -497,6 +522,7 @@ export function setTrackedSeconds(seconds: number, nowMillis: number = Date.now(
  * Caps at Int.MAX_VALUE to match the Kotlin store.
  */
 export function addTrackedSeconds(seconds: number, nowMillis: number = Date.now()): void {
+  if (!DESKTOP_FROG_ENABLED) return;
   if (!Number.isFinite(seconds) || seconds <= 0) return;
   rolloverIfNeeded(nowMillis);
   const prefs = readPrefs();
@@ -530,14 +556,14 @@ export function addTrackedSeconds(seconds: number, nowMillis: number = Date.now(
 export function useFrogState(): { state: FrogState; actions: FrogActions } {
   const [state, setState] = useState<FrogState>(() => {
     // Opening the app counts as the "first unlock": arm the day if it is due.
-    armIfDue();
+    if (DESKTOP_FROG_ENABLED) armIfDue();
     return readFrogState();
   });
   const refresh = useCallback(() => setState(readFrogState()), []);
 
   useEffect(() => {
     const tick = () => {
-      armIfDue();
+      if (DESKTOP_FROG_ENABLED) armIfDue();
       refresh();
     };
     tick();

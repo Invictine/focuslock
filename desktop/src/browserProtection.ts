@@ -1,6 +1,8 @@
+import { DESKTOP_FROG_ENABLED } from "./features";
+
 /** Require the live extension before a web boundary or allowance can be bypassed. */
 export function browserProtectionPolicy(dashboard: any, groups: any[], frogLocked: boolean, now = Date.now()) {
-  const required = frogLocked ||
+  const required = (DESKTOP_FROG_ENABLED && frogLocked) ||
     (dashboard?.sites || []).some((site: any) => site.isBlocked) ||
     (dashboard?.permanentBlocks || []).some((block: any) => block.targetKind === "website") ||
     (dashboard?.limits || []).some((limit: any) => limit.targetKind === "website" && Number(limit.dailyLimitMinutes) > 0) ||

@@ -27,6 +27,7 @@ import { accountClient, flushMutations, useDurableMutation, useMutationReplay } 
 import { claimPermanentTargets, discoverPermanentTargets, permanentTargetsOwnedByAccount } from "./permanentSync";
 import { useFocusAuth } from "./auth";
 import { browserProtectionPolicy } from "./browserProtection";
+import { DESKTOP_FROG_ENABLED } from "./features";
 import FrogCard from "./FrogCard";
 import ApprovalUnlockPanel from "./ApprovalUnlockPanel";
 import { useStrictActive } from "./useStrictActive";
@@ -1459,9 +1460,9 @@ function DesktopApp() {
   const frog = useFrogState();
   const frogLock = useMemo(
     () => ({
-      locked: frog.state.locked,
-      neededAppIds: frog.state.frog?.neededAppIds || [],
-      neededDomains: frog.state.frog?.neededDomains || [],
+      locked: DESKTOP_FROG_ENABLED && frog.state.locked,
+      neededAppIds: DESKTOP_FROG_ENABLED ? frog.state.frog?.neededAppIds || [] : [],
+      neededDomains: DESKTOP_FROG_ENABLED ? frog.state.frog?.neededDomains || [] : [],
     }),
     [frog.state.locked, frog.state.frog],
   );
@@ -2314,7 +2315,7 @@ const FocusPage = memo(function FocusPage({
         status={status}
         devices={devices}
       />
-      <FrogCard catalog={frogCatalog} />
+      {DESKTOP_FROG_ENABLED && <FrogCard catalog={frogCatalog} />}
       <section className="hero-balance">
         <div>
           <p className="section-label">Time to unwind</p>
@@ -5110,6 +5111,12 @@ function SettingsPage({
           </button>
         </SettingRow>
       </section>
+      {!DESKTOP_FROG_ENABLED ? (
+        <section className="settings-group">
+          <h2>Eat the Frog</h2>
+          <p className="frog-settings-note">Eat the Frog is temporarily disabled on desktop.</p>
+        </section>
+      ) : (
       <section className="settings-group">
         <h2>Eat the Frog</h2>
         <SettingRow
@@ -5187,6 +5194,7 @@ function SettingsPage({
           </>
         )}
       </section>
+      )}
       <section className="settings-group">
         <h2>Protection</h2>
         <SettingRow

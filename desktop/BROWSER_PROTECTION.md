@@ -6,8 +6,9 @@ extension is available; it does not cover websites with a second blocker.
 Explicit application boundaries, including a browser executable selected as an
 app, still use the native app blocker.
 
-The companion check runs while website boundaries, website limits, schedules,
-or Frog require protection. Rules and an active Strict Mode deadline persist
+The companion check runs while website boundaries, website limits, or schedules
+require protection. Desktop Eat the Frog is temporarily disabled and does not
+activate the companion check. Rules and an active Strict Mode deadline persist
 in the desktop activity store. The local check needs no cloud heartbeat or
 account sign-in.
 
@@ -57,6 +58,11 @@ native acceptance testing.
   while protection is active. Removing the rules outside a commitment restores
   normal closing.
 
+The repair notice is hidden using the same Windows visibility API that shows
+it, so recovery leaves no success dialog on screen. Its webview renders nothing
+between incidents. Native acceptance checks the actual visible Windows handle
+after recovery, as well as the extension-health state.
+
 ## Scope
 
 This check requires the desktop app to remain running. Administrators and
@@ -102,3 +108,9 @@ showed a nonmodal countdown; enabling it canceled the close. A second profile
 without the extension closed 59.9 seconds after its countdown was observed,
 with the desktop in foreground and the healthy profile still open. The repair
 notice cleared afterward, and the native-host registry entries were restored.
+
+The recovery-notice regression also passed an independent Windows handle
+visibility check: the compact window was physically visible while repair was
+needed and no longer visible after recovery or browser closure. The recovered
+webview contained no success dialog. Checking only a null health/repair state
+is insufficient to verify that a native window has disappeared.

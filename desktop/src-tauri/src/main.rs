@@ -43,7 +43,7 @@ fn main() {
             tauri::WindowEvent::CloseRequested { api, .. } => {
                 if window.label() == browser_warning::WINDOW_LABEL {
                     api.prevent_close();
-                    let _ = window.hide();
+                    browser_warning::sync_window(window.app_handle(), None);
                     return;
                 }
                 if window.label() == "main" && window.app_handle().try_state::<TrackerRuntime>()

@@ -11,9 +11,9 @@ describe("native browser protection policy", () => {
     expect(browserProtectionPolicy({}, groups, false).required).toBe(true);
     expect(browserProtectionPolicy({}, [{ ...groups[0], limitEnabled: false }], false).required).toBe(false);
   });
-  it("keeps application-only rules independent and honors Frog", () => {
+  it("keeps application-only rules independent and ignores suspended desktop Frog", () => {
     expect(browserProtectionPolicy({ apps: [{ isBlocked: true }], limits: [{ targetKind: "app", dailyLimitMinutes: 30 }] }, [], false).required).toBe(false);
-    expect(browserProtectionPolicy({}, [], true).required).toBe(true);
+    expect(browserProtectionPolicy({}, [], true).required).toBe(false);
   });
   it("carries only a currently active commitment deadline", () => {
     const dashboard = { sites: [{ isBlocked: true }], prefs: { strictMode: true, strictEndsAt: 2000 } };
