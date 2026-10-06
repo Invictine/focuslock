@@ -7,10 +7,28 @@ commitment fix was deployed to both backends after exporting each to private
 `build/permanent-{primary,fallback}-before-20261006.zip` snapshots. No account
 data was imported, replaced, or cut over.
 
-The user authorized the supplied backup key until the primary quota renews tomorrow.
+The user authorized the supplied backup key until the primary quota recovers.
 The current build inputs use `https://brazen-fly-869.convex.cloud`; the primary is
 `https://earnest-quail-160.convex.cloud`. Clerk identity and issuer remain the same.
 The key is stored only in ignored `build/convex-fallback.env`. Never commit or print it.
+
+## October 6 configuration correction
+
+A fresh application query still reports the primary disabled by Free-plan limits.
+Backup administrative reads succeed for snapshot, dashboard, policy pulse and devices;
+the snapshot contains 17 app boundaries, seven website boundaries and 20 work records.
+These reads verify backend availability and retained data, not real Clerk device sync.
+
+Windows had a stale `desktop/.env.local` override selecting the primary even though
+`desktop/.env` selected the backup. The override now selects the backup; its original
+is preserved privately in `build/fallback-config-20261006/desktop.env.local`.
+The configuration checker now includes Vite's local and production overrides and
+process environment precedence so this mismatch cannot pass unnoticed.
+Rebuilt desktop and Chrome bundles contain the backup endpoint and no primary endpoint.
+The Windows NSIS installer completed successfully and updated the installed executable;
+it matches the rebuilt binary apart from Tauri's expected NSIS bundle-type marker.
+Android's generated debug configuration already selects the backup. No database was
+imported or replaced during this correction.
 
 ## What has been verified
 
@@ -78,7 +96,8 @@ The user requested a temporary deployment. A follow-up should check primary reco
 and prepare the return without discarding new fallback activity. Full cross-device
 acceptance still requires manual extension sign-in and the physical Android phone.
 
-A one-time follow-up is scheduled in this chat for October 1 at 09:00 local time
-(India). Keep the computer on with Codex running for access to these local files.
-It checks recovery and follows the preservation requirements above; it does not
-promise an unconditional database replacement or automatic phone installation.
+The existing primary-recovery follow-up was re-enabled on October 6 to check daily
+at 09:00 local time (India), remaining quiet while the primary stays quota-disabled.
+Keep the computer on with Codex running for access to these local files.
+It follows the preservation requirements above and pauses after a completed return;
+it does not promise an unconditional database replacement or automatic phone installation.
