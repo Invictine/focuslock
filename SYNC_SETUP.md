@@ -63,6 +63,28 @@ desktop package on the devices being tested; a build does not update a running i
 
 ## Operations and recovery
 
+### Permanent commitments across installs
+
+Permanent Android apps, Windows executables and website domains are stored in
+the account's append-only `permanentBlocks` collection. Ordinary boundary
+replacement, reset, deletion and older clients cannot remove these records.
+Android and Windows app identifiers are platform-specific; website commitments
+restore on all three clients. Each client retains its local enforcement cache
+offline and records account ownership before uploading, so switching accounts
+does not copy one account's commitments into another.
+
+After reinstalling, sign into the same account and allow the first successful
+sync to restore boundaries and permanent blocks. A signed-out install cannot
+identify which account to restore. Local-only blocks need a successful upload
+before uninstalling; an offline edit erased by uninstall cannot be recovered
+from the account. Android accessibility and other required permissions must be
+enabled again after reinstalling for native enforcement.
+
+Validation: backend tests exercise fresh-session restoration, account isolation,
+append-only retries, unchanged-version delivery, and older boundary writers.
+Client tests exercise ownership and restoration. A real signed-in reinstall and
+enforcement check remain necessary for live acceptance.
+
 ### Storage and call budget changes (2026-09-30)
 
 Routine Android, Windows and Chrome background uploads use a four-hour cadence.

@@ -9,11 +9,13 @@ const signInUrl = process.env.CLERK_SIGN_IN_URL;
 const convexUrl = process.env.CONVEX_URL.replace(/\/$/, '');
 const META_KEY = 'focuslock.cloud.v2';
 const ACCOUNT_STATE_KEY = 'focuslock.cloud.accounts.v1';
+const PERMANENT_SITE_OWNERS_KEY = 'focuslock.cloud.permanent-site-owners.v1';
 const CONVEX_REQUEST_TIMEOUT_MS = 7000;
 const ACTIVE_USAGE_SYNC_MS = 60 * 1000;
 let clerkPromise;
 let outboxLock = Promise.resolve();
 let metaWriteLock = Promise.resolve();
+let permanentOwnersLock = Promise.resolve();
 let livePolicy;
 let livePolicyArgs;
 
@@ -50,6 +52,7 @@ async function startLivePolicy(handlers, state) {
       onPolicy: async (shared, identity) => {
         const device = await meta(identity.userId);
         if (!await identity.isCurrent()) return;
+        await rememberRemotePermanentOwners(shared.permanentBlocks, identity.userId);
         const acknowledged = device.uploadedBuckets || [];
         const usageBaseline = {};
         const leisureBaseline = {};
@@ -59,6 +62,7 @@ async function startLivePolicy(handlers, state) {
         }
         await handlers.onPolicy({ ok: true, signedIn: true, userId: identity.userId,
           isCurrent: identity.isCurrent, sites: shared.sites, prefs: shared.prefs, nuke: shared.nuke,
+          permanentBlocks: normalizePermanentBlocks(shared.permanentBlocks),
           policy: shared.policy, versions: { sites: shared.sitesUpdatedAt, prefs: shared.prefsUpdatedAt,
             nuke: Number(shared.nukeUpdatedAt) || 0, policy: shared.policyVersion || '' },
           ...(shared.usageSummary ? { usage: { date: identity.args.usageDate, ...shared.usageSummary }, usageBaseline } : {}),
@@ -211,8 +215,24 @@ function normalizeBuckets(value) {
   return Array.isArray(value) ? value.map(normalizeBucket).filter(Boolean) : [];
 }
 
+function normalizePermanentBlocks(value) {
+  if (!Array.isArray(value)) return [];
+  const targets = [];
+  const seen = new Set();
+  for (const item of value) {
+    if (!isRecord(item) || item.targetKind !== 'website' || typeof item.targetKey !== 'string') continue;
+    const domain = self.FocusLockStore.normalizePermanentSites([item.targetKey])[0];
+    if (!domain || seen.has(domain)) continue;
+    seen.add(domain);
+    targets.push({ targetKind: 'website', targetKey: domain,
+      ...(typeof item.targetLabel === 'string' && item.targetLabel.trim()
+        ? { targetLabel: item.targetLabel.trim().slice(0, 253) } : {}) });
+  }
+  return targets;
+}
+
 const OUTBOX_MUTATIONS = new Set([
-  'focus:setBlockedWebsite', 'focus:addWorkRecord', 'focus:logFocusSession', 'focus:recordWork', 'focus:savePrefs', 'groups:saveGroups',
+  'focus:setBlockedWebsite', 'focus:addPermanentBlocks', 'focus:addWorkRecord', 'focus:logFocusSession', 'focus:recordWork', 'focus:savePrefs', 'groups:saveGroups',
 ]);
 
 function normalizeMutation(value) {
@@ -223,6 +243,10 @@ function normalizeMutation(value) {
     && (typeof args.domain !== 'string' || !args.domain.trim()
       || typeof args.displayName !== 'string' || typeof args.isBlocked !== 'boolean'
       || typeof args.updatedAt !== 'number' || !Number.isFinite(args.updatedAt))) return null;
+  if (value.path === 'focus:addPermanentBlocks'
+    && (!Array.isArray(args.targets) || !args.targets.length || args.targets.length > 500
+      || args.targets.some((target) => !isRecord(target) || target.targetKind !== 'website'
+        || typeof target.targetKey !== 'string' || !target.targetKey.trim()))) return null;
   if (value.path === 'focus:addWorkRecord'
     && (typeof args.recordId !== 'string' || !args.recordId.trim()
       || typeof args.durationMinutes !== 'number' || !Number.isFinite(args.durationMinutes))) return null;
@@ -303,6 +327,7 @@ function normalizeAccount(value) {
     pendingBuckets: normalizeBuckets(account.pendingBuckets),
     pendingMutations: normalizeMutations(account.pendingMutations),
     uploadedBuckets: normalizeBuckets(account.uploadedBuckets),
+    uploadedPermanentSites: self.FocusLockStore.normalizePermanentSites(account.uploadedPermanentSites),
   };
   for (const key of ['lastHeartbeatAt', 'lastUsageSyncAt', 'sitesUpdatedAt', 'prefsUpdatedAt', 'lastNukeSyncAt', 'nukeUpdatedAt']) {
     if (key in account) normalized[key] = nonNegativeNumber(account[key]);
@@ -481,6 +506,62 @@ async function flushMutationOutbox(userId, authToken) {
   return { acknowledged, remaining };
 }
 
+async function updatePermanentSiteOwners(update) {
+  const run = async () => {
+    const stored = await chrome.storage.local.get(PERMANENT_SITE_OWNERS_KEY);
+    const rawOwners = isRecord(stored[PERMANENT_SITE_OWNERS_KEY]) ? stored[PERMANENT_SITE_OWNERS_KEY] : {};
+    const owners = {};
+    for (const [domain, owner] of Object.entries(rawOwners)) {
+      const normalized = self.FocusLockStore.normalizePermanentSites([domain])[0];
+      if (normalized && (owner === 'anonymous' || validStorageKey(owner))) owners[normalized] = owner;
+    }
+    await update(owners);
+    await chrome.storage.local.set({ [PERMANENT_SITE_OWNERS_KEY]: owners });
+    return owners;
+  };
+  const next = permanentOwnersLock.then(run, run);
+  permanentOwnersLock = next.catch(() => {});
+  return next;
+}
+
+async function rememberRemotePermanentOwners(value, userId) {
+  const targets = normalizePermanentBlocks(value);
+  if (!targets.length) return;
+  await updatePermanentSiteOwners((owners) => {
+    for (const target of targets) {
+      if (!owners[target.targetKey]) owners[target.targetKey] = userId;
+    }
+  });
+}
+
+async function preparePermanentSiteMutations(state, userId, priorAccountId) {
+  if (!validStorageKey(userId)) throw new Error('Invalid account storage key');
+  const localSites = self.FocusLockStore.normalizePermanentSites(state.permanentSites);
+  const owners = await updatePermanentSiteOwners((currentOwners) => {
+    for (const domain of localSites) {
+      if (!currentOwners[domain]) currentOwners[domain] = priorAccountId || 'anonymous';
+    }
+    // Anonymous sites migrate once, on the first authenticated sync. Sites
+    // observed under another account stay attributed there across switches.
+    for (const [domain, owner] of Object.entries(currentOwners)) {
+      if (owner === 'anonymous' && localSites.includes(domain)) currentOwners[domain] = userId;
+    }
+  });
+  const account = await meta(userId);
+  const uploaded = new Set(account.uploadedPermanentSites || []);
+  const targets = localSites.filter((domain) => owners[domain] === userId && !uploaded.has(domain))
+    .map((domain) => ({ targetKind: 'website', targetKey: domain, targetLabel: domain }));
+  const mutations = [];
+  for (let offset = 0; offset < targets.length; offset += 500) {
+    const batch = targets.slice(offset, offset + 500);
+    const mutation = { id: `permanent-sites:${batch[0].targetKey}`, kind: 'permanent-sites',
+      path: 'focus:addPermanentBlocks', args: { targets: batch } };
+    await queueMutation(userId, mutation);
+    mutations.push(mutation);
+  }
+  return mutations;
+}
+
 async function flushRequiredMutation(userId, authToken, mutationId) {
   const result = await flushMutationOutbox(userId, authToken);
   if (result.remaining.some((item) => item.id === mutationId)) {
@@ -494,7 +575,9 @@ async function syncUsage(state, reason) {
   if (!identity.session || !identity.user) return { signedIn: false, ok: false, error: '' };
   const expectedUserId = identity.user.id;
   const expectedSession = identity.session;
+  const priorAccountId = typeof state.cloudAccountId === 'string' ? state.cloudAccountId : '';
   const accountChanged = await switchAccountState(state, expectedUserId);
+  await preparePermanentSiteMutations(state, expectedUserId, priorAccountId);
   const device = await meta(expectedUserId);
   const now = Date.now();
   // Navigations only check rule versions. Usage is uploaded on the sync alarm
@@ -539,7 +622,16 @@ async function syncUsage(state, reason) {
     if (heartbeat && pending.length === 0) {
       await callConvex('mutation', 'devices:heartbeat', { deviceId: device.deviceId, ...heartbeat }, auth.authToken);
     }
-    await flushMutationOutbox(auth.userId, auth.authToken);
+    const flushedMutations = await flushMutationOutbox(auth.userId, auth.authToken);
+    const uploadedPermanentTargets = flushedMutations.acknowledged
+      .filter((item) => item.path === 'focus:addPermanentBlocks')
+      .flatMap((item) => item.args.targets || [])
+      .map((target) => target.targetKey);
+    if (uploadedPermanentTargets.length) {
+      await saveMeta({ uploadedPermanentSites: self.FocusLockStore.normalizePermanentSites([
+        ...(await meta(auth.userId)).uploadedPermanentSites, ...uploadedPermanentTargets,
+      ]) }, auth.userId);
+    }
     const latest = await meta(auth.userId);
     const pulseArgs = {
       sitesUpdatedAt: state.cloudSitesLoaded && Number.isFinite(state.cloudSitesVersion) ? state.cloudSitesVersion : -1,
@@ -562,6 +654,7 @@ async function syncUsage(state, reason) {
     }
     const shared = await callConvex('query', 'focus:getSyncPulse', pulseArgs, auth.authToken);
     await assertIdentity(auth.userId, auth.session);
+    await rememberRemotePermanentOwners(shared.permanentBlocks, auth.userId);
     await saveMeta({
       lastSyncAt: now,
       lastError: '',
@@ -577,6 +670,7 @@ async function syncUsage(state, reason) {
     return {
       signedIn: true, ok: true, accountChanged, lastSyncAt: now,
       sites: shared.sites, prefs: shared.prefs, nuke: shared.nuke,
+      permanentBlocks: normalizePermanentBlocks(shared.permanentBlocks),
       policy: shared.policy,
       versions: { sites: shared.sitesUpdatedAt, prefs: shared.prefsUpdatedAt,
         nuke: Number(shared.nukeUpdatedAt) || 0, policy: shared.policyVersion || '' },

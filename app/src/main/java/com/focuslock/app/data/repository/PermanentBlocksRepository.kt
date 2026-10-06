@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -38,6 +39,8 @@ class PermanentBlocksRepository(private val context: Context) {
         val PACKAGES = stringSetPreferencesKey("packages")
         val DOMAINS = stringSetPreferencesKey("domains")
         val APP_NAMES = stringPreferencesKey("app_names_json")
+        val OWNERS = stringPreferencesKey("owners_json")
+        val ACTIVE_ACCOUNT = stringPreferencesKey("active_account")
     }
 
     private val packageMirror = Collections.synchronizedSet(mutableSetOf<String>())
@@ -105,6 +108,10 @@ class PermanentBlocksRepository(private val context: Context) {
                 synchronized(namesMirror) { namesMirror[normalized] = label }
             }
             synchronized(packageMirror) { packageMirror.add(normalized) }
+            val owners = parseOwners(prefs[Keys.OWNERS]).toMutableMap()
+            val account = prefs[Keys.ACTIVE_ACCOUNT].orEmpty()
+            if (account.isNotBlank()) owners.putIfAbsent("android:$normalized", account)
+            prefs[Keys.OWNERS] = ownersToJson(owners)
         }
         return true
     }
@@ -115,9 +122,57 @@ class PermanentBlocksRepository(private val context: Context) {
         context.permanentBlocksDataStore.edit { prefs ->
             prefs[Keys.DOMAINS] = prefs[Keys.DOMAINS].orEmpty() + domain
             synchronized(domainMirror) { domainMirror.add(domain) }
+            val owners = parseOwners(prefs[Keys.OWNERS]).toMutableMap()
+            val account = prefs[Keys.ACTIVE_ACCOUNT].orEmpty()
+            if (account.isNotBlank()) owners.putIfAbsent("website:$domain", account)
+            prefs[Keys.OWNERS] = ownersToJson(owners)
         }
         return true
     }
+
+    /** Restores append-only commitments from the account snapshot; never removes local entries. */
+    suspend fun bindAccount(accountId: String) {
+        val account = accountId.trim(); if (account.isEmpty()) return
+        context.permanentBlocksDataStore.edit { prefs ->
+            val owners = parseOwners(prefs[Keys.OWNERS]).toMutableMap()
+            val active = prefs[Keys.ACTIVE_ACCOUNT].orEmpty()
+            if (active.isBlank()) {
+                val packages = prefs[Keys.PACKAGES].orEmpty().map(::normalizePackage)
+                val domains = prefs[Keys.DOMAINS].orEmpty().mapNotNull(PermanentWebsitePolicy::normalize)
+                packages.forEach { owners.putIfAbsent("android:$it", account) }
+                domains.forEach { owners.putIfAbsent("website:$it", account) }
+            }
+            prefs[Keys.OWNERS] = ownersToJson(owners); prefs[Keys.ACTIVE_ACCOUNT] = account
+        }
+    }
+
+    suspend fun mergeRemote(targets: List<com.focuslock.app.sync.RemotePermanentBlock>, accountId: String) {
+        bindAccount(accountId)
+        targets.forEach { target ->
+            when (target.targetKind.trim().lowercase()) {
+                "android" -> add(target.targetKey, target.targetLabel)
+                "website" -> addWebsite(target.targetKey)
+            }
+        }
+    }
+
+    suspend fun remoteTargets(accountId: String): List<com.focuslock.app.sync.RemotePermanentBlock> {
+        warm()
+        val owners = parseOwners(readOwners())
+        val apps = synchronized(packageMirror) { packageMirror.toList() }.filter { owners["android:$it"] == accountId }.map {
+            com.focuslock.app.sync.RemotePermanentBlock("android", it, synchronized(namesMirror) { namesMirror[it] })
+        }
+        val sites = synchronized(domainMirror) { domainMirror.toList() }.filter { owners["website:$it"] == accountId }.map {
+            com.focuslock.app.sync.RemotePermanentBlock("website", it, null)
+        }
+        return apps + sites
+    }
+
+    private suspend fun readOwners(): String = context.permanentBlocksDataStore.data.map { it[Keys.OWNERS].orEmpty() }.first()
+    private fun parseOwners(raw: String?): Map<String, String> = try {
+        val json = JSONObject(raw ?: "{}"); buildMap { val keys = json.keys(); while (keys.hasNext()) { val key = keys.next(); put(key, json.optString(key)) } }
+    } catch (_: Exception) { emptyMap() }
+    private fun ownersToJson(owners: Map<String, String>) = JSONObject(owners).toString()
 
     /** Migrates legacy flags once and on every warm; the independent sets make this idempotent. */
     suspend fun migrateLegacy(apps: List<BlockedApp>, websites: List<BlockedWebsite>) {

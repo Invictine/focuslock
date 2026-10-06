@@ -1383,19 +1383,19 @@
     toast(outcome === 'duplicate' ? 'Website already blocked.' : 'Added ' + parsed.value + '.');
   };
 
-  // ---- Permalock: permanent, device-local blocks with no removal path ----
+  // ---- Permalock: permanent, account-synced blocks with no removal path ----
   function renderPermalock() {
     const box = $('permaRows'); if (!box) return;
     if (!state) { box.innerHTML = '<p class="mut">Loading permanent blocks…</p>'; return; }
     const sites = S.normalizePermanentSites(state.permanentSites || []);
     state.permanentSites = sites;
     if (!sites.length) {
-      box.innerHTML = '<p class="mut">No permanent blocks yet. Anything added here is enforced on this device until the extension itself is removed — there is no unblock control.</p>';
+      box.innerHTML = '<p class="mut">Permanent blocks sync to your FocusLock account after sign-in and restore on your other signed-in devices or after reinstall. They stay enforced locally too, with no unblock control.</p>';
       return;
     }
     box.innerHTML = sites.map((domain) =>
       '<div class="site-row"><div><strong>' + esc(domain) + '</strong>'
-      + '<span class="mut">Permanently blocked · no snooze, exception, expiry, or removal</span></div>'
+      + '<span class="mut">Account-synced · no snooze, exception, expiry, or removal</span></div>'
       + '<span class="badge lock">Permanent</span></div>').join('');
   }
 
@@ -1423,6 +1423,7 @@
       st.permanentSites.push(domain);
       return st;
     });
+    void Promise.resolve(chrome.runtime.sendMessage({ type: 'permanentSiteAdded', domain })).catch(() => {});
     $('permaInput').value = '';
     await refresh();
     toast(outcome === 'duplicate' ? domain + ' is already permanently blocked.' : 'Permanently blocked ' + domain + '.');

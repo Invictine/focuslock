@@ -53,7 +53,7 @@ describe("account sync durability", () => {
     const first = await t.query(api.focus.getSnapshot, {});
     expect(first.unchanged).toBe(false);
     expect(await t.query(api.focus.getSnapshot, { knownVersion: first.version }))
-      .toEqual({ unchanged: true, version: first.version });
+      .toEqual({ unchanged: true, version: first.version, permanentBlocks: [] });
     await t.mutation(api.focus.saveBlockedWebsites, { sites: [site], updatedAt: 100 });
     const changed = await t.query(api.focus.getSnapshot, { knownVersion: first.version });
     expect(changed.unchanged).toBe(false);

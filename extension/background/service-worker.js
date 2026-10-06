@@ -460,6 +460,7 @@ async function syncCloud(reason, liveResult) {
       strictNukeAfterFive: state.strictNukeAfterFive,
     };
     const previousSites = JSON.stringify(state.cloudSites || []);
+    const previousPermanentSites = JSON.stringify(state.permanentSites || []);
     const previousNuke = JSON.stringify(state.cloudNuke || null);
     const previousPolicy = JSON.stringify(state.cloudPolicy || null);
     state.nukeCommitments = Array.isArray(state.nukeCommitments) ? state.nukeCommitments : [];
@@ -470,6 +471,12 @@ async function syncCloud(reason, liveResult) {
     // must exist before that operation, including if the network then fails.
     const result = liveResult || await self.FocusLockCloud.syncUsage(state, reason || 'background');
     if (result.ok) {
+      if (Array.isArray(result.permanentBlocks)) {
+        state.permanentSites = self.FocusLockStore.normalizePermanentSites([
+          ...(state.permanentSites || []),
+          ...result.permanentBlocks.filter(target => target?.targetKind === 'website').map(target => target.targetKey),
+        ]);
+      }
       if (Array.isArray(result.sites)) {
         const incoming = result.sites.filter(site => site && typeof site.domain === 'string' && site.domain.length <= 253)
           .map(site => ({ domain: site.domain.toLowerCase(), isBlocked: Boolean(site.isBlocked),
@@ -546,6 +553,7 @@ async function syncCloud(reason, liveResult) {
       // page is already open. Re-check visible tabs as soon as that account
       // state arrives instead of waiting for the user to navigate again.
       if (previousSites !== JSON.stringify(state.cloudSites) || previousNuke !== JSON.stringify(state.cloudNuke || null)
+          || previousPermanentSites !== JSON.stringify(state.permanentSites || [])
           || previousPolicy !== JSON.stringify(state.cloudPolicy || null)
           || commitmentWasActive !== strictIsActive(state)) {
         const tabs = await chrome.tabs.query({});
@@ -829,6 +837,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // Preserve cached rules and active strict commitments offline and across sign-out.
       await Store.save(state); mem.state = state;
       sendResponse(result);
+    } else if (msg.type === 'permanentSiteAdded') {
+      await syncCloud('edit');
+      sendResponse({ ok: true });
     } else if (msg.type === 'setSharedSite') {
       try {
         await syncCloud('edit');

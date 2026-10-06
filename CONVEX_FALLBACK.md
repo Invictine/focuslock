@@ -1,5 +1,12 @@
 # Temporary Convex deployment — 2026-09-30
 
+On 2026-10-06, a real application query confirmed the primary still rejects
+requests because Free-plan limits disabled the deployment. The backup responds
+normally and remains selected by all client build inputs. The account permanent
+commitment fix was deployed to both backends after exporting each to private
+`build/permanent-{primary,fallback}-before-20261006.zip` snapshots. No account
+data was imported, replaced, or cut over.
+
 The user authorized the supplied backup key until the primary quota renews tomorrow.
 The current build inputs use `https://brazen-fly-869.convex.cloud`; the primary is
 `https://earnest-quail-160.convex.cloud`. Clerk identity and issuer remain the same.

@@ -2,6 +2,17 @@ import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 
 export default defineSchema({
+  // Account commitments live independently of replaceable boundary lists.
+  // There is deliberately no delete/replace mutation for this collection.
+  permanentBlocks: defineTable({
+    userId: v.string(),
+    targetKind: v.union(v.literal("android"), v.literal("windows"), v.literal("website")),
+    targetKey: v.string(),
+    targetLabel: v.string(),
+    createdAt: v.number(),
+  }).index("by_user", ["userId"])
+    .index("by_user_target", ["userId", "targetKind", "targetKey"]),
+
   focusState: defineTable({
     userId: v.string(),
     creditBalanceSeconds: v.number(),

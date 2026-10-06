@@ -348,7 +348,7 @@ private fun PermalockOverview(
                 SectionHeader(title = "Apps")
                 if (hasLegacyOnlyPermanents) {
                     Text(
-                        text = "Includes permanent blocks restored from a backup. They are enforced on this device and cannot be removed in FocusLock either.",
+                        text = "Permanent blocks sync with your account and are restored after reinstall. They cannot be removed in FocusLock.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

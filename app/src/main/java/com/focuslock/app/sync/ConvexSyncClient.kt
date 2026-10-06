@@ -17,6 +17,7 @@ import java.util.concurrent.TimeUnit
 data class RemoteApp(val packageName: String, val appName: String, val isBlocked: Boolean, val category: String, val specificShortsOnly: Boolean = false, val updatedAt: Long = 0L)
 @Serializable
 data class RemoteSite(val domain: String, val displayName: String, val isBlocked: Boolean, val category: String, val isCustom: Boolean = false, val updatedAt: Long = 0L)
+data class RemotePermanentBlock(val targetKind: String, val targetKey: String, val targetLabel: String? = null)
 @Serializable
 data class RemoteRecord(val recordId: String, val title: String, val durationMinutes: Int, val timestamp: Long, val source: String, val earnedMinutesCredited: Int, val projectName: String? = null)
 
@@ -243,6 +244,7 @@ class ConvexSyncClient(
                 knownTargets = raw.optJSONArray("knownTargets")?.let(::parseKnownTargets),
                 knownTargetsIncluded = raw.has("knownTargets"),
                 nuke = if (raw.has("nuke")) raw.optJSONObject("nuke") else previous.nuke,
+                permanentBlocks = if (raw.has("permanentBlocks")) parsePermanentBlocks(raw.optJSONArray("permanentBlocks")) else previous.permanentBlocks,
                 nukeIncluded = raw.has("nuke") || previous.nukeIncluded,
                 prefs = if (raw.has("prefs")) raw.optJSONObject("prefs")?.let(::parsePrefs) else previous.prefs,
                 prefsIncluded = raw.has("prefs") || previous.prefsIncluded,
@@ -306,6 +308,20 @@ class ConvexSyncClient(
             .put("isBlocked", it.isBlocked).put("category", it.category)
             .put("isCustom", it.isCustom)) }
         return post("/api/mutation", "focus:saveBlockedWebsites", JSONObject().put("sites", arr).put("updatedAt", updatedAt))?.optBoolean("applied", false) == true
+    }
+
+    suspend fun savePermanentBlocks(targets: List<RemotePermanentBlock>): Boolean {
+        for (batch in targets.chunked(500)) {
+            val arr = JSONArray()
+            batch.forEach { target ->
+                arr.put(JSONObject().put("targetKind", target.targetKind).put("targetKey", target.targetKey).apply {
+                    target.targetLabel?.let { put("targetLabel", it) }
+                })
+            }
+            if (post("/api/mutation", "focus:addPermanentBlocks", JSONObject().put("targets", arr))
+                    ?.optBoolean("applied", false) != true) return false
+        }
+        return true
     }
 
     /**
@@ -654,6 +670,7 @@ class ConvexSyncClient(
         val knownTargets: List<KnownTarget>? = null,
         val knownTargetsIncluded: Boolean = false,
         val nuke: JSONObject? = null,
+        val permanentBlocks: List<RemotePermanentBlock> = emptyList(),
         val nukeIncluded: Boolean = false,
         val prefsIncluded: Boolean = false,
     )
@@ -695,13 +712,23 @@ class ConvexSyncClient(
         val prefs = if (root.has("prefs")) root.optJSONObject("prefs")?.let { parsePrefs(it) } else cached?.prefs
         val nukeIncluded = root.has("nuke") || cached?.nukeIncluded == true
         val nuke = if (root.has("nuke")) root.optJSONObject("nuke") else cached?.nuke
+        val permanentBlocks = if (root.has("permanentBlocks")) parsePermanentBlocks(root.optJSONArray("permanentBlocks")) else cached?.permanentBlocks.orEmpty()
         val groupsState = root.optJSONObject("groupsState")?.let(::parseGroupsState) ?: cached?.groupsState
         val usageSummary = root.optJSONObject("usageSummary")?.let(::parseUsageSummary)
         val knownTargets = root.optJSONArray("knownTargets")?.let(::parseKnownTargets)
         return Snapshot(state, apps, sites, records, prefs, stateUpdatedAt, appsUpdatedAt, sitesUpdatedAt,
             root.optString("version", ""), groupsState,
             usageSummary, root.has("usageSummary"), knownTargets, root.has("knownTargets"),
-            nuke, nukeIncluded, prefsIncluded)
+            nuke, permanentBlocks, nukeIncluded, prefsIncluded)
+    }
+
+    private fun parsePermanentBlocks(arr: JSONArray?): List<RemotePermanentBlock> {
+        val out = mutableListOf<RemotePermanentBlock>()
+        arr?.let { a -> for (i in 0 until a.length()) a.optJSONObject(i)?.let { o ->
+            val kind = o.optString("targetKind").trim(); val key = o.optString("targetKey").trim()
+            if (kind.isNotEmpty() && key.isNotEmpty()) out += RemotePermanentBlock(kind, key, o.optString("targetLabel").trim().ifEmpty { null })
+        } }
+        return out
     }
 
     private fun parseGroupsState(obj: JSONObject): GroupsState? {

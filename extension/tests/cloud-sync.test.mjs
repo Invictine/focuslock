@@ -37,10 +37,11 @@ let nukeState = null;
 let rulesConfig = null;
 let loseWorkResponseOnce = false;
 const serverWorkRecords = new Map();
+const serverPermanentSites = new Map();
 let pulseConfig = {
   sitesUpdatedAt: 0, prefsUpdatedAt: 0, nukeUpdatedAt: 0,
   policyVersion: JSON.stringify([0, 0, 0, 0]),
-  sites: [], prefs: null, nuke: null,
+  sites: [], prefs: null, nuke: null, permanentBlocks: [],
   policy: { state: null, groups: [], limits: [], schedules: [] },
   usageSummary: { totalTrackedSeconds: 0, totalBlockedSeconds: 0 },
 };
@@ -49,6 +50,15 @@ const context = {
   self: { FocusLockStore: {
     todayKey: () => '2026-09-19',
     async save(state) { store.set('state', structuredClone(state)); },
+    normalizePermanentSites(value) {
+      const out = [];
+      for (const item of Array.isArray(value) ? value : []) {
+        if (typeof item !== 'string') continue;
+        const domain = item.trim().toLowerCase().replace(/^www\./, '').replace(/\.+$/, '');
+        if (domain.includes('.') && !/[\s/\\:@?#]/.test(domain) && !out.includes(domain)) out.push(domain);
+      }
+      return out;
+    },
   } },
   createClerkClient: () => clerk,
   ConvexClient: FakeConvexClient,
@@ -88,12 +98,16 @@ const context = {
     if (body.path === 'usage:recordUsageBatch') return { ok: true, async json() { return { status: 'success', value: { written: body.args.buckets.length } }; } };
     if (body.path === 'nuke:getNuke') return { ok: true, async json() { return { status: 'success', value: nukeState }; } };
     if (body.path === 'focus:getSyncPulse') return { ok: true, async json() {
+      const permanentBlocks = [...(serverPermanentSites.get(clerk.user?.id) || new Map())].map(([targetKey, targetLabel]) => ({
+        targetKind: 'website', targetKey, targetLabel,
+      }));
       const nukeUpdatedAt = Number(nukeState?.updatedAt) || pulseConfig.nukeUpdatedAt;
       const currentNuke = nukeState ?? pulseConfig.nuke;
       const response = {
         sitesUpdatedAt: pulseConfig.sitesUpdatedAt,
         prefsUpdatedAt: pulseConfig.prefsUpdatedAt,
         nukeUpdatedAt,
+        permanentBlocks,
         ...(body.args.sitesUpdatedAt !== pulseConfig.sitesUpdatedAt ? { sites: pulseConfig.sites } : {}),
         ...(body.args.prefsUpdatedAt !== pulseConfig.prefsUpdatedAt ? { prefs: pulseConfig.prefs } : {}),
         ...(body.args.nukeUpdatedAt !== nukeUpdatedAt ? { nuke: currentNuke } : {}),
@@ -105,6 +119,12 @@ const context = {
       };
       return { status: 'success', value: response };
     } };
+    if (body.path === 'focus:addPermanentBlocks') {
+      const sites = serverPermanentSites.get(clerk.user.id) || new Map();
+      for (const target of body.args.targets) sites.set(target.targetKey, target.targetLabel || target.targetKey);
+      serverPermanentSites.set(clerk.user.id, sites);
+      return { ok: true, async json() { return { status: 'success', value: { applied: true, added: body.args.targets.length } }; } };
+    }
     if (body.path === 'focus:recordWork') {
       const args = body.args;
       if (!serverWorkRecords.has(args.recordId)) serverWorkRecords.set(args.recordId, {
@@ -139,13 +159,60 @@ await cloud.syncUsage(repairedRootState, 'repair-root');
 assert.equal(Array.isArray(store.get('focuslock.cloud.v2')), false);
 assert.equal(typeof store.get('focuslock.cloud.v2').accounts.A.deviceId, 'string');
 
+// Pre-sign-in device-local Permalock entries migrate to the first account only.
+clerk.user = { id: 'legacy-first-account' };
+const legacyPermanentState = stateFor(0);
+legacyPermanentState.permanentSites = ['pre-signin.example'];
+await cloud.syncUsage(legacyPermanentState, 'first-sign-in');
+assert.deepEqual([...serverPermanentSites.get('legacy-first-account').keys()], ['pre-signin.example']);
+clerk.user = { id: 'A' };
+
+// Upload batches stay under the backend limit, and each exact acknowledged
+// batch advances the account's uploaded ledger.
+clerk.user = { id: 'large-upload-account' };
+const largeUploadState = stateFor(0);
+largeUploadState.permanentSites = Array.from({ length: 1001 }, (_, index) => `site-${index}.large.test`);
+calls.length = 0;
+await cloud.syncUsage(largeUploadState, 'large-permanent-upload');
+const permanentCalls = calls.filter((call) => call.path === 'focus:addPermanentBlocks');
+assert.deepEqual(permanentCalls.map((call) => call.args.targets.length), [500, 500, 1]);
+assert.equal(permanentCalls.every((call) => call.args.targets.length <= 500), true);
+assert.equal(store.get('focuslock.cloud.v2').accounts['large-upload-account'].uploadedPermanentSites.length, 1001);
+
+// Remote targets are attributed as soon as restored, so an account switch
+// before a second sync cannot re-upload those device-local entries elsewhere.
+clerk.user = { id: 'large-restore-account' };
+const largeRemoteSites = new Map(Array.from({ length: 1001 }, (_, index) => [
+  `remote-${index}.large.test`, `remote-${index}.large.test`,
+]));
+serverPermanentSites.set('large-restore-account', largeRemoteSites);
+const largeRestoreState = stateFor(0);
+calls.length = 0;
+const largeRestoreResult = await cloud.syncUsage(largeRestoreState, 'large-permanent-restore');
+assert.equal(largeRestoreResult.permanentBlocks.length, 1001);
+largeRestoreState.permanentSites = largeRestoreResult.permanentBlocks.map((target) => target.targetKey);
+const ownersAfterRestore = store.get('focuslock.cloud.permanent-site-owners.v1');
+assert.equal(Object.values(ownersAfterRestore).filter((owner) => owner === 'large-restore-account').length, 1001);
+clerk.user = { id: 'other-large-account' };
+calls.length = 0;
+await cloud.syncUsage(largeRestoreState, 'switch-after-restore');
+assert.equal(calls.some((call) => call.path === 'focus:addPermanentBlocks'
+  && call.args.targets.some((target) => target.targetKey.startsWith('remote-'))), false);
+assert.equal(serverPermanentSites.has('other-large-account'), false);
+clerk.user = { id: 'A' };
+
 function stateFor(domainCount, prefix = 'd') {
   const stats = { '2026-09-19': {} };
   for (let i = 0; i < domainCount; i += 1) stats['2026-09-19'][`${prefix}${i}.test`] = i + 1;
-  return { stats, blockedLog: [], blockedTotal: 0, cloudSites: [], cloudSitesLoaded: false };
+  return { stats, blockedLog: [], blockedTotal: 0, cloudSites: [], cloudSitesLoaded: false, permanentSites: [] };
 }
 
 async function applySyncResult(state, result) {
+  if (result.permanentBlocks !== undefined) {
+    state.permanentSites = context.self.FocusLockStore.normalizePermanentSites([
+      ...(state.permanentSites || []), ...result.permanentBlocks.map((target) => target.targetKey),
+    ]);
+  }
   if (result.sites !== undefined) {
     state.cloudSites = structuredClone(result.sites || []);
     state.cloudSitesLoaded = true;
@@ -372,6 +439,7 @@ assert.deepEqual(calls.filter((call) => call.path === 'usage:recordUsageBatch').
 // Account snapshots are isolated and reversible.
 const accountState = stateFor(1, 'account-a-');
 accountState.stats['2026-09-19']['account-a-0.test'] = 17;
+accountState.permanentSites = ['a-only-perma.test'];
 accountState.cloudAccountId = 'A';
 accountState.cloudSites = [{ domain: 'a-only.test', isBlocked: true, category: 'Social' }];
 accountState.cloudSitesLoaded = true;
@@ -389,6 +457,8 @@ accountAMeta.accounts.A.lastUsageSyncAt = 0;
 store.set('focuslock.cloud.v2', accountAMeta);
 const accountAResult = await cloud.syncUsage(accountState, 'A');
 await applySyncResult(accountState, accountAResult);
+assert.deepEqual([...serverPermanentSites.get('A').keys()], ['a-only-perma.test']);
+assert.deepEqual(JSON.parse(JSON.stringify(accountState.permanentSites)), ['a-only-perma.test']);
 clerk.user = { id: 'B' };
 const accountMeta = store.get('focuslock.cloud.v2');
 accountMeta.accounts.B = { ...accountMeta.accounts.A, deviceId: 'browser_B', prefsLoaded: true, prefsUpdatedAt: 123 };
@@ -401,11 +471,17 @@ assert.equal(switchedToB.accountChanged, true);
 assert.equal(calls.find((call) => call.path === 'focus:getSyncPulse').args.prefsUpdatedAt, -1);
 assert.equal(calls.find((call) => call.path === 'focus:getSyncPulse').args.nukeUpdatedAt, -1);
 assert.equal(accountState.cloudPolicy, null);
+assert.equal(calls.some((call) => call.path === 'focus:addPermanentBlocks'
+  && call.args.targets.some((target) => target.targetKey === 'a-only-perma.test')), false,
+'account A permanent sites are never queued for account B');
+assert.equal(serverPermanentSites.has('B'), false);
 await applySyncResult(accountState, switchedToB);
 assert.equal(accountState.cloudPolicy.groups[0].groupId, 'b-group');
 accountState.stats['2026-09-19'] = accountState.stats['2026-09-19'] || {};
 accountState.stats['2026-09-19']['account-b.test'] = 2;
+accountState.permanentSites.push('b-only-perma.test');
 await cloud.syncUsage(accountState, 'B-data');
+assert.deepEqual([...serverPermanentSites.get('B').keys()], ['b-only-perma.test']);
 clerk.user = { id: 'A' };
 pulseConfig = previousPulseConfig;
 calls.length = 0;
@@ -417,6 +493,25 @@ assert.deepEqual(JSON.parse(JSON.stringify(accountState.cloudSites)), [{ domain:
 assert.equal(accountState.cloudUsageBaseline['2026-09-19']['account-a-0.test'], 17);
 assert.equal(accountState.cloudLeisureBaseline['2026-09-19']['account-a-0.test'], 7);
 assert.equal(calls.find((call) => call.path === 'focus:getSyncPulse').args.knownPolicyVersion, pulseConfig.policyVersion);
+
+// A fresh local store restores the account's permanent targets from the full
+// pulse even when all ordinary versions already match.
+const freshRestore = stateFor(0);
+freshRestore.cloudAccountId = 'A';
+freshRestore.cloudPolicy = { state: null, groups: [], limits: [], schedules: [] };
+freshRestore.cloudPolicyVersion = pulseConfig.policyVersion;
+freshRestore.cloudSitesLoaded = true;
+freshRestore.cloudSitesVersion = pulseConfig.sitesUpdatedAt;
+freshRestore.cloudPrefsVersion = pulseConfig.prefsUpdatedAt;
+freshRestore.cloudNukeVersion = pulseConfig.nukeUpdatedAt;
+calls.length = 0;
+const restored = await cloud.syncUsage(freshRestore, 'fresh-storage-restore');
+assert.equal(calls.find((call) => call.path === 'focus:getSyncPulse').args.knownPolicyVersion, pulseConfig.policyVersion);
+assert.deepEqual(JSON.parse(JSON.stringify(restored.permanentBlocks)), [
+  { targetKind: 'website', targetKey: 'a-only-perma.test', targetLabel: 'a-only-perma.test' },
+]);
+await applySyncResult(freshRestore, restored);
+assert.deepEqual(JSON.parse(JSON.stringify(freshRestore.permanentSites)), ['a-only-perma.test']);
 
 // A token obtained after an identity change is rejected, while the queue remains.
 clerk.user = { id: 'A' };
@@ -494,10 +589,14 @@ assert.equal(await liveClient.authFetcher({ forceRefreshToken: true }), 'live-to
 assert.equal(clerk.session.lastOptions.template, 'convex');
 assert.equal(clerk.session.lastOptions.skipCache, true);
 liveClient.update({ sites: [{ domain: 'strict.test', isBlocked: true }], prefs: { strictMode: true }, nuke: null,
+  permanentBlocks: [{ targetKind: 'website', targetKey: 'WWW.Live-Perma.test.' }, { targetKind: 'android', targetKey: 'ignored.test' }],
   sitesUpdatedAt: 3, prefsUpdatedAt: 4, nukeUpdatedAt: 0, policyVersion: 'p-live',
   policy: { groups: [], limits: [], schedules: [] }, usageSummary: { totalTrackedSeconds: 12 } });
 await new Promise((resolve) => setImmediate(resolve));
 assert.equal(liveResults[0].sites[0].domain, 'strict.test');
+assert.deepEqual(JSON.parse(JSON.stringify(liveResults[0].permanentBlocks)), [
+  { targetKind: 'website', targetKey: 'live-perma.test' },
+]);
 assert.equal(liveResults[0].prefs.strictMode, true);
 assert.equal(liveResults[0].leisureBaseline['2026-09-19']['live.test'], 4);
 assert.equal(liveResults[0].usageBaseline['2026-09-19']['live.test'], 12);

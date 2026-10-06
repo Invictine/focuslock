@@ -13,6 +13,7 @@ import com.focuslock.app.data.model.TickTickWorkRecord
 import com.focuslock.app.data.model.WorkRecordSource
 import com.focuslock.app.data.repository.CreditBankRepository
 import com.focuslock.app.data.repository.SettingsRepository
+import com.focuslock.app.data.repository.PermanentBlocksRepository
 import com.focuslock.app.data.repository.TargetGroup as LocalTargetGroup
 import com.focuslock.app.data.repository.TargetGroupMember as LocalTargetGroupMember
 import com.focuslock.app.data.repository.TargetGroupsRepository
@@ -77,6 +78,7 @@ class FocusSyncManager(
     private val targetGroups: TargetGroupsRepository,
 ) {
     private val appContext = context.applicationContext
+    private val permanentBlocks = PermanentBlocksRepository(appContext)
     // Default CoroutineExceptionHandler: a bug in a launched cycle must log, not kill the process.
     private val exceptionHandler = CoroutineExceptionHandler { _, e ->
         android.util.Log.w("FocusSyncManager", "uncaught sync coroutine error", e)
@@ -183,6 +185,17 @@ class FocusSyncManager(
             val strictDirty = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
             launch {
                 settings.blockedWebsitesFlow.drop(1).distinctUntilChanged().collect { dirty.tryEmit(Unit) }
+            }
+            launch {
+                settings.blockedAppsFlow.drop(1).distinctUntilChanged().collect { dirty.tryEmit(Unit) }
+            }
+            // Permanent edits must queue a complete sync even if another policy
+            // refresh has just run. The serialized queue below retries after it.
+            launch {
+                permanentBlocks.packagesFlow.drop(1).distinctUntilChanged().collect { strictDirty.tryEmit(Unit) }
+            }
+            launch {
+                permanentBlocks.domainsFlow.drop(1).distinctUntilChanged().collect { strictDirty.tryEmit(Unit) }
             }
             launch {
                 targetGroups.groups.drop(1).distinctUntilChanged().collect { dirty.tryEmit(Unit) }
@@ -564,6 +577,27 @@ class FocusSyncManager(
             }
 
             try {
+                // Permanent commitments are an append-only account collection, separate
+                // from ordinary boundary snapshots so reinstalls and LWW replacements
+                // cannot erase them.
+                permanentBlocks.warm()
+                if (currentAccountId != accountId || auth.getAccountId() != accountId) return true
+                permanentBlocks.mergeRemote(snapshot.permanentBlocks, accountId)
+                val remoteKeys = snapshot.permanentBlocks.map { "${it.targetKind}:${it.targetKey}" }.toSet()
+                val pending = permanentBlocks.remoteTargets(accountId).filter {
+                    "${it.targetKind}:${it.targetKey}" !in remoteKeys
+                }
+                if (pending.isNotEmpty()) {
+                    require(convex.savePermanentBlocks(pending)) { "Could not save permanent blocks" }
+                    pushed++
+                }
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                android.util.Log.w("FocusSyncManager", "permanent-block sync step failed", e)
+                stepErrors += "permanent blocks: ${e.message?.take(120) ?: "network"}"
+            }
+
+            try {
                 // Merged target groups: full-replace LWW (same shape as boundaries) plus
                 // the per-group usage cache for the accessibility enforcement fast path.
                 val groupsOutcome = syncTargetGroups(
@@ -765,6 +799,11 @@ class FocusSyncManager(
      */
     private suspend fun prepareAccount(accountId: String) {
         val stored = identityPrefs.getString(KEY_SYNC_ACCOUNT_ID, null)?.trim().orEmpty()
+        permanentBlocks.warm()
+        // On upgrade, device commitments predate the ownership ledger. Claim
+        // them for the previously signed-in account before switching to a new one.
+        if (stored.isNotEmpty()) permanentBlocks.bindAccount(stored)
+        permanentBlocks.bindAccount(accountId)
         if (stored == accountId) {
             currentAccountId = accountId
             return

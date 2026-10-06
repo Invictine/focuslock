@@ -24,6 +24,7 @@ import {
 } from "./sync";
 import { accountUsage, acknowledgeSync, enqueueSync, peekSync, unacknowledgedUsage } from "./offlineQueue";
 import { accountClient, flushMutations, useDurableMutation, useMutationReplay } from "./durableSync";
+import { claimPermanentTargets, discoverPermanentTargets, permanentTargetsOwnedByAccount } from "./permanentSync";
 import { useFocusAuth } from "./auth";
 import FrogCard from "./FrogCard";
 import ApprovalUnlockPanel from "./ApprovalUnlockPanel";
@@ -54,6 +55,8 @@ type SiteItem = {
   isBlocked: boolean;
   category: string;
   isCustom?: boolean;
+  permanent?: boolean;
+  accountPermanent?: boolean;
 };
 type WorkRecord = {
   recordId?: string;
@@ -832,6 +835,12 @@ export function evaluateBlockedTargets({
       .map((item: SiteItem) => normalizeSiteKey(item.domain))
       .filter(Boolean),
   );
+  const permanentWebsiteKeys = new Set<string>(
+    (dashboard?.permanentBlocks || [])
+      .filter((item: any) => item?.targetKind === "website")
+      .map((item: any) => normalizeSiteKey(item.targetKey))
+      .filter(Boolean),
+  );
 
   const today = localDate();
   const localSeconds = localSecondsByTarget(usage, today);
@@ -1016,6 +1025,10 @@ export function evaluateBlockedTargets({
     }
   }
 
+  // Account-owned website commitments survive boundary edits and Frog's
+  // allowlist, just as native permanent app targets do.
+  for (const key of permanentWebsiteKeys) domains.add(key);
+
   // Reasons for the final union: "permanent" for device-local permanent blocks
   // (re-added here so the frog allowlist can never remove one), "frog" for
   // lock-injected targets, "limit" for exhausted daily limits, "blocked"
@@ -1037,7 +1050,13 @@ export function evaluateBlockedTargets({
           : "blocked";
   }
   for (const key of domains) {
-    reasons[key] = frogDomains.has(key) ? "frog" : limitDomains.has(key) ? "limit" : "blocked";
+    reasons[key] = permanentWebsiteKeys.has(targetKeyFor("website", key))
+      ? "permanent"
+      : frogDomains.has(key)
+        ? "frog"
+        : limitDomains.has(key)
+          ? "limit"
+          : "blocked";
   }
 
   return { targets: { appIds: [...appIds], domains: [...domains] }, reasons, exceeded };
@@ -1268,6 +1287,7 @@ function DesktopApp() {
   // Rust unions this list back into every set_blocked_targets payload, so the
   // UI must never present a permanent app as removable.
   const [permanentTargets, setPermanentTargets] = useState<string[]>([]);
+  const deviceId = snapshot?.device.id || getStoredDeviceId();
   const refreshPermanentTargets = useCallback(async () => {
     if (!tauriAvailable()) return;
     try {
@@ -1333,6 +1353,104 @@ function DesktopApp() {
     tab === "focus" || tab === "account" ? EMPTY_ARGS : "skip",
   );
   const accountKey = auth.user?.id || null;
+  const permanentTargetsSignature = useMemo(
+    () => [...new Set(permanentTargets.map((target) => targetKeyFor("app", target)).filter(Boolean))]
+      .sort()
+      .join("\n"),
+    [permanentTargets],
+  );
+  const onPermanentTargetsAdded = useCallback((targets: string[]) => {
+    if (!deviceId || !targets.length) return;
+    const normalized = targets.map((target) => targetKeyFor("app", target)).filter(Boolean);
+    if (accountKey) claimPermanentTargets(window.localStorage, deviceId, normalized, accountKey);
+    else discoverPermanentTargets(window.localStorage, deviceId, normalized);
+  }, [accountKey, deviceId]);
+  // Keep provenance for native targets that existed before account sync. They
+  // can be adopted by the first verified account, while targets already claimed
+  // by another account remain local and are never copied across account edges.
+  useEffect(() => {
+    if (deviceId && permanentTargets.length) {
+      discoverPermanentTargets(window.localStorage, deviceId, permanentTargets.map((target) => targetKeyFor("app", target)));
+    }
+  }, [deviceId, permanentTargets]);
+  // Account permanence is append-only. Restore this account's Windows targets
+  // into Rust, then upload native targets only when their persisted provenance
+  // is unclaimed or already includes this account. The token subject is checked
+  // by accountClient before any mutation, and failed writes retry on reconnect.
+  useEffect(() => {
+    const cloudTargets = configuration?.permanentBlocks;
+    const accountKeyAtStart = accountKey;
+    const deviceKey = deviceId;
+    if (!tauriAvailable() || !accountKeyAtStart || !deviceKey || !Array.isArray(cloudTargets)) return;
+    let cancelled = false;
+    let busy = false;
+    let retryNeeded = true;
+    const syncPermanentTargets = async () => {
+      if (cancelled || busy) return;
+      busy = true;
+      try {
+        const token = await auth.getSyncToken();
+        if (!token || cancelled) return;
+        const client = accountClient(accountKeyAtStart, token);
+        const windowsTargets: string[] = [...new Set<string>(cloudTargets
+          .filter((target: any) => target?.targetKind === "windows")
+          .map((target: any) => targetKeyFor("app", target.targetKey))
+          .filter((target: string) => Boolean(target)))];
+        if (windowsTargets.length) {
+          if (!claimPermanentTargets(window.localStorage, deviceKey, windowsTargets, accountKeyAtStart)) {
+            throw new Error("Could not save permanent-target account ownership locally");
+          }
+          if (cancelled) return;
+          await invoke("add_permanent_targets", { appIds: windowsTargets });
+          if (cancelled) return;
+          await refreshPermanentTargets();
+        }
+
+        const localTargets = await invoke<string[]>("get_permanent_targets");
+        if (cancelled) return;
+        const normalizedLocal: string[] = [...new Set<string>((Array.isArray(localTargets) ? localTargets : [])
+          .map((target) => targetKeyFor("app", target))
+          .filter((target) => Boolean(target)))];
+        const discoveredOwnership = discoverPermanentTargets(window.localStorage, deviceKey, normalizedLocal);
+        if (!discoveredOwnership) throw new Error("Could not read permanent-target account ownership locally");
+        const unclaimed = discoveredOwnership.unclaimedTargets.filter((target) => normalizedLocal.includes(target));
+        const ownership = unclaimed.length
+          ? claimPermanentTargets(window.localStorage, deviceKey, unclaimed, accountKeyAtStart)
+          : discoveredOwnership;
+        if (!ownership) throw new Error("Could not claim existing permanent targets locally");
+        const uploadable = permanentTargetsOwnedByAccount(ownership, normalizedLocal, accountKeyAtStart);
+        for (let offset = 0; offset < uploadable.length; offset += 500) {
+          if (cancelled) return;
+          await client.mutation(api.focus.addPermanentBlocks, {
+            targets: uploadable.slice(offset, offset + 500).map((target) => ({
+              targetKind: "windows",
+              targetKey: target,
+              targetLabel: target,
+            })),
+          });
+        }
+        retryNeeded = false;
+      } catch (error) {
+        if (!cancelled) {
+          retryNeeded = true;
+          console.warn("[focuslock] permanent targets remain pending account sync", error);
+        }
+      } finally {
+        busy = false;
+      }
+    };
+    void syncPermanentTargets();
+    const retryId = window.setInterval(() => {
+      if (retryNeeded) void syncPermanentTargets();
+    }, 30_000);
+    const onOnline = () => { void syncPermanentTargets(); };
+    window.addEventListener("online", onOnline);
+    return () => {
+      cancelled = true;
+      window.clearInterval(retryId);
+      window.removeEventListener("online", onOnline);
+    };
+  }, [accountKey, auth.getSyncToken, configuration?.permanentBlocks, deviceId, permanentTargetsSignature, refreshPermanentTargets]);
   const { workRatio, taskBonus, setWorkRatio, setTaskBonus } =
     useSyncedPrefs(dashboard, accountKey);
   // "Eat the frog" is device-local (localStorage, like Android's DataStore).
@@ -1347,7 +1465,6 @@ function DesktopApp() {
     }),
     [frog.state.locked, frog.state.frog],
   );
-  const deviceId = snapshot?.device.id || getStoredDeviceId();
   const lastHeartbeatRef = useRef(0);
   const lastUsageUploadRef = useRef(0);
   const usageJsonRef = useRef<string | null>(null);
@@ -1721,6 +1838,7 @@ function DesktopApp() {
             snapshot={snapshot}
             permanentTargets={permanentTargets}
             refreshPermanentTargets={refreshPermanentTargets}
+            onPermanentTargetsAdded={onPermanentTargetsAdded}
           />
         ) : tab === "settings" ? (
           <SettingsPage
@@ -1791,6 +1909,7 @@ const PermalockPage = memo(function PermalockPage({
   snapshot,
   permanentTargets,
   refreshPermanentTargets,
+  onPermanentTargetsAdded,
 }: any) {
   const [selected, setSelected] = useState<Set<string>>(() => new Set<string>());
   const [confirming, setConfirming] = useState(false);
@@ -1865,6 +1984,7 @@ const PermalockPage = memo(function PermalockPage({
         added: string[];
         rejected: { id: string; reason: string }[];
       }>("add_permanent_targets", { appIds: ids });
+      onPermanentTargetsAdded?.(result?.added || []);
       await refreshPermanentTargets?.();
       setSelected(new Set());
       setConfirming(false);
@@ -1899,8 +2019,8 @@ const PermalockPage = memo(function PermalockPage({
           <p className="eyebrow">Permanent</p>
           <h1>Permalock</h1>
           <p>
-            Apps blocked here stay blocked. No timers, no credits, no emergency passes, and no
-            in-app removal.
+            Windows apps committed here stay blocked on this PC and sync to your FocusLock account
+            when you’re signed in. No timers, credits, emergency passes, or in-app removal.
           </p>
         </div>
       </header>
@@ -1925,7 +2045,7 @@ const PermalockPage = memo(function PermalockPage({
                   <div>
                     <strong>{name}</strong>
                     <p>
-                      <span className="category-label">{id}</span> · Device-local · No expiry
+                      <span className="category-label">{id}</span> · Windows permanent · No expiry
                     </p>
                   </div>
                   <span className="permanent-badge">Permanent</span>
@@ -3296,7 +3416,35 @@ function BoundariesPage({
   const saveSite = useDurableMutation(api.focus.setBlockedWebsite);
   const saveGroups = useDurableMutation(syncApi.saveGroups);
   const apps: AppItem[] = dashboard?.apps || [];
-  const sites: SiteItem[] = dashboard?.sites || [];
+  const permanentWebsites = useMemo(() => new Map<string, string>(
+    (dashboard?.permanentBlocks || [])
+      .filter((target: any) => target?.targetKind === "website")
+      .map((target: any) => [normalizeSiteKey(target.targetKey), String(target.targetLabel || target.targetKey)] as const)
+      .filter(([key]: [string, string]) => Boolean(key)),
+  ), [dashboard?.permanentBlocks]);
+  const sites: SiteItem[] = useMemo(() => {
+    const rows = new Map<string, SiteItem>();
+    (dashboard?.sites || []).forEach((site: SiteItem) => {
+      const key = normalizeSiteKey(site.domain);
+      const accountLabel = permanentWebsites.get(key);
+      rows.set(key, accountLabel
+        ? { ...site, displayName: site.displayName || accountLabel, isBlocked: true, permanent: true }
+        : site);
+    });
+    for (const [domain, displayName] of permanentWebsites) {
+      if (!rows.has(domain)) {
+        rows.set(domain, {
+          domain,
+          displayName,
+          isBlocked: true,
+          category: "Permanent",
+          permanent: true,
+          accountPermanent: true,
+        });
+      }
+    }
+    return [...rows.values()];
+  }, [dashboard?.sites, permanentWebsites]);
   const strictActive = useStrictActive(Boolean(dashboard?.prefs?.strictMode), dashboard?.prefs?.strictEndsAt);
   // Full group list (editable source of truth). The range summary below only
   // supplies tracked seconds; listGroups keeps groups that have zero usage.
@@ -3755,10 +3903,11 @@ function BoundariesPage({
     if (!guardUnlock(false)) return;
     setBusy(true);
     try {
-      const removed = sites.some((site) => !nextSites.some((next) => next.domain === site.domain));
+      const saveableSites = nextSites.filter((site) => !site.accountPermanent);
+      const removed = sites.some((site) => !site.accountPermanent && !nextSites.some((next) => next.domain === site.domain));
       const results = removed
-        ? [await saveSites({ sites: nextSites.map(stripSite), updatedAt: Date.now() })]
-        : await Promise.all(nextSites.filter((next) => {
+        ? [await saveSites({ sites: saveableSites.map(stripSite), updatedAt: Date.now() })]
+        : await Promise.all(saveableSites.filter((next) => {
             const previous = sites.find((site) => site.domain === next.domain);
             return !previous || previous.isBlocked !== next.isBlocked;
           }).map((site) => saveSite({ domain: site.domain, displayName: site.displayName,
@@ -3791,6 +3940,10 @@ function BoundariesPage({
   }
 
   async function toggleSite(site: SiteItem) {
+    if (site.permanent) {
+      setNotice("Permanent website blocks cannot be removed in FocusLock.");
+      return;
+    }
     if (!guardUnlock(site.isBlocked)) return;
     const nextSites = sites.map((item) =>
       item.domain === site.domain ? { ...item, isBlocked: !item.isBlocked } : item,
@@ -3854,12 +4007,14 @@ function BoundariesPage({
 
   async function unblockAllSites() {
     if (!guardUnlock(true)) return;
-    const targets = sites.filter((site) => site.isBlocked);
+    const targets = sites.filter((site) => site.isBlocked && !site.permanent);
     if (!targets.length) {
-      setNotice("No blocked websites to unblock.");
+      setNotice(sites.some((site) => site.permanent)
+        ? "Permanent website blocks cannot be removed in FocusLock."
+        : "No blocked websites to unblock.");
       return;
     }
-    const nextSites = sites.map((site) => ({ ...site, isBlocked: false }));
+    const nextSites = sites.map((site) => site.permanent ? site : { ...site, isBlocked: false });
     await persistSites(nextSites, `Unblocked ${targets.length} site(s).`);
   }
 
@@ -3906,6 +4061,10 @@ function BoundariesPage({
   }
 
   async function deleteSite(site: SiteItem) {
+    if (site.permanent) {
+      setNotice("Permanent website blocks cannot be removed in FocusLock.");
+      return;
+    }
     if (!guardUnlock(true)) return;
     await persistSites(
       sites.filter((item) => item.domain !== site.domain),
@@ -4328,14 +4487,14 @@ function BoundariesPage({
                 <div>
                   <strong>{site.displayName || site.domain}</strong>
                   <p>
-                    <span className="category-label">{site.category}</span> ·{" "}
+                    <span className="category-label">{site.permanent ? "Permanent" : site.category}</span> ·{" "}
                     {site.domain}
                     {siteMinutes.get(normalizeSiteKey(site.domain))
                       ? ` · ${Math.round((siteMinutes.get(normalizeSiteKey(site.domain)) || 0) / 60)} min today`
                       : ""}
                   </p>
                 </div>
-                {site.isCustom && (
+                {site.isCustom && !site.permanent && (
                   <button
                     className="site-delete"
                     disabled={busy || strictActive}
@@ -4346,8 +4505,8 @@ function BoundariesPage({
                   </button>
                 )}
                 <button
-                  className={`switch ${site.isBlocked ? "on" : ""}`}
-                  disabled={busy || strictActive}
+                  className={`switch ${site.isBlocked ? "on" : ""} ${site.permanent ? "permanent" : ""}`}
+                  disabled={busy || strictActive || site.permanent}
                   onClick={() => toggleSite(site)}
                   aria-label={`${site.isBlocked ? "Allow" : "Block"} ${site.domain}`}
                 >

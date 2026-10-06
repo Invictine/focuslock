@@ -11,6 +11,53 @@ async function requireUserId(ctx: any): Promise<string> {
 
 type SyncCollection = "blockedApps" | "blockedWebsites" | "appLimits" | "blockSchedules" | "targetGroups";
 
+async function loadPermanentBlocks(ctx: QueryCtx, userId: string) {
+  const rows = await ctx.db.query("permanentBlocks")
+    .withIndex("by_user", (q) => q.eq("userId", userId)).collect();
+  return rows.map(({ targetKind, targetKey, targetLabel }) => ({ targetKind, targetKey, targetLabel }));
+}
+
+/** Permanent commitments only grow. Old boundary writers cannot erase them. */
+export const addPermanentBlocks = mutation({
+  args: { targets: v.array(v.object({
+    targetKind: v.union(v.literal("android"), v.literal("windows"), v.literal("website")),
+    targetKey: v.string(), targetLabel: v.optional(v.string()),
+  })) },
+  handler: async (ctx, args) => {
+    const userId = await requireUserId(ctx);
+    if (args.targets.length > 500) throw new Error("Too many permanent blocks");
+    // Validate the entire batch before persisting any commitments.
+    const targets = args.targets.map((target) => {
+      let targetKey = target.targetKey.trim().toLowerCase();
+      if (target.targetKind === "website") {
+        const url = new URL(targetKey.includes("://") ? targetKey : `https://${targetKey}`);
+        if (!["http:", "https:"].includes(url.protocol) || url.username || url.password || /\s/.test(targetKey)) {
+          throw new Error("Invalid permanent website");
+        }
+        targetKey = url.hostname.replace(/^www\./, "").replace(/\.$/, "");
+        if (targetKey.length > 253 || !targetKey.includes(".") || targetKey.split(".").some((part) =>
+          !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(part))) throw new Error("Invalid permanent website");
+      } else if (!targetKey || targetKey.length > 255 || /[/\\\u0000-\u001f]/.test(targetKey) ||
+          (target.targetKind === "android" && !/^[a-z0-9_]+(?:\.[a-z0-9_]+)+$/.test(targetKey))) {
+        throw new Error("Invalid permanent app");
+      }
+      const targetLabel = target.targetLabel?.trim() || targetKey;
+      if (targetLabel.length > 500) throw new Error("Permanent block label is too long");
+      return { targetKind: target.targetKind, targetKey, targetLabel };
+    });
+    let added = 0;
+    for (const target of targets) {
+      const existing = await ctx.db.query("permanentBlocks").withIndex("by_user_target", (q) =>
+        q.eq("userId", userId).eq("targetKind", target.targetKind).eq("targetKey", target.targetKey)).first();
+      if (!existing) {
+        await ctx.db.insert("permanentBlocks", { ...target, userId, createdAt: Date.now() });
+        added++;
+      }
+    }
+    return { applied: true, added };
+  },
+});
+
 /** The verified account key, shared by OAuth and Clerk SDK clients. */
 export const getAccount = query({
   args: {},
@@ -89,6 +136,7 @@ export const getSnapshot = query({
       }
     }
     const extras = {
+      permanentBlocks: await loadPermanentBlocks(ctx, userId),
       ...(groupsState ? { groupsState } : {}),
       ...(args.usageDate ? { usageSummary: await loadUsageSummary(ctx, userId, { fromDate: args.usageDate, toDate: args.usageDate }) } : {}),
       ...(args.includeKnownTargets ? { knownTargets: await loadKnownTargets(ctx, userId) } : {}),
@@ -328,6 +376,7 @@ export const getSyncPulse = query({
       : undefined;
     return {
       sitesUpdatedAt,
+      permanentBlocks: await loadPermanentBlocks(ctx, userId),
       prefsUpdatedAt,
       ...(args.nukeUpdatedAt === undefined ? {} : {
         nukeUpdatedAt,
@@ -559,6 +608,7 @@ async function loadDashboard(ctx: QueryCtx, userId: string,
     );
     return {
       state, apps, sites, records, limits, schedules, sessions, usage, prefs, devices,
+      permanentBlocks: await loadPermanentBlocks(ctx, userId),
       stateUpdatedAt: state?.updatedAt ?? 0,
       appsUpdatedAt: versions[0]?.updatedAt ?? Math.max(0, ...apps.map((row) => row.updatedAt)),
       sitesUpdatedAt: versions[1]?.updatedAt ?? Math.max(0, ...sites.map((row) => row.updatedAt)),
