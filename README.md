@@ -2,6 +2,19 @@
 
 Native Android focus and leisure-time app built with Kotlin, Jetpack Compose, and Material 3.
 
+## Release versions
+
+FocusLock currently uses **0.6.15**, following `major.feature.fix`:
+
+- Increase the first number only for an incredibly major release explicitly requested by the user. Do not automatically promote FocusLock to 1.0.
+- Increase the second number for feature additions and reset the third number to zero: `0.6.15` → `0.7.0`.
+- Increase the third number for fixes: `0.6.15` → `0.6.16`.
+- For a release containing features and fixes, use the feature increment. Bump once per coherent release, not per edit or build.
+
+Keep the release version aligned in the root, Chrome, and desktop package manifests and their root lockfile entries; Chrome's manifest; Android's `versionName`; desktop's Tauri configuration, Cargo package/lock entry, and sync heartbeat `appVersion`. Android's `versionCode` is a separate increasing build counter. This policy concerns FocusLock release metadata; standalone Void keeps its own release version.
+
+Chrome development builds use the release number directly in `manifest.json`. If a distributed extension already has a higher update version, preserve an increasing Chrome `version` and use `version_name` for the visible FocusLock release number, as described in [Chrome's version documentation](https://developer.chrome.com/docs/extensions/reference/manifest/version). After rebuilding a development extension, reload it in `chrome://extensions` to show the new version.
+
 ## Build
 
 Use JDK 17 and an Android SDK with API 36. Run:

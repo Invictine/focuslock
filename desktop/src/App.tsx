@@ -1554,7 +1554,7 @@ function DesktopApp() {
             deviceId,
             name: snap.device.name,
             platform: "windows",
-            appVersion: "1.0.0",
+            appVersion: "0.6.15",
             trackingStatus: snap.running ? "active" : "paused",
             statusDetail: trackerErrorRef.current || undefined,
             lastSeen: now,
