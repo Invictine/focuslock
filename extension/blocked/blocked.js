@@ -38,7 +38,7 @@
   document.getElementById('snoozeBtn').hidden = noSnooze;
   if (noSnooze) document.getElementById('snoozeBox').style.display = 'none';
 
-  const focusUrl = chrome.runtime.getURL('options/options.html?tab=stats&frog=1');
+  const focusUrl = chrome.runtime.getURL('popup/popup.html');
   const frogCard = document.getElementById('frogCard');
   const frogTitle = document.getElementById('frogTitle');
   const frogMeta = document.getElementById('frogMeta');
@@ -60,7 +60,8 @@
       frogMeta.textContent = 'Pick the task you want to finish before returning to this site.';
       frogProgress.hidden = true;
       frogProgressLabel.hidden = true;
-      frogCta.textContent = 'Choose a Frog in Focus →';
+      frogCta.hidden = false;
+      frogCta.textContent = 'Choose your Frog in FocusLock →';
       return;
     }
     const tracked = Number(state.trackedSeconds ?? state.progressSeconds ?? 0);
@@ -75,7 +76,7 @@
     frogProgress.querySelector('span').style.width = percent + '%';
     frogProgress.setAttribute('aria-valuenow', String(percent));
     frogProgressLabel.textContent = targetMins ? `${mins} of ${targetMins} min focused · ${percent}%` : `${percent}% complete`;
-    frogCta.textContent = state.locked ? 'Continue your Frog in Focus →' : 'View your Frog in Focus →';
+    frogCta.textContent = state.locked ? 'Continue your Frog in FocusLock →' : 'View your Frog progress →';
   }
   chrome.runtime.sendMessage({ type: 'frogStatus' }, (response) => {
     if (permanent) return; // no escape routes on a permanent block
@@ -84,7 +85,7 @@
   });
 
   document.getElementById('goBack').onclick = () => history.length > 1 ? history.back() : location.replace('chrome://newtab/');
-  document.getElementById('dashboard').onclick = () => chrome.tabs.update({ url: chrome.runtime.getURL('options/options.html?tab=stats') });
+  document.getElementById('dashboard').onclick = () => chrome.tabs.update({ url: chrome.runtime.getURL('options/options.html?account=sync') });
   document.getElementById('closeTab').onclick = (e) => { e.preventDefault(); chrome.tabs.getCurrent(t => t && chrome.tabs.remove(t.id)); };
 
   // Emergency 5-min break with type + delay (disabled for frozen/nuclear-with-password)

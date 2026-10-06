@@ -48,6 +48,15 @@ svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width:
 .state.off { background: var(--fl-surface-container-high,#232326); color: var(--fl-on-surface-variant,#bbb4b1); }
 
 .current-site { padding: 22px 24px 24px; }
+.frog-card { margin: 10px 18px 0; padding: 18px 20px; border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-large,20px); background: var(--fl-surface-container,#1b1b1e); }
+.frog-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.frog-head h2 { margin: 4px 0 0; max-width: 250px; overflow-wrap: anywhere; font-size: 15px; }
+.frog-copy { margin: 8px 0 0; color: var(--fl-on-surface-variant,#bbb4b1); font-size: 11px; line-height: 1.4; }
+.frog-card .progress { margin: 12px 0; }
+.frog-select, .frog-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.frog-select input { min-width: 0; flex: 1; height: 40px; padding: 0 11px; border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-medium,12px); background: var(--fl-surface-container-lowest,#09090b); color: var(--fl-on-surface,#eee9e7); font: inherit; font-size: 12px; }
+.frog-timer { flex: 1; color: var(--fl-on-surface-variant,#bbb4b1); font-size: 11px; }
+.frog-actions button, .frog-select button { min-height: 38px; }
 .site-heading { justify-content: space-between; gap: 14px; }
 .site-heading h2 { margin: 3px 0 0; max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 17px; letter-spacing: -.025em; }
 .site-heading > strong { font-size: 15px; color: var(--fl-primary,#dfbdb6); font-variant-numeric: tabular-nums; }

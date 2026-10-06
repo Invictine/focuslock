@@ -1,5 +1,5 @@
 import { build } from 'esbuild';
-import { readFile, writeFile, mkdir, cp } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, cp, rm } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -88,13 +88,26 @@ const bundles = await Promise.all([
 ]);
 
 // Copy only runtime assets. Never distribute .env, private keys, tests, or dependencies.
-const unpacked = path.join(root, '..', 'build', 'extension-unpacked');
+const unpacked = path.resolve(root, '..', 'build', 'extension-unpacked');
 await mkdir(unpacked, { recursive: true });
+// Dashboard assets may remain from older builds in this generated directory.
+// Recreate only the UI asset folders so those files cannot leak into the package.
+for (const name of ['popup', 'options']) {
+  const target = path.resolve(unpacked, name);
+  if (path.dirname(target) !== unpacked) throw new Error(`Refusing to clean UI output outside ${unpacked}`);
+  await rm(target, { recursive: true, force: true });
+}
 await writeFile(path.join(root, '..', 'build', 'extension-bundle-inputs.json'),
   JSON.stringify([...new Set(bundles.flatMap(result => Object.keys(result.metafile.inputs)))], null, 2));
-for (const entry of ['manifest.json', 'background', 'content', 'blocked', 'popup', 'options', 'shared', 'icons', 'dist']) {
+for (const entry of ['manifest.json', 'background', 'content', 'blocked', 'shared', 'icons', 'dist']) {
   await cp(path.join(root, entry), path.join(unpacked, entry), { recursive: true });
 }
+await mkdir(path.join(unpacked, 'popup'), { recursive: true });
+for (const entry of ['popup.html', 'popup.css']) {
+  await cp(path.join(root, 'popup', entry), path.join(unpacked, 'popup', entry));
+}
+await mkdir(path.join(unpacked, 'options'), { recursive: true });
+await cp(path.join(root, 'options', 'options.html'), path.join(unpacked, 'options', 'options.html'));
 await mkdir(path.join(unpacked, 'src'), { recursive: true });
 for (const entry of ['matcher.js', 'features.js', 'store.js', 'policy.js', 'desktop-bridge.js']) {
   await cp(path.join(root, 'src', entry), path.join(unpacked, 'src', entry));

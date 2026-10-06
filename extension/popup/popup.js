@@ -19,6 +19,7 @@ let featureStatus = null;
 let busy = false;
 let message = '';
 let messageTimer = null;
+let featureBusy = false;
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>'"]/g, (char) => ({
@@ -68,6 +69,9 @@ function icon(name) {
 
 function render() {
   if (!clerk?.loaded) return;
+  const frogInput = document.activeElement?.id === 'frogTitleInput' ? document.activeElement : null;
+  const frogDraft = frogInput?.value || '';
+  const frogSelection = frogInput ? [frogInput.selectionStart, frogInput.selectionEnd] : null;
   app.setAttribute('aria-busy', String(busy));
   const signedIn = Boolean(clerk.user && clerk.session);
   const strict = localState?.strictMode === true
@@ -82,6 +86,9 @@ function render() {
   const browser = signedIn ? deviceStatus(browserDevice, 'Chrome extension') : { state: 'off', title: 'Chrome extension', detail: 'Sign in to sync tracking' };
   const android = signedIn ? deviceStatus(androidDevice, 'Android app') : { state: 'off', title: 'Android app', detail: 'Waiting for account connection' };
   const initials = clerk.user?.firstName?.[0] || clerk.user?.primaryEmailAddress?.emailAddress?.[0] || 'F';
+  const frog = featureStatus?.frog;
+  const showFrog = frog?.enabled === true;
+  const frogPercent = frog?.requiredSeconds > 0 ? Math.min(100, Math.round(frog.trackedSeconds / frog.requiredSeconds * 100)) : 0;
 
   app.innerHTML = `
     <header class="topbar">
@@ -110,12 +117,6 @@ function render() {
       </section>
     `}
 
-    <nav class="destinations" aria-label="FocusLock sections">
-      <button type="button" data-open-tab="stats">Focus</button>
-      <button type="button" data-open-tab="blocks">Boundaries</button>
-      <button type="button" data-open-tab="strict" aria-label="Strict Mode">Strict${strictActive ? ' · active' : ''}</button>
-    </nav>
-
     ${accountError ? `<p class="error" role="alert">${escapeHtml(accountError)} <button class="text-button" id="account-retry" type="button">Open account settings</button></p>` : ''}
 
     <section class="current-site">
@@ -128,13 +129,31 @@ function render() {
       ${strictActive ? '<p class="strict-status" role="status">Strict Mode is active. Boundaries are locked until it ends.</p>' : ''}
     </section>
 
+    ${showFrog ? `<section class="frog-card" aria-labelledby="frog-heading">
+      <div class="frog-head"><div><p class="label">Eat the Frog · Chrome</p><h2 id="frog-heading">${escapeHtml(frog.frog?.title || 'Choose today’s task')}</h2></div><span class="state ${frog.locked ? 'idle' : 'ok'}">${frog.locked ? 'Active' : 'Complete'}</span></div>
+      <p class="frog-copy">${frog.frog ? `${formatDuration(frog.trackedSeconds)} of ${formatDuration(frog.requiredSeconds)} focused${frog.tickedOff ? ' · task marked done' : ' · mark done when finished'}` : 'Choose the task you need to finish before opening boundary websites.'}</p>
+      ${frog.frog ? `<div class="progress" role="progressbar" aria-label="Frog focus progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${frogPercent}"><i style="width:${frogPercent}%"></i></div>` : ''}
+      ${!frog.frog && frog.armed && frog.locked ? `<div class="frog-select"><input id="frogTitleInput" maxlength="200" placeholder="Today’s important task" aria-label="Today’s important task" value="${escapeHtml(frogDraft)}" ${featureBusy ? 'disabled' : ''}><button class="primary" id="frogSelect" ${featureBusy ? 'disabled' : ''}>Choose</button></div>` : ''}
+      ${frog.frog ? `<div class="frog-actions">${featureStatus?.timer
+        ? `<span class="frog-timer">Focus session running</span><button class="secondary" id="frogTimerFinish" ${featureBusy ? 'disabled' : ''}>Finish session</button>`
+        : (frog.locked ? `<button class="primary" id="frogTimerStart" ${featureBusy ? 'disabled' : ''}>Focus ${Math.max(1, Math.ceil((frog.requiredSeconds - frog.trackedSeconds) / 60))} min</button>` : '')}
+        <button class="secondary" id="frogDone" ${featureBusy ? 'disabled' : ''}>${frog.tickedOff ? 'Task not finished' : 'Mark task done'}</button></div>` : ''}
+    </section>` : ''}
+
     ${message ? `<p class="feedback" role="status">${escapeHtml(message)}</p>` : ''}
     ${cloud?.error ? `<p class="error" role="alert">Sync paused: ${escapeHtml(cloud.error)}</p>` : ''}
 
-    <footer><button class="text-button" id="dashboard">Open Focus</button>${signedIn ? '<button class="text-button" id="signout">Sign out</button>' : ''}<button class="icon-button" id="settings" aria-label="Open extension settings">${icon('settings')}</button></footer>
+    <footer><button class="text-button" id="settings">Account &amp; sync</button>${signedIn ? '<button class="text-button" id="signout">Sign out</button>' : ''}</footer>
   `;
 
   bindEvents(signedIn);
+  if (frogInput) {
+    const nextInput = document.getElementById('frogTitleInput');
+    nextInput?.focus();
+    if (frogSelection && Number.isInteger(frogSelection[0]) && Number.isInteger(frogSelection[1])) {
+      nextInput?.setSelectionRange(...frogSelection);
+    }
+  }
 }
 
 function flash(text) {
@@ -145,9 +164,7 @@ function flash(text) {
 }
 
 function bindEvents(signedIn) {
-  document.querySelectorAll('[data-open-tab]').forEach((button) => button.addEventListener('click', () => openDashboard(button.dataset.openTab)));
-  document.getElementById('dashboard')?.addEventListener('click', () => openDashboard('stats'));
-  document.getElementById('settings')?.addEventListener('click', () => chrome.tabs.create({ url: chrome.runtime.getURL('options/options.html?tab=settings') }));
+  document.getElementById('settings')?.addEventListener('click', () => openAccountPage(signedIn ? 'profile' : 'signin'));
   document.getElementById('account')?.addEventListener('click', () => openAccountPage(signedIn ? 'profile' : 'signin'));
   document.getElementById('signin')?.addEventListener('click', () => openAccountPage('signin'));
   document.getElementById('account-retry')?.addEventListener('click', () => openAccountPage('signin'));
@@ -163,6 +180,16 @@ function bindEvents(signedIn) {
       flash('Allowed for 5 minutes.');
     } catch (error) { flash(error?.message || 'Could not allow this website.'); }
   });
+  document.getElementById('frogSelect')?.addEventListener('click', () => runFeatureAction({
+    type: 'frogSelect', title: document.getElementById('frogTitleInput')?.value || '',
+  }, 'Frog task saved.'));
+  document.getElementById('frogTimerStart')?.addEventListener('click', () => runFeatureAction({
+    type: 'focusTimerStart', minutes: Math.max(1, Math.ceil(((featureStatus?.frog?.requiredSeconds || 60) - (featureStatus?.frog?.trackedSeconds || 0)) / 60)),
+  }, 'Focus session started.'));
+  document.getElementById('frogTimerFinish')?.addEventListener('click', () => runFeatureAction({ type: 'focusTimerFinish' }, 'Focus progress saved.'));
+  document.getElementById('frogDone')?.addEventListener('click', () => runFeatureAction({
+    type: 'frogTick', tickedOff: !featureStatus?.frog?.tickedOff,
+  }, featureStatus?.frog?.tickedOff ? 'Task marked unfinished.' : 'Task marked done.'));
   document.getElementById('block-site')?.addEventListener('click', async () => {
     if (signedIn) {
       let result;
@@ -194,6 +221,24 @@ function bindEvents(signedIn) {
   });
 }
 
+async function runFeatureAction(action, successMessage) {
+  if (featureBusy) return;
+  featureBusy = true;
+  render();
+  let feedback = successMessage;
+  try {
+    const result = await chrome.runtime.sendMessage(action);
+    if (!result?.ok) throw new Error(result?.error || 'FocusLock could not save this Frog update.');
+    featureStatus = await chrome.runtime.sendMessage({ type: 'featureStatus' });
+    localState = await S.load();
+  } catch (error) { feedback = error?.message || 'FocusLock could not save this Frog update.'; }
+  featureBusy = false;
+  message = feedback;
+  render();
+  clearTimeout(messageTimer);
+  messageTimer = setTimeout(() => { message = ''; render(); }, 2800);
+}
+
 function openAccountPage(view) {
   const url = new URL(chrome.runtime.getURL('options/options.html'));
   url.searchParams.set('account', view);
@@ -216,12 +261,6 @@ async function refreshCloud(forceSync) {
     busy = false;
     render();
   }
-}
-
-function openDashboard(tab) {
-  const url = new URL(chrome.runtime.getURL('options/options.html'));
-  url.searchParams.set('tab', tab);
-  chrome.tabs.create({ url: url.href });
 }
 
 async function init() {

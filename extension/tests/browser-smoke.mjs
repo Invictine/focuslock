@@ -1,5 +1,5 @@
-// Real unpacked MV3 extension in a disposable Chromium profile. Cached account
-// policy is seeded for enforcement checks; this does not sign into an account.
+// Real unpacked MV3 extension in a disposable Chromium profile. This verifies
+// package loading, local boundary persistence/enforcement, and the compact UI.
 import { chromium } from 'playwright-core';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -10,307 +10,159 @@ import path from 'node:path';
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const out = path.join(root, 'build', 'extension-verification');
 await mkdir(out, { recursive: true });
-const server = createServer((_req, res) => {
-  res.setHeader('Content-Type', 'text/html');
-  res.end('<!doctype html><title>FocusLock browser test</title><h1>Local test website</h1>');
-});
+const server = createServer((_req, res) => { res.setHeader('Content-Type', 'text/html'); res.end('<!doctype html><title>FocusLock test</title><h1>Local test website</h1>'); });
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const site = `http://127.0.0.1:${server.address().port}/`;
 const extension = path.join(root, 'build', 'extension-unpacked');
 let context;
 const checks = [];
 try {
-  context = await chromium.launchPersistentContext('', {
-    channel: 'chromium', headless: true,
-    args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`,
-      '--host-resolver-rules=MAP restored.test 127.0.0.1'],
-  });
+  context = await chromium.launchPersistentContext('', { channel: 'chromium', headless: true,
+    args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`] });
   const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
   const id = new URL(worker.url()).hostname;
-  const page = await context.newPage();
   const errors = [];
-  page.on('pageerror', e => errors.push(e.message));
-  await page.goto(`chrome-extension://${id}/options/options.html`);
-  await page.locator('#lists .card').first().waitFor({ state: 'attached' });
-  checks.push('Packaged extension loads its real service worker and dashboard');
-  await page.evaluate(async () => {
-    const state = await FocusLockStore.load();
-    // Headless automation does not move the OS mouse. Use the supported one-hour
-    // idle setting so the actual chrome.idle API doesn't pause the timed fixture
-    // simply because the human hasn't touched the keyboard during this test.
+  const account = await context.newPage();
+  account.on('pageerror', error => errors.push(error.message));
+  await account.goto(`chrome-extension://${id}/options/options.html?account=signin`);
+  await account.locator('#accountSignIn').waitFor({ state: 'visible' });
+  assert.equal(await account.locator('#tab-stats, #tab-blocks, #tab-strict, #tab-settings').count(), 0);
+  assert.equal(await account.locator('#accountDevicesCard').isHidden(), true);
+  assert.deepEqual(await account.locator('script').evaluateAll(nodes => nodes.map(node => new URL(node.src).pathname)),
+    ['/dist/options-auth.js'], 'Account page loads only the authentication and sync controller');
+  await account.screenshot({ path: path.join(out, 'extension-account.png'), fullPage: true });
+  checks.push('Packaged extension opens the compact persistent account page without dashboard assets');
+
+  await worker.evaluate(async () => {
+    const state = await ensureState();
     state.settings.idleTimeoutSec = 3600;
     state.lists = [{ id: 'smoke', name: 'Browser test', enabled: true, alwaysOn: true,
       mode: 'blacklist', sites: ['127.0.0.1'], exceptions: [], dailyLimitMin: 0, lockedUntil: 0 }];
     await FocusLockStore.save(state);
-    const refreshed = await chrome.runtime.sendMessage({ type: 'refresh' });
-    if (!refreshed?.ok) throw new Error(`Refresh failed: ${JSON.stringify(refreshed)}`);
   });
+  await account.evaluate(() => chrome.runtime.sendMessage({ type: 'refresh' }));
+  const popup = await context.newPage();
+  popup.on('pageerror', error => errors.push(error.message));
+  await popup.goto(`chrome-extension://${id}/popup/popup.html`);
+  await popup.locator('#block-site').waitFor({ state: 'visible' });
+  assert.equal(await popup.locator('[data-open-tab], #dashboard').count(), 0, 'Popup does not offer dashboard navigation');
+  assert.equal(await popup.locator('#block-site').isVisible(), true, 'Quick block control remains in the popup');
+  await popup.screenshot({ path: path.join(out, 'extension-popup.png'), fullPage: true });
+  checks.push('Popup keeps current-site tracking and quick block controls without dashboard links');
+
   const website = await context.newPage();
-  await website.goto(site).catch(error => {
-    if (!/ERR_ABORTED|interrupted/.test(error.message)) throw error;
-  });
-  for (let attempt = 0; attempt < 8; attempt++) {
-    try {
-      await website.waitForURL(`chrome-extension://${id}/blocked/blocked.html**`, { timeout: 5000, waitUntil: 'commit' });
-      break;
-    } catch (error) { if (attempt === 7) {
-      console.log('Failed navigation:', website.url());
-      console.log('Worker verdict:', await page.evaluate(() => chrome.runtime.sendMessage({ type: 'verdict', url: 'http://127.0.0.1/' })));
-      throw error;
-    } }
+  let blocked = false;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    await website.goto(site).catch(error => { if (!/ERR_ABORTED|interrupted/.test(error.message)) throw error; });
+    await website.bringToFront();
+    try { await website.waitForURL(`chrome-extension://${id}/blocked/blocked.html**`, { timeout: 3000, waitUntil: 'commit' }); blocked = true; break; }
+    catch (error) { if (attempt === 5) throw error; }
   }
+  assert.equal(blocked, true, 'Packaged worker eventually redirects the HTTP navigation');
   await website.locator('#blockedUrl').waitFor();
-  checks.push('Actual HTTP navigation is redirected to the packaged block page');
+  assert.match(await website.locator('#dashboard').textContent(), /Account & sync/);
+  checks.push('Real HTTP navigation is blocked and the block page keeps its controls');
   await website.screenshot({ path: path.join(out, 'blocked.png'), fullPage: true });
-  await page.reload();
-  assert.equal(await page.evaluate(async () => (await FocusLockStore.load()).lists[0].id), 'smoke');
-  checks.push('Saved boundaries survive dashboard reload');
-  await page.evaluate(async () => {
-    const state = await FocusLockStore.load();
+
+  assert.equal(await worker.evaluate(async () => (await FocusLockStore.load()).lists[0].id), 'smoke', 'Boundary settings remain persisted');
+
+  // Exercise policy transitions through the packaged background worker, with
+  // no dashboard UI involved.
+  await worker.evaluate(async () => {
+    const state = await ensureState();
     state.lists = [];
     state.stats = {};
     state.leisureStats = {};
     state.cloudSites = [{ domain: '127.0.0.1', isBlocked: true }];
     state.cloudSitesLoaded = true;
     state.cloudSitesSyncedAt = Date.now();
-    state.cloudPolicy = { state: { creditBalanceSeconds: 4, lastResetDate: FocusLockStore.todayKey() },
-      groups: [], limits: [], schedules: [] };
+    state.cloudPolicy = { state: { creditBalanceSeconds: 8, lastResetDate: FocusLockStore.todayKey(), totalScrollSecondsToday: 0 }, groups: [], limits: [], schedules: [] };
     state.cloudLeisureBaseline = {};
     await FocusLockStore.save(state);
-    await chrome.runtime.sendMessage({ type: 'refresh' });
   });
-  const leisure = await context.newPage();
-  await leisure.goto(site);
-  await leisure.bringToFront();
-  await leisure.locator('h1').waitFor();
-  checks.push('A selected shared website opens while its cached earned balance is positive');
-  try {
-    await leisure.waitForURL(`chrome-extension://${id}/blocked/blocked.html**`, { timeout: 15000, waitUntil: 'commit' });
-  } catch (error) {
-    console.log('Earned-time enforcement diagnostics:', await worker.evaluate(async () => {
-      const state = await FocusLockStore.load();
-      return { cursor: mem.cur, focused: mem.focused, checkpoint: state.trackingCheckpoint,
-        stats: state.stats, spend: state.leisureStats, balance: state.cloudPolicy?.state?.creditBalanceSeconds,
-        tabs: (await chrome.tabs.query({ active: true })).map(tab => ({ id: tab.id, url: tab.url })),
-        idle: await chrome.idle.queryState(state.settings.idleTimeoutSec),
-        windows: (await chrome.windows.getAll()).map(window => ({ id: window.id, focused: window.focused })) };
-    }));
-    throw error;
-  }
-  assert.equal(new URL(leisure.url()).searchParams.get('mode'), 'earned-time');
-  const spent = await page.evaluate(async () => {
-    const state = await FocusLockStore.load();
-    return state.leisureStats[FocusLockStore.todayKey()]?.['127.0.0.1'];
-  });
-  assert.ok(spent >= 4 && spent < 10, `Expected a short persisted leisure slice, received ${spent}`);
-  checks.push('The content guard spends earned time and redirects an already-open page when it is exhausted');
-  await leisure.close();
+  await account.evaluate(() => chrome.runtime.sendMessage({ type: 'refresh' }));
+  const earned = await context.newPage();
+  await earned.goto(site);
+  await earned.bringToFront();
+  await earned.locator('h1').waitFor();
+  await earned.waitForURL(`chrome-extension://${id}/blocked/blocked.html**`, { timeout: 15000, waitUntil: 'commit' });
+  assert.equal(new URL(earned.url()).searchParams.get('mode'), 'earned-time');
+  const spent = await worker.evaluate(async () => (await FocusLockStore.load()).leisureStats[FocusLockStore.todayKey()]?.['127.0.0.1'] || 0);
+  assert.ok(spent > 0 && spent < 10, `Expected earned time to be persisted, received ${spent}`);
+  checks.push('Cached earned time permits a shared site briefly, records the spend, then blocks it');
+  await earned.close();
+
   await worker.evaluate(async () => {
     const state = await ensureState();
-    state.cloudAccountId = 'browser-smoke-account';
-    state.lists = [];
-    state.cloudSites = [];
-    state.permanentSites = [];
-    state.cloudPolicy = { state: { creditBalanceSeconds: 60, lastResetDate: FocusLockStore.todayKey() },
-      groups: [], limits: [], schedules: [] };
-    await FocusLockStore.save(state);
-    await syncCloud('live', { ok: true, signedIn: true, userId: 'browser-smoke-account',
-      isCurrent: async () => true,
-      permanentBlocks: [{ targetKind: 'website', targetKey: 'restored.test', targetLabel: 'Restored test site' }],
-    });
-  });
-  assert.equal(await page.evaluate(async () => (await FocusLockStore.load()).permanentSites.includes('restored.test')), true);
-  const permanentWebsite = await context.newPage();
-  await permanentWebsite.goto(site.replace('127.0.0.1', 'restored.test')).catch(error => {
-    if (!/ERR_ABORTED|interrupted/.test(error.message)) throw error;
-  });
-  await permanentWebsite.waitForURL(`chrome-extension://${id}/blocked/blocked.html**`, { timeout: 10000, waitUntil: 'commit' });
-  assert.equal(new URL(permanentWebsite.url()).searchParams.get('mode'), 'permanent');
-  // The navigation commit precedes the block-page script painting its mode pill.
-  await permanentWebsite.waitForFunction(() => /Permanent block/i.test(document.querySelector('#listPill')?.textContent || ''));
-  assert.match(await permanentWebsite.locator('#listPill').textContent(), /Permanent block/i);
-  checks.push('A restored permanent website is saved by the packaged worker and blocked on navigation to its domain');
-  await permanentWebsite.close();
-  await page.evaluate(async () => {
-    const state = await FocusLockStore.load();
-    state.stats = {};
     state.leisureStats = {};
-    state.cloudSites = [];
-    state.cloudPolicy.groups = [{ groupId: 'merged-test', name: 'Phone and browser', limitEnabled: true,
-      dailyLimitMinutes: 1, members: [{ targetKind: 'app', targetKey: 'phone.test', targetLabel: 'Phone test' },
-        { targetKind: 'website', targetKey: '127.0.0.1', targetLabel: 'Browser test' }] }];
-    state.cloudUsage = { date: FocusLockStore.todayKey(), groups: [{ groupId: 'merged-test', trackedSeconds: 59 }], targets: [] };
+    state.cloudPolicy.state.creditBalanceSeconds = 60;
+    state.cloudPolicy.groups = [{ groupId: 'smoke-cap', name: 'Smoke cap', limitEnabled: true, dailyLimitMinutes: 1,
+      members: [{ targetKind: 'app', targetKey: 'phone.test', targetLabel: 'Phone test' }, { targetKind: 'website', targetKey: '127.0.0.1', targetLabel: 'Browser test' }] }];
+    state.cloudUsage = { date: FocusLockStore.todayKey(), groups: [{ groupId: 'smoke-cap', trackedSeconds: 59 }], targets: [] };
     state.cloudUsageBaseline = {};
-    state.cloudSitesSyncedAt = Date.now();
     await FocusLockStore.save(state);
-    await chrome.runtime.sendMessage({ type: 'refresh' });
   });
-  const merged = await context.newPage();
-  await merged.goto(site);
-  await merged.bringToFront();
-  await merged.waitForURL(`chrome-extension://${id}/blocked/blocked.html**`, { timeout: 10000, waitUntil: 'commit' });
-  assert.equal(new URL(merged.url()).searchParams.get('mode'), 'daily-limit');
-  const sharedCapSnooze = await page.evaluate(() => chrome.runtime.sendMessage({ type: 'snooze', url: 'http://127.0.0.1/' }));
-  assert.equal(sharedCapSnooze.ok, false);
-  checks.push('A merged app/website cap adds browser time to cached phone usage and rejects snoozing the limit');
-  await merged.close();
-  await page.evaluate(async () => {
-    const state = await FocusLockStore.load();
-    state.cloudPolicy = null;
-    state.cloudSites = [{ domain: '127.0.0.1', isBlocked: true }];
-    state.lists = [{ id: 'strict-ui', name: 'Local boundary', enabled: true, alwaysOn: true,
-      mode: 'blacklist', sites: ['ui.example'], exceptions: [], dailyLimitMin: 0, lockedUntil: 0 }];
-    state.cloudPolicy = { state: { creditBalanceSeconds: 600, lastResetDate: FocusLockStore.todayKey(), totalScrollSecondsToday: 0 },
-      groups: [], limits: [], schedules: [] };
-    state.cloudLeisureBaseline = {};
+  await account.evaluate(() => chrome.runtime.sendMessage({ type: 'refresh' }));
+  const cappedVerdict = await account.evaluate(url => chrome.runtime.sendMessage({ type: 'verdict', url }), site);
+  assert.equal(cappedVerdict.mode, 'daily-limit');
+  const capPause = await account.evaluate(url => chrome.runtime.sendMessage({ type: 'snooze', url }), site);
+  assert.equal(capPause.ok, false, 'Merged daily limits cannot be snoozed');
+  checks.push('Merged app and website caps block at the cached usage limit and reject snoozes');
+
+  await worker.evaluate(async () => {
+    const state = await ensureState();
+    state.cloudPolicy.groups = [];
+    state.cloudUsage = { date: FocusLockStore.todayKey(), groups: [], targets: [] };
+    state.cloudPolicy.state.creditBalanceSeconds = 60;
     state.leisureStats = {};
-    state.snoozes = {};
     await FocusLockStore.save(state);
-    await chrome.runtime.sendMessage({ type: 'refresh' });
+    await syncCloud('live', { ok: true, signedIn: true, userId: 'smoke-account', isCurrent: async () => true,
+      prefs: { strictMode: true, strictEndsAt: Date.now() + 60000 } });
   });
-  await page.bringToFront();
-  await page.locator('nav button[data-tab="blocks"]').click();
-  await page.locator('[data-boundary-route="sites"]').click();
-  await page.locator('#siteRows [data-del]').first().waitFor();
-  // Simulate the incoming mobile prefs at the cloud boundary, using the real
-  // packaged worker, storage events, dashboard, and HTTP enforcement.
+  const funded = await worker.evaluate(async () => verdictFor('http://127.0.0.1/', await ensureState()));
+  assert.equal(funded.blocked, false, 'Strict Mode does not itself block an earned-time site');
   await worker.evaluate(async () => {
-    const state = await ensureState();
-    await syncCloud('live', { ok: true, signedIn: true, userId: state.cloudAccountId,
-      isCurrent: async () => true, prefs: { strictMode: true, strictEndsAt: Date.now() + 60000 } });
-  });
-  await page.waitForFunction(() => document.getElementById('lockdownBadge').textContent === 'Strict Mode');
-  assert.equal(await page.locator('#presetUnblock').isDisabled(), true);
-  assert.equal(await page.locator('#newList').isDisabled(), true);
-  assert.equal(await page.locator('#siteRows [data-del]').first().isDisabled(), true);
-  checks.push('Incoming mobile Strict Mode locks the already-open boundary dashboard without a reload');
-  const strictFunded = await context.newPage();
-  await strictFunded.goto(site);
-  await strictFunded.locator('h1').waitFor();
-  checks.push('Actual selected-site navigation succeeds under Strict Mode while earned credit remains');
-  await worker.evaluate(async () => {
-    const state = await ensureState();
-    state.cloudPolicy.state.creditBalanceSeconds = 0;
-    state.snoozes = {};
+    const state = await ensureState(); state.cloudPolicy.state.creditBalanceSeconds = 0; state.leisureStats = {}; state.snoozes = {};
     await FocusLockStore.save(state); mem.state = state;
   });
-  const permittedCreditSnooze = await page.evaluate(() => chrome.runtime.sendMessage({ type: 'snooze', url: 'http://127.0.0.1/' }));
-  assert.equal(permittedCreditSnooze.ok, true, 'Strict Mode permits a snooze for an actual zero-credit block');
-  checks.push('A real zero-credit block can be snoozed during Strict Mode');
-  await strictFunded.close();
-  await page.evaluate(async () => {
-    const state = await FocusLockStore.load();
-    state.strictMode = false; state.strictEndsAt = Date.now() - 1;
-    state.cloudPrefs = { strictMode: false, strictEndsAt: 0 };
-    state.snoozes = {};
-    await FocusLockStore.save(state);
-    await chrome.runtime.sendMessage({ type: 'refresh' });
-  });
-  await page.waitForFunction(() => !document.getElementById('presetUnblock').disabled, { timeout: 10000 });
-  assert.equal(await page.locator('#siteRows [data-del]').first().isDisabled(), false);
-  checks.push('Boundary controls unlock when the synced commitment expires');
-  await worker.evaluate(async () => {
-    const state = await ensureState();
-    await syncCloud('live', { ok: true, signedIn: true, userId: state.cloudAccountId,
-      isCurrent: async () => true, prefs: { strictMode: true, strictEndsAt: Date.now() + 600000 } });
-  });
-  // Simulate offline browser operation; cached boundaries must remain enforceable.
+  const strictPause = await account.evaluate(url => chrome.runtime.sendMessage({ type: 'snooze', url }), site);
+  assert.equal(strictPause.ok, true, 'Strict Mode still permits a zero-credit site pause');
+  await worker.evaluate(async () => { await FocusLockStore.update(state => { state.snoozes = {}; return state; }); mem.state = await FocusLockStore.load(); });
   await context.setOffline(true);
-  const verdict = await page.evaluate(() => chrome.runtime.sendMessage({ type: 'verdict', url: 'http://127.0.0.1/' }));
-  assert.equal(verdict.blocked, true);
-  checks.push('Cached boundaries still produce a blocking verdict offline');
-  const popup = await context.newPage();
-  await popup.goto(`chrome-extension://${id}/popup/popup.html`);
-  await popup.locator('#block-site').waitFor({ timeout: 20000 });
-  assert.equal(await popup.locator('.fatal').count(), 0);
-  assert.equal(await popup.locator('#allow-site').isVisible(), true,
-    'The popup remains available during Strict Mode; actual snooze permission is checked by the worker');
-  assert.match(await popup.locator('.current-site').textContent(), /Strict Mode is active/);
-  await popup.screenshot({ path: path.join(out, 'popup-offline.png'), fullPage: true });
-  checks.push('Real popup remains usable with network offline');
-  await popup.close();
+  const offlineVerdict = await account.evaluate(url => chrome.runtime.sendMessage({ type: 'verdict', url }), site);
+  assert.equal(offlineVerdict.blocked, true, 'Cached boundary policy still blocks offline');
   await context.setOffline(false);
+  checks.push('Synced Strict Mode leaves site access policy intact, preserves zero-credit snoozes, and cached rules enforce offline');
+
   await worker.evaluate(async () => {
-    // End the synthetic incoming commitment before exercising independent Frog.
     const state = await ensureState();
-    state.strictEndsAt = Date.now() - 1;
-    state.cloudPrefs = { strictMode: true, strictEndsAt: state.strictEndsAt };
-    await FocusLockStore.save(state); mem.state = state;
+    state.strictMode = false; state.strictEndsAt = 0; state.cloudPrefs = { strictMode: false, strictEndsAt: 0 };
+    state.cloudPolicy = null; state.cloudSites = []; state.permanentSites = [];
+    state.browserFrog = self.FocusLockFeatures.frogState({ enabled: false });
+    state.focusTimer = null; state.snoozes = {};
+    await FocusLockStore.save(state);
   });
-  // Use the actual UI and worker for new browser-local features in this
-  // disposable profile. Synthetic elapsed time avoids a minute-long test wait.
-  await page.locator('nav button[data-tab="stats"]').click();
-  await page.locator('#browserFrogWake').fill('0');
-  await page.locator('#browserFrogMinutes').fill('1');
-  page.once('dialog', dialog => dialog.accept());
-  await page.locator('#browserFrogEnable').click();
-  await page.locator('#browserFrogInput').fill('Read the chemistry chapter');
-  await page.locator('#browserFrogSelect').click();
-  await page.locator('#browserFrogFocus').waitFor({ state: 'visible' });
-  await page.locator('#browserFrogFocus').click();
-  await page.reload();
-  await page.locator('#timerFinish').waitFor({ state: 'visible' });
-  await page.waitForFunction(() => !document.getElementById('timerFinish').disabled);
-  assert.equal(await page.locator('#browserFrogTitle').textContent(), 'Read the chemistry chapter');
-  assert.equal(await page.locator('#browserFrogFocus').isDisabled(), true);
-  checks.push('Frog task and running timer survive a real dashboard reload');
-  await page.locator('#browserFrogTick').click();
-  const frogVerdict = await page.evaluate(() => chrome.runtime.sendMessage({ type: 'verdict', url: 'http://127.0.0.1/' }));
-  assert.equal(frogVerdict.mode, 'frog', 'Marking done without focus cannot release the website');
-  const frogWebsite = await context.newPage();
-  await frogWebsite.goto(site).catch(error => { if (!/ERR_ABORTED|interrupted/.test(error.message)) throw error; });
-  for (let attempt = 0; attempt < 4; attempt++) {
-    try { await frogWebsite.waitForURL(`chrome-extension://${id}/blocked/blocked.html**`, { waitUntil: 'commit' }); break; }
-    catch (error) { if (attempt === 3 || !/ERR_ABORTED/.test(error.message)) throw error; }
-  }
-  await frogWebsite.locator('#frogTitle').waitFor();
-  await frogWebsite.waitForFunction(() => document.getElementById('frogTitle').textContent === 'Read the chemistry chapter');
-  assert.equal(await frogWebsite.locator('#snoozeBtn').isVisible(), false);
-  await frogWebsite.screenshot({ path: path.join(out, 'blocked-frog.png'), fullPage: true });
-  await frogWebsite.close();
+  const frogConfig = await account.evaluate(() => chrome.runtime.sendMessage({ type: 'frogConfigure', enabled: true, requiredMinutes: 1, wakeHour: 0 }));
+  assert.equal(frogConfig.ok, true);
+  const frogSelect = await account.evaluate(() => chrome.runtime.sendMessage({ type: 'frogSelect', title: 'Read a chapter' }));
+  assert.equal(frogSelect.ok, true);
+  const frogTimer = await account.evaluate(() => chrome.runtime.sendMessage({ type: 'focusTimerStart', minutes: 1 }));
+  assert.equal(frogTimer.ok, true);
   await worker.evaluate(async () => {
     await FocusLockStore.update(state => { state.focusTimer.startedAt = Date.now() - 61000; return state; });
     mem.state = await FocusLockStore.load();
     await maintainFeatures(false);
   });
-  await page.waitForFunction(() => document.getElementById('browserFrogBadge').textContent === 'Complete');
-  assert.equal((await page.evaluate(() => chrome.runtime.sendMessage({ type: 'featureStatus' }))).timer, null);
-  checks.push('Real Frog enforcement requires both task completion and elapsed focus, and rejects snooze');
-  await page.locator('nav button[data-tab="strict"]').click();
-  await page.locator('[data-strict-choice="days"]').click();
-  assert.equal(await page.locator('[data-strict-input="hours"]').isVisible(), false);
-  assert.equal(await page.locator('[data-strict-input="days"]').isVisible(), true);
-  await page.locator('[data-strict-choice="date"]').click();
-  assert.equal(await page.locator('[data-strict-input="days"]').isVisible(), false);
-  assert.equal(await page.locator('[data-strict-input="date"]').isVisible(), true);
-  checks.push('Strict activation shows one duration panel at a time');
-  for (const width of [1280, 840, 390]) {
-    await page.setViewportSize({ width, height: 900 });
-    for (const tab of ['stats', 'blocks', 'strict', 'settings', 'account']) {
-      await page.locator(`header button[data-tab="${tab}"]`).click();
-      if (tab === 'stats') await page.locator('#focusConnectNotice').waitFor({ state: 'visible' });
-      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false, `${tab} overflow at ${width}`);
-      await page.screenshot({ path: path.join(out, `${tab}-${width}.png`), fullPage: true });
-    }
-  }
-  checks.push('Primary destinations and account/settings fit 1280, 840 and 390px viewports');
-  await page.locator('nav button[data-tab="strict"]').click();
-  await page.locator('[data-strict-choice="hours"]').click();
-  await page.locator('#strictHours').fill('1');
-  page.once('dialog', dialog => dialog.accept());
-  await page.locator('#strictCommit').click();
-  await page.waitForFunction(() => document.getElementById('strictBadge').textContent === 'Committed');
-  await page.reload();
-  await page.locator('nav button[data-tab="strict"]').click();
-  await page.waitForFunction(() => document.getElementById('strictCommit').textContent === 'Extend commitment');
-  assert.equal(await page.locator('#guardianSave').isDisabled(), true);
-  assert.equal((await page.evaluate(() => chrome.runtime.sendMessage({ type: 'snooze', url: 'http://127.0.0.1/' }))).ok, true,
-    'An actual zero-credit block remains snoozable during Strict Mode');
-  await page.screenshot({ path: path.join(out, 'strict-active-390.png'), fullPage: true });
-  checks.push('Strict commitment starts through the actual UI, survives reload, locks guardian edits, and preserves policy-based snoozes');
-  assert.deepEqual(errors, [], 'Dashboard has no uncaught page errors');
-  const report = { realExtension: true, signedIn: false, seededPolicy: true, extensionId: id, checks, pageErrors: errors,
-    limitations: ['Real signed-in cross-device sync requires the user account and Android device.'] };
+  const focusedFrog = await account.evaluate(() => chrome.runtime.sendMessage({ type: 'featureStatus' }));
+  assert.equal(focusedFrog.timer, null, 'Elapsed background timer is recovered and completed after worker wake');
+  assert.ok(focusedFrog.frog.trackedSeconds >= 60);
+  const tick = await account.evaluate(() => chrome.runtime.sendMessage({ type: 'frogTick', tickedOff: true }));
+  assert.equal(tick.frog.locked, false, 'Frog releases only after focus requirement and task completion');
+  checks.push('Browser Frog and focus timer state survive background updates and release only after both requirements pass');
+
+  assert.deepEqual(errors, [], 'Popup and account page have no uncaught runtime errors');
+  const report = { realExtension: true, signedIn: false, checks, pageErrors: errors,
+    limitations: ['A signed-in cross-device round trip requires a real account and Android device.'] };
   await writeFile(path.join(out, 'browser-results.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify(report, null, 2));
 } finally {

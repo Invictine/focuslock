@@ -1,586 +1,79 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>FocusLock Dashboard</title>
-<link rel="stylesheet" href="../shared/theme-tokens.css" />
-<style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  body { margin: 0; min-height: 100vh; background: var(--fl-background,#0d0d0f); color: var(--fl-on-surface,#eee9e7); font-family: var(--fl-font-family,"Segoe UI",Roboto,system-ui,-apple-system,BlinkMacSystemFont,sans-serif); font-size: 14px; font-variant-numeric: tabular-nums; }
-  .app-shell { min-height: 100vh; display: grid; grid-template-columns: 218px minmax(0,1fr); }
-  header { position: sticky; top: 0; height: 100vh; border-right: 1px solid var(--fl-outline-variant,#353235); background: var(--fl-surface-container-lowest,#09090b); }
-  .hwrap { height: 100%; padding: 26px 16px; display: flex; flex-direction: column; gap: 26px; }
-  .brand { display: flex; align-items: center; gap: 11px; padding: 0 10px; }
-  .logo { width: 30px; height: 30px; border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-small,8px); display: grid; place-items: center; color: var(--fl-primary,#dfbdb6); font-size: 13px; font-weight: 800; }
-  .title { font-weight: 800; font-size: 16px; letter-spacing: -.02em; } .title small { display:block; color: var(--fl-on-surface-variant,#bbb4b1); font-size: 11px; font-weight: 500; margin-top: 3px; }
-  nav { display: grid; gap: 5px; margin: 0; }
-  .header-tools { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: auto; }
-  .utility-button { min-height: 44px; background: transparent; color: var(--fl-on-surface-variant,#bbb4b1); }
-  nav button { width: 100%; display:flex; align-items:center; gap:10px; text-align:left; background: transparent; border: 1px solid transparent; color: var(--fl-on-surface-variant,#bbb4b1); padding: 11px 12px; border-radius: var(--fl-radius-medium,12px); cursor: pointer; font-weight: 650; }
-  nav button svg { width: 17px; height: 17px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-  .focus-views { display: flex; gap: 5px; width: fit-content; margin-bottom: 22px; padding: 4px; border-radius: var(--fl-radius-medium,12px); background: var(--fl-surface-container-low,#141416); }
-  .focus-views[hidden] { display: none; }
-  .focus-views button { border: 0; background: transparent; padding: 9px 18px; }
-  .focus-views button.on { background: var(--fl-primary-container,#40302d); color: var(--fl-on-primary-container,#f4dcd6); }
-  nav button.on { background: var(--fl-primary-container,#40302d); color: var(--fl-on-surface,#eee9e7); border-color: var(--fl-outline-variant,#353235); }
-  .nav-label { color: var(--fl-on-surface-variant,#bbb4b1); font-size: 10px; font-weight: 750; letter-spacing: .12em; text-transform: uppercase; padding: 0 12px; margin: 7px 0 2px; }
-  main { max-width: 1160px; width: 100%; margin: 0 auto; padding: 42px clamp(20px,5vw,64px) 70px; }
-  .page-intro { margin: 0 0 26px; } .page-intro h1 { margin:0; font-size: clamp(26px,3vw,32px); letter-spacing:-.045em; } .page-intro p { margin:7px 0 0; color:var(--fl-on-surface-variant,#bbb4b1); }
-  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-  @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
-  .card { background: var(--fl-surface-container,#1b1b1e); border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-large,20px); padding: 20px; margin-bottom: 16px; }
-  .card h2 { margin: 0 0 4px; font-size: 16px; } .card p.d { margin: 0 0 12px; color: var(--fl-on-surface-variant,#bbb4b1); font-size: 13px; }
-  .listhead { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-  .badge { font-size: 11px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--fl-outline-variant,#353235); color: var(--fl-on-surface-variant,#bbb4b1); }
-  .badge.on { background: var(--fl-success-container,#29392e); color: var(--fl-success,#b7cbbb); border-color: var(--fl-outline-variant,#353235); }
-  .badge.lock { background: var(--fl-error-container,#482725); color: var(--fl-error,#f2b2ad); border-color: var(--fl-error,#f2b2ad); }
-  textarea, input, select { width: 100%; background: var(--fl-surface-container-lowest,#09090b); color: var(--fl-on-surface,#eee9e7); border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-medium,12px); padding: 10px 11px; font: inherit; font-size: 13px; }
-  textarea { min-height: 90px; font-family: ui-monospace, Consolas, monospace; }
-  label { font-size: 12px; color: var(--fl-on-surface-variant,#bbb4b1); display: block; margin: 10px 0 4px; }
-  .btnrow { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
-  button { cursor: pointer; border-radius: var(--fl-radius-medium,12px); border: 1px solid var(--fl-outline-variant,#353235); background: var(--fl-surface-container-high,#232326); color: var(--fl-on-surface,#eee9e7); padding: 10px 14px; font: inherit; font-size: 13px; font-weight: 650; transition: background .15s ease,border-color .15s ease,transform .15s ease; }
-  button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--fl-primary,#dfbdb6); outline-offset: 2px; }
-  button:hover { border-color: var(--fl-on-surface-variant,#bbb4b1); } button:active { transform: translateY(1px); } button.go { background: var(--fl-primary,#dfbdb6); border-color: var(--fl-primary,#dfbdb6); color: var(--fl-on-primary,#30201d); } button.red { background: var(--fl-error-container,#482725); border-color: var(--fl-error,#f2b2ad); color: var(--fl-error,#f2b2ad); }
-  button.ghost { background: transparent; } button:disabled { opacity: .45; cursor: not-allowed; }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--fl-outline-variant,#353235); }
-  th { color: var(--fl-on-surface-variant,#bbb4b1); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
-  .bar { height: 8px; background: var(--fl-surface-container-high,#232326); border-radius: 99px; overflow: hidden; min-width: 80px; }
-  .bar i { display: block; height: 100%; background: var(--fl-primary,#dfbdb6); }
-  .toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); max-width: min(560px,calc(100vw - 32px)); background: var(--fl-success-container,#29392e); border: 1px solid var(--fl-success,#b7cbbb); color: var(--fl-success,#b7cbbb); padding: 10px 18px; border-radius: var(--fl-radius-medium,12px); display: none; line-height: 1.45; }
-  .sched { border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-medium,12px); padding: 12px 14px; margin: 8px 0; font-size: 13px; background: var(--fl-surface-container-lowest,#09090b); }
-  .mut { color: var(--fl-on-surface-variant,#bbb4b1); font-size: 12px; }
-  .days { display: flex; gap: 4px; margin-top: 6px; }
-  .days button { padding: 6px 9px; font-size: 12px; }
-  .days button.on { background: var(--fl-primary-container,#40302d); border-color: var(--fl-primary,#dfbdb6); }
-  input[type="range"] { padding: 0; height: 24px; accent-color: var(--fl-primary,#dfbdb6); cursor: pointer; }
-  .range-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
-  .range-head output { font-weight: 700; font-variant-numeric: tabular-nums; color: var(--fl-on-surface,#eee9e7); }
-  section.tab { display: none; } section.tab.on { display: block; }
-  code { background: var(--fl-surface-container-lowest,#09090b); padding: 2px 6px; border-radius: var(--fl-radius-small,8px); border: 1px solid var(--fl-outline-variant,#353235); font-size: 12px; }
-  .account-card { display: grid; grid-template-columns: minmax(0, 1fr) minmax(190px, 240px); gap: 22px; align-items: center; width: min(100%, 860px); margin-inline: auto; background: var(--fl-surface-container-low,#141416); border-color: var(--fl-outline-variant,#353235); }
-  .account-copy { display: flex; gap: 14px; align-items: center; min-width: 0; }
-  .account-icon { width: 46px; height: 46px; display: grid; place-items: center; flex: none; border-radius: var(--fl-radius-medium,12px); background: var(--fl-primary-container,#40302d); color: var(--fl-primary,#dfbdb6); font-size: 15px; font-weight: 800; }
-  .account-icon svg { width: 20px; height: 20px; }
-  .account-card h2 { font-size: 18px; }
-  .account-card .d { margin-top: 5px; }
-  .account-actions { display: flex; align-items: stretch; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-  .account-actions button { width: 100%; }
-  .account-actions .account-secondary { background: transparent; border-color: transparent; color: var(--fl-on-surface-variant,#bbb4b1); font-size: 12px; min-height: 32px; }
-  .account-actions .account-secondary:hover { color: var(--fl-on-surface,#eee9e7); background: var(--fl-surface-container-high,#252528); border-color: var(--fl-outline-variant,#353235); }
-  .account-primary { background: var(--fl-primary,#dfbdb6); border-color: var(--fl-primary,#dfbdb6); color: var(--fl-on-primary,#30201d); }
-  .account-primary:hover { background: var(--fl-on-primary-container,#f4dcd6); }
-  .account-state { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 9px; }
-  .account-state .badge { background: var(--fl-surface-container-lowest,#09090b); }
-  .account-state .badge.good { color: var(--fl-success,#b7cbbb); border-color: var(--fl-success,#b7cbbb); }
-  .account-auth { grid-column: 1 / -1; width: min(100%, 480px); justify-self: center; background: var(--fl-surface-container-lowest,#09090b); color: var(--fl-on-surface,#eee9e7); border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-medium,12px); padding: 14px; min-height: 0; }
-  .account-auth > * { width: 100%; max-width: 420px; margin-inline: auto; }
-  .account-auth[hidden] { display: none; }
-  .account-error { grid-column: 1 / -1; color: var(--fl-error,#f2b2ad); margin: 0; font-size: 13px; }
-  .listhead { flex-wrap: wrap; } .account-copy > div:last-child { min-width: 0; } .account-card h2, .account-card .d { overflow-wrap: anywhere; }
-  /* Settings + account additions */
-  .hero-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .hero-line h2 { margin: 0; }
-  .badge.prio { background: var(--fl-primary-container,#40302d); color: var(--fl-primary,#dfbdb6); border-color: var(--fl-primary,#dfbdb6); }
-  .lockdown-row { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 6px 0 10px; }
-  .lockdown-row strong { font-size: 18px; font-variant-numeric: tabular-nums; }
-  .lockdown-list { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
-  .tick-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--fl-outline-variant,#353235); }
-  .tick-row .mut { display: block; margin-top: 2px; }
-  .check-row { display: grid; grid-template-columns: 18px minmax(0,1fr) auto; gap: 10px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--fl-outline-variant,#353235); }
-  .check-row:last-child { border-bottom: 0; }
-  .check-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--fl-success,#b7cbbb); margin-left: 4px; }
-  .check-dot.warn { background: var(--fl-warning,#e5c58f); }
-  .check-dot.off { background: var(--fl-surface-container-highest,#2d2d31); }
-  .check-row .check-state { font-size: 11px; color: var(--fl-on-surface-variant,#bbb4b1); white-space: nowrap; }
-  .account-hero { align-items: flex-start; }
-  /* Kept as a compatibility hook for options-auth.js; the account card owns the signed-out CTA. */
-  .account-pitch[hidden], #accountDevicesCard[hidden] { display: none; }
-  .list-editor { border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-large,20px); background: var(--fl-surface-container,#1b1b1e); margin-bottom: 16px; padding: 0 20px; }
-  .list-editor > summary { list-style: none; cursor: pointer; min-height: 72px; display: flex; align-items: center; gap: 8px; }
-  .list-editor > summary::-webkit-details-marker { display: none; }
-  .list-editor > summary::before { content: '›'; color: var(--fl-on-surface-variant,#bbb4b1); font-size: 22px; width: 18px; transition: transform .15s ease; }
-  .list-editor[open] > summary::before { transform: rotate(90deg); }
-  .list-editor-body { padding: 0 0 20px; border-top: 1px solid var(--fl-outline-variant,#353235); }
-  .list-editor-body .grid2:first-child { padding-top: 8px; }
-
-  /* Apple design pass: breathable layout, predictable hierarchy, and resilient narrow windows. */
-  :where(button, input, select, textarea) { min-height: 42px; }
-  :where(button, input, select, textarea):focus-visible { outline: 3px solid color-mix(in srgb, var(--fl-primary,#dfbdb6) 72%, transparent); outline-offset: 3px; }
-  main { padding-top: 52px; }
-  .page-intro { max-width: 760px; margin-bottom: 34px; }
-  .page-intro p { max-width: 62ch; line-height: 1.55; }
-  .card { padding: 24px; margin-bottom: 20px; }
-  .card h2 { font-size: 18px; letter-spacing: -.02em; }
-  .card p.d { line-height: 1.55; max-width: 68ch; margin-bottom: 18px; }
-  .grid2 { gap: 20px; }
-  nav { gap: 8px; }
-  nav button { min-height: 44px; padding: 11px 14px; }
-  .btnrow { gap: 10px; margin-top: 16px; }
-  .mut { line-height: 1.45; }
-  .site-row, .app-row { padding: 14px 16px; margin-bottom: 10px; min-height: 64px; }
-  .site-row strong, .app-row strong { font-size: 14px; }
-  table { line-height: 1.45; }
-  th, td { padding: 12px 10px; }
-  @media (max-width: 720px) {
-    .app-shell { display: block; }
-    header { position: static; width: 100%; height: auto; border-right: 0; border-bottom: 1px solid var(--fl-outline-variant,#353235); }
-    .hwrap { height: auto; padding: 18px 16px 14px; gap: 16px; }
-    nav { display: flex; overflow-x: auto; padding-bottom: 2px; scrollbar-width: none; }
-    nav button { width: auto; flex: 0 0 auto; white-space: nowrap; }
-    .nav-label { display: none; }
-    main { padding: 28px 16px 48px; }
-    .account-card { grid-template-columns: 1fr; }
-    .account-actions { justify-content: flex-start; }
-  }
-  @media (max-width: 460px) {
-    .card { padding: 20px; border-radius: var(--fl-radius-medium,12px); }
-    .page-intro h1 { font-size: 28px; }
-    .site-row { grid-template-columns: minmax(0,1fr) auto; }
-    .site-row .btnrow { grid-column: 1 / -1; }
-    .segmented { display: flex; width: 100%; }
-    .segmented button { flex: 1 1 0; justify-content: center; gap: 5px; padding: 8px 6px; font-size: 12px; }
-    .seg-count { padding-inline: 6px; }
-  }
-
-  /* Boundaries: segmented surfaces, search, chips, rows, modal */
-  .segmented { display: inline-flex; gap: 4px; padding: 4px; margin-bottom: 16px; border-radius: var(--fl-radius-medium,12px); background: var(--fl-surface-container-low,#141416); border: 1px solid var(--fl-outline-variant,#353235); }
-  .segmented button { border: 0; background: transparent; padding: 9px 16px; border-radius: var(--fl-radius-small,8px); color: var(--fl-on-surface-variant,#bbb4b1); display: inline-flex; align-items: center; gap: 7px; }
-  .segmented button.on { background: var(--fl-primary-container,#40302d); color: var(--fl-on-primary-container,#f4dcd6); }
-  .seg-count { font-size: 11px; padding: 1px 8px; border-radius: 999px; background: var(--fl-surface-container-high,#232326); color: var(--fl-on-surface-variant,#bbb4b1); font-variant-numeric: tabular-nums; }
-  .segmented button.on .seg-count { background: var(--fl-primary,#dfbdb6); color: var(--fl-on-primary,#30201d); }
-  .searchrow { display: flex; gap: 8px; margin-bottom: 10px; }
-  .searchrow input { flex: 1; }
-  #tab-permalock .searchrow input { min-width: 0; }
-  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
-  .chip { border-radius: 999px; padding: 6px 12px; font-size: 12px; background: transparent; color: var(--fl-on-surface-variant,#bbb4b1); border: 1px solid var(--fl-outline-variant,#353235); }
-  .chip.on { background: var(--fl-primary-container,#40302d); border-color: var(--fl-primary,#dfbdb6); color: var(--fl-on-primary-container,#f4dcd6); }
-  .site-row, .app-row { display: grid; grid-template-columns: minmax(0,1fr) auto auto; gap: 10px; align-items: center; padding: 11px 14px; margin-bottom: 8px; border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-medium,12px); background: var(--fl-surface-container-low,#141416); }
-  .boundary-hub { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; }
-  .boundary-hub[hidden], .boundary-detail[hidden] { display: none; }
-  .boundary-tile { min-height: 124px; text-align: left; padding: 18px; display: flex; flex-direction: column; justify-content: space-between; gap: 12px; }
-  .boundary-tile strong { font-size: 15px; }
-  .boundary-tile span { color: var(--fl-on-surface-variant,#bbb4b1); font-size: 12px; line-height: 1.45; }
-  .boundary-section-title { margin: 24px 0 10px; font-size: 13px; color: var(--fl-on-surface-variant,#bbb4b1); font-weight: 700; }
-  .boundary-back { margin-bottom: 14px; min-height: 44px; }
-  .location-note { border-left: 3px solid var(--fl-primary,#dfbdb6); padding: 12px 14px; background: var(--fl-surface-container-low,#141416); border-radius: 0 12px 12px 0; line-height: 1.5; }
-  #tab-strict .strict-empty { color: var(--fl-on-surface-variant,#bbb4b1); }
-  .site-row strong, .app-row strong { display: block; overflow-wrap: anywhere; }
-  .site-row .mut, .app-row .mut { display: block; margin-top: 2px; }
-  .app-row { grid-template-columns: minmax(0,1fr) auto; }
-  .advanced { margin-top: 14px; }
-  .advanced > summary { cursor: pointer; color: var(--fl-on-surface-variant,#bbb4b1); font-size: 13px; font-weight: 650; padding: 8px 2px; }
-  .modal { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; background: rgba(0,0,0,.55); padding: 20px; }
-  .modal[hidden] { display: none; }
-  .modal-card { width: min(460px, 94vw); background: var(--fl-surface-container,#1b1b1e); border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-large,20px); padding: 22px; }
-  .modal-card h2 { margin: 0 0 4px; }
-  .merge-target-list { max-height: min(42vh,360px); overflow: auto; border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-medium,12px); padding: 8px; }
-  .merge-target-option { display: flex; gap: 10px; align-items: flex-start; padding: 9px; border-radius: var(--fl-radius-small,8px); margin: 0; }
-  .merge-target-option:hover { background: var(--fl-surface-container-high,#232326); }
-  .merge-target-option input { width: auto; margin: 3px 0 0; flex: none; }
-  .merge-target-option span { min-width: 0; overflow-wrap: anywhere; }
-
-  /* Focus overview: balance rings, hour graph, timer */
-  .rings { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 8px 0 12px; }
-  .ring-item { position: relative; margin: 0; display: grid; justify-items: center; gap: 6px; }
-  .ring { width: 118px; height: 118px; transform: rotate(-90deg); }
-  .ring-track { fill: none; stroke: var(--fl-surface-container-high,#232326); stroke-width: 10; stroke-dasharray: 6 7; }
-  .ring-value { fill: none; stroke: var(--fl-primary,#dfbdb6); stroke-width: 10; stroke-linecap: round; transition: stroke-dashoffset .4s ease; }
-  .ring.tasks .ring-value { stroke: var(--fl-tertiary,#b7cbbb); }
-  .ring-center { position: absolute; top: 0; left: 50%; transform: translateX(-50%); width: 118px; height: 118px; display: grid; place-content: center; text-align: center; pointer-events: none; }
-  .ring-center strong { display: block; font-size: 22px; letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
-  .ring-center span { font-size: 10px; color: var(--fl-on-surface-variant,#bbb4b1); text-transform: uppercase; letter-spacing: .08em; }
-  .ring-item figcaption { text-align: center; font-size: 12px; color: var(--fl-on-surface-variant,#bbb4b1); }
-  .ring-item figcaption b { display: block; color: var(--fl-on-surface,#eee9e7); font-size: 12px; }
-  .hour-graph { display: flex; align-items: flex-end; gap: 2px; height: 120px; padding: 8px 4px 0; background: var(--fl-surface-container-lowest,#09090b); border: 1px solid var(--fl-outline-variant,#353235); border-radius: var(--fl-radius-medium,12px); }
-  .hour-col { flex: 1 1 0; height: 100%; display: flex; align-items: flex-end; }
-  .hour-col i { display: block; width: 100%; border-radius: 3px 3px 0 0; background: var(--fl-tertiary,#b7cbbb); }
-  .hour-axis { display: flex; justify-content: space-between; margin-top: 4px; color: var(--fl-on-surface-variant,#bbb4b1); font-size: 10px; font-variant-numeric: tabular-nums; }
-  .timer-face { display: grid; justify-items: center; gap: 2px; margin: 14px 0; }
-  .timer-face strong { font-size: 36px; letter-spacing: -.04em; font-variant-numeric: tabular-nums; }
-  .bar.bank { height: 10px; }
-  .bar.bank i { background: var(--fl-tertiary,#b7cbbb); }
-  @media (max-width: 520px) { .rings { gap: 8px; } .ring, .ring-center { width: 104px; height: 104px; } }
-  #tab-stats.on { display: flex; flex-direction: column; gap: 2px; }
-
-  /* Narrow widths: desktop-style bottom navigation, brand hidden. */
-  @media (max-width: 900px) {
-    .app-shell { display: block; }
-    header { position: fixed; left: 0; right: 0; bottom: 0; top: auto; height: auto; border-right: 0; border-top: 1px solid var(--fl-outline-variant,#353235); background: var(--fl-surface-container-lowest,#09090b); z-index: 30; }
-    .hwrap { height: auto; padding: 0; gap: 0; flex-direction: column; }
-    .brand { display: none; }
-    .header-tools { position: fixed; top: 10px; right: 12px; display: flex; margin: 0; z-index: 31; padding: 4px; border-radius: 14px; background: var(--fl-surface-container-lowest,#09090b); border: 1px solid var(--fl-outline-variant,#353235); }
-    .utility-button { min-height: 40px; padding: 8px 10px; }
-    nav { grid-template-columns: repeat(3, minmax(0,1fr)); gap: 0; }
-    nav button { flex-direction: column; justify-content: center; align-items: center; gap: 4px; padding: 9px 4px 11px; border: 0; border-radius: 0; font-size: 11px; text-align: center; }
-    nav button svg { width: 20px; height: 20px; }
-    nav button.on { background: transparent; border-color: transparent; color: var(--fl-primary,#dfbdb6); }
-    .nav-label { display: none; }
-    main { padding: 68px 16px 96px; }
-    .account-card { grid-template-columns: 1fr; width: 100%; }
-    .account-actions { justify-content: flex-start; }
-    .boundary-hub { grid-template-columns: 1fr; }
-    .boundary-tile { min-height: 92px; }
-  }
-  input[type="checkbox"] { width: 18px; height: 18px; min-height: 18px; padding: 0; margin: 0; flex: 0 0 18px; accent-color: var(--fl-primary); }
-  label:has(> input[type="checkbox"]) { display: flex; align-items: center; gap: 10px; min-height: 44px; cursor: pointer; }
-  .days label:has(> input[type="checkbox"]) { margin: 0; padding: 4px; }
-  @media (prefers-reduced-motion: reduce) { *,*::before,*::after { transition:none !important; animation:none !important; } }
-</style>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FocusLock account</title>
+  <link rel="stylesheet" href="../shared/theme-tokens.css" />
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: var(--fl-background,#0d0d0f); color: var(--fl-on-surface,#eee9e7); font: 14px var(--fl-font-family,"Segoe UI",Roboto,system-ui,sans-serif); }
+    main { width: min(100% - 32px, 620px); margin: 0 auto; padding: 42px 0 64px; }
+    header { display: flex; align-items: center; gap: 12px; margin-bottom: 28px; }
+    .logo { width: 40px; height: 40px; display: grid; place-items: center; border: 1px solid var(--fl-outline-variant,#353235); border-radius: 12px; color: var(--fl-primary,#dfbdb6); }
+    .logo svg { width: 21px; height: 21px; }
+    h1 { margin: 0; font-size: 21px; letter-spacing: -.03em; }
+    header p { margin: 3px 0 0; color: var(--fl-on-surface-variant,#bbb4b1); font-size: 12px; }
+    .card { padding: 22px; border: 1px solid var(--fl-outline-variant,#353235); border-radius: 18px; background: var(--fl-surface-container,#1b1b1e); }
+    .account-copy { display: flex; gap: 14px; align-items: flex-start; }
+    .account-icon { width: 42px; height: 42px; display: grid; place-items: center; flex: none; border-radius: 12px; background: var(--fl-primary-container,#40302d); color: var(--fl-primary,#dfbdb6); }
+    .account-icon svg { width: 20px; height: 20px; }
+    .hero-line { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+    h2 { margin: 0; font-size: 16px; }
+    .d { margin: 6px 0 0; color: var(--fl-on-surface-variant,#bbb4b1); line-height: 1.5; }
+    .badge { display: inline-flex; align-items: center; padding: 4px 9px; border: 1px solid var(--fl-outline-variant,#353235); border-radius: 99px; color: var(--fl-on-surface-variant,#bbb4b1); font-size: 11px; }
+    .badge.good { color: var(--fl-success,#b7cbbb); border-color: var(--fl-success,#b7cbbb); }
+    .account-state { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 12px; }
+    #accountCloud, .mut { color: var(--fl-on-surface-variant,#bbb4b1); font-size: 12px; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 18px; }
+    button { min-height: 40px; padding: 0 14px; border: 1px solid var(--fl-outline-variant,#353235); border-radius: 11px; background: var(--fl-surface-container-high,#232326); color: var(--fl-on-surface,#eee9e7); font: inherit; font-weight: 650; cursor: pointer; }
+    button:hover { border-color: var(--fl-on-surface-variant,#bbb4b1); }
+    button:focus-visible { outline: 2px solid var(--fl-primary,#dfbdb6); outline-offset: 2px; }
+    button:disabled { opacity: .5; cursor: wait; }
+    .primary { background: var(--fl-primary,#dfbdb6); border-color: var(--fl-primary,#dfbdb6); color: var(--fl-on-primary,#30201d); }
+    .error { margin: 14px 0 0; color: var(--fl-error,#f2b2ad); line-height: 1.45; }
+    #accountAuth { width: min(100%,480px); margin: 20px auto 0; }
+    #accountAuth[hidden], [hidden] { display: none !important; }
+    #accountDevicesCard { margin-top: 14px; }
+    #accountDevicesCard > p { margin: 6px 0 12px; }
+    .site-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-top: 1px solid var(--fl-outline-variant,#353235); }
+    .site-row strong, .site-row .mut { display: block; }
+    .site-row .mut { margin-top: 3px; }
+    @media (max-width: 520px) { main { padding-top: 24px; } .card { padding: 17px; } }
+  </style>
 </head>
 <body>
-<div class="app-shell"><header><div class="hwrap">
-  <div class="brand"><div class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 11V8a5 5 0 0 1 10 0v3"/><rect x="4" y="11" width="16" height="10" rx="3"/><path d="M12 15v2"/></svg></div>
-  <div class="title">FocusLock <small>Chrome extension</small></div></div>
-  <nav aria-label="Dashboard sections">
-    <button data-tab="stats"><svg viewBox="0 0 24 24"><path d="M4 19V5M4 19h16"/><path d="m7 15 3-4 3 2 5-6"/></svg>Focus</button>
-    <button data-tab="blocks"><svg viewBox="0 0 24 24"><path d="M5 5h14v14H5z"/><path d="M8 9h8M8 13h5"/></svg>Boundaries</button>
-    <button data-tab="strict"><svg viewBox="0 0 24 24"><path d="M12 3 5 6v6c0 4.4 3 7.4 7 9 4-1.6 7-4.6 7-9V6z"/><path d="m9 12 2 2 4-4"/></svg>Strict</button>
-  </nav>
-  <div class="header-tools" aria-label="Utilities"><button class="utility-button" data-tab="settings" type="button">Settings</button><button class="utility-button" data-tab="account" type="button" aria-label="Account">Account</button></div>
-</div></header>
-<main>
-  <div class="page-intro"><h1 id="pageTitle">Focus</h1><p>Build focus time and keep the boundaries that matter close.</p></div>
-  <div class="focus-views" id="focusViews" role="navigation" aria-label="Focus views" hidden>
-    <button data-tab="stats">Overview</button>
-    <button data-tab="sched">Schedule</button>
-  </div>
-  <section class="tab" id="tab-account">
-  <section class="card account-card account-hero" id="accountCard" aria-labelledby="accountTitle">
-    <div class="account-copy">
-      <div class="account-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 11V8a5 5 0 0 1 10 0v3"/><rect x="4" y="11" width="16" height="10" rx="3"/><path d="M12 15v2"/></svg></div>
-      <div>
-        <div class="hero-line"><h2 id="accountTitle">Connect your FocusLock account</h2><span class="badge" id="accountBadge">Not connected</span></div>
-        <p class="d" id="accountDetail">Sync Chrome website time with Android and Windows.</p>
-        <div class="account-state" id="accountState" aria-label="Device connection status"></div>
-        <p class="mut" id="accountCloud" aria-live="polite"></p>
-      </div>
-    </div>
-    <div class="account-actions" aria-label="Account sign-in options">
-      <button class="account-primary" id="accountSignIn">Continue with Google or email</button>
-      <button class="account-secondary" id="accountEmailSignIn" type="button" hidden>Use email instead</button>
-      <button class="ghost" id="accountSync" hidden>Sync now</button>
-      <button class="ghost" id="accountSignOut" hidden>Sign out</button>
-    </div>
-    <p class="account-error" id="accountError" role="alert" hidden></p>
-    <div class="account-auth" id="accountAuth" aria-label="FocusLock sign in" hidden></div>
-  </section>
-  <section class="card account-pitch" id="accountPitch" hidden aria-hidden="true">
-    <h2>Your focus, on every screen</h2>
-    <p class="d">Sign in to combine Chrome website time with Android and Windows, keep boundaries in one place, and carry your leisure balance across devices.</p>
-    <div class="btnrow"><button class="account-primary" id="accountSignInPitch" type="button">Sign in to sync</button></div>
-  </section>
-  <section class="card" id="accountDevicesCard" hidden>
-    <h2>Connected devices</h2>
-    <p class="d" id="accountDeviceSummary">…</p>
-    <div id="accountDevices"></div>
-  </section>
-  </section>
-  <section class="tab" id="tab-blocks">
-    <div class="boundary-hub" id="boundaryHub">
-      <button class="card boundary-tile" type="button" data-boundary-route="sites"><strong>Everyday websites <span class="badge" id="siteCount">0</span></strong><span>Account websites and Chrome-only lists, schedules, and limits.</span></button>
-      <button class="card boundary-tile" type="button" data-boundary-route="apps"><strong>Applications <span class="badge" id="appCount">0</span></strong><span>View the apps blocked on your phone and other connected devices.</span></button>
-      <button class="card boundary-tile" type="button" data-boundary-route="groups"><strong>Groups <span class="badge" id="groupCount">0</span></strong><span>Combine shared apps and websites under one daily limit.</span></button>
-    </div>
-    <h2 class="boundary-section-title" id="boundaryCommitmentsTitle">Permanent commitments</h2>
-    <button class="card boundary-tile" type="button" data-boundary-route="permalock" id="permalockHubTile"><strong>Permanent blocks <span class="badge" id="permaCount">0</span></strong><span>Syncs across signed-in FocusLock devices. No snoozes, exceptions, expiry, or in-app removal.</span></button>
-    <h2 class="boundary-section-title" id="boundaryLocationTitle">Blocking location</h2>
-    <button class="card boundary-tile" type="button" data-boundary-route="location"><strong>Blocking location</strong><span>Phone-only home rules; Chrome website rules apply everywhere.</span></button>
-
-    <section class="boundary-detail" id="boundaryDetail" hidden>
-      <button class="ghost boundary-back" type="button" data-boundary-back>← Boundaries</button>
-      <h2 id="boundaryDetailTitle">Websites</h2>
-    </section>
-    <div class="segmented" id="boundaryTabs" aria-label="Boundary surface" hidden>
-      <button type="button" data-surface="apps">Applications</button>
-      <button type="button" data-surface="sites" class="on">Websites</button>
-      <button type="button" data-surface="groups">Groups</button>
-    </div>
-
-    <section id="surface-apps" class="boundary-detail" hidden>
-      <div class="card">
-        <h2>Applications</h2>
-        <p class="d">Synced from your FocusLock account. Windows and Android enforce app blocking natively — Chrome can only show this shared list.</p>
-        <div id="appList"></div>
-      </div>
-    </section>
-
-    <section id="surface-groups" class="boundary-detail" hidden>
-      <div class="card">
-        <h2>Target groups</h2>
-        <p class="d">One daily limit for these apps and websites. Usage syncs across your devices. Merge targets here or in the Android app.</p>
-        <div class="btnrow"><button type="button" class="go" id="createGroup">Merge targets</button></div>
-        <p class="mut" id="groupSyncState" aria-live="polite"></p>
-      </div>
-      <div id="groupList"></div>
-    </section>
-
-    <section id="surface-sites" class="boundary-detail" hidden>
-      <div class="card">
-        <h2>Websites</h2>
-        <p class="d">Earned Focus time permits access to account-shared websites. Chrome-only lists block locally. Search, filter by category, add custom sites, or delete them.</p>
-        <div class="searchrow">
-          <input id="siteSearch" placeholder="Search websites…" autocomplete="off" />
-          <button id="addSite" class="go">+ Add website</button>
-        </div>
-        <div class="chips" id="siteChips" role="group" aria-label="Category filter"></div>
-        <div id="sharedPolicyPanel"></div>
-        <div class="btnrow">
-          <button id="presetSocial" class="ghost">Block Social</button>
-          <button id="presetVideo" class="ghost">Block Video</button>
-          <button id="presetUnblock" class="ghost">Unblock All</button>
+  <main>
+    <header>
+      <span class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 11V8a5 5 0 0 1 10 0v3"/><rect x="4" y="11" width="16" height="10" rx="3"/><path d="M12 15v2"/></svg></span>
+      <div><h1>FocusLock account</h1><p>Keep Chrome tracking and your other devices in sync.</p></div>
+    </header>
+    <section class="card" id="accountCard" aria-labelledby="accountTitle">
+      <div class="account-copy">
+        <span class="account-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 11V8a5 5 0 0 1 10 0v3"/><rect x="4" y="11" width="16" height="10" rx="3"/><path d="M12 15v2"/></svg></span>
+        <div>
+          <div class="hero-line"><h2 id="accountTitle">Connect your FocusLock account</h2><span class="badge" id="accountBadge">Not connected</span></div>
+          <p class="d" id="accountDetail">Sync Chrome website time with Android and Windows.</p>
+          <div class="account-state" id="accountState" aria-label="Device connection status"></div>
+          <p id="accountCloud" aria-live="polite"></p>
         </div>
       </div>
-      <div id="siteRows"></div>
-
-      <details class="advanced">
-        <summary>Advanced: block lists, exceptions, whitelist &amp; daily limits</summary>
-        <div class="card" style="margin-top:12px">
-          <p class="d">Blacklist = block these sites. Allow-only = block <i>everything</i> except these (whitelist mode). Patterns: <code>youtube.com</code>, <code>*.youtube.com</code>, <code>reddit.com/r/*</code>, <code>*keyword*</code>. One per line.</p>
-          <div class="btnrow">
-            <button id="newList" class="go">+ New list</button>
-            <button id="addPreset" class="ghost">+ Add category preset</button>
-            <button id="exportBtn" class="ghost">Export</button>
-            <button id="importBtn" class="ghost">Import</button>
-            <input type="file" id="importFile" accept=".json" style="display:none" />
-          </div>
-        </div>
-        <div id="lists"></div>
-      </details>
+      <div class="actions" aria-label="Account controls">
+        <button class="primary" id="accountSignIn" type="button">Continue with Google or email</button>
+        <button id="accountEmailSignIn" type="button" hidden>Use email instead</button>
+        <button id="accountSync" type="button" hidden>Sync now</button>
+        <button id="accountSignOut" type="button" hidden>Sign out</button>
+      </div>
+      <p class="error" id="accountError" role="alert" hidden></p>
+      <div id="accountAuth" aria-label="FocusLock sign in" hidden></div>
     </section>
-    <section id="surface-permalock" class="boundary-detail" hidden>
-      <div class="card">
-        <h2>Permanent commitments</h2>
-        <p class="d">Sites added here remain blocked on this Chrome profile. There is no in-extension removal path.</p>
-        <div class="searchrow"><input id="permaInput" placeholder="example.com" autocomplete="off" aria-label="Domain to block permanently" /><button id="permaAdd" class="go">+ Add permanent block</button></div>
-        <p class="account-error" id="permaError" role="alert" hidden></p>
-        <div id="permaRows"></div>
-      </div>
+    <section class="card" id="accountDevicesCard" hidden>
+      <h2>Connected devices</h2>
+      <p class="mut" id="accountDeviceSummary">…</p>
+      <div id="accountDevices"></div>
     </section>
-    <section id="surface-location" class="boundary-detail" hidden>
-      <div class="card">
-        <h2>Where blocking applies</h2>
-        <p class="d">Android can restrict app blocking to a saved home location. That setting is stored on the phone.</p>
-        <div class="location-note">Chrome website boundaries continue to apply everywhere. This extension cannot read or change your phone’s home location, and this screen has no location switch.</div>
-      </div>
-    </section>
-  </section>
-
-  <section class="tab" id="tab-strict"><div id="strictPanel"><p class="strict-empty">Loading Strict Mode…</p></div></section>
-
-  <div class="modal" id="addSiteModal" hidden>
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="addSiteTitle">
-      <h2 id="addSiteTitle">Add website</h2>
-      <p class="d">Enter a domain or URL. It is added to the block list you choose.</p>
-      <label for="addSiteInput">Website</label>
-      <input id="addSiteInput" placeholder="example.com or https://example.com/path" autocomplete="off" />
-      <label for="addSiteList">Block list</label>
-      <select id="addSiteList"></select>
-      <p class="account-error" id="addSiteError" role="alert" hidden></p>
-      <div class="btnrow"><button id="addSiteConfirm" class="go">Add website</button><button id="addSiteCancel" class="ghost">Cancel</button></div>
-    </div>
-  </div>
-
-  <div class="modal" id="createGroupModal" hidden>
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="createGroupTitle">
-      <h2 id="createGroupTitle">Merge targets</h2>
-      <p class="d">Choose at least two ungrouped apps or websites. Targets already in a group stay there.</p>
-      <label for="groupName">Group name</label>
-      <input id="groupName" maxlength="80" placeholder="e.g. Social media" autocomplete="off" />
-      <label class="merge-target-option"><input id="groupLimitEnabled" type="checkbox" /><span>Apply one daily limit</span></label>
-      <label for="groupLimitMinutes">Minutes per day</label>
-      <input id="groupLimitMinutes" type="number" min="1" max="1440" step="1" placeholder="Enter a limit" disabled />
-      <div id="groupTargetOptions" class="merge-target-list" role="group" aria-label="Targets to merge"></div>
-      <p class="account-error" id="createGroupError" role="alert" hidden></p>
-      <div class="btnrow"><button type="button" class="go" id="createGroupSave" disabled>Create group</button><button type="button" class="ghost" id="createGroupCancel">Cancel</button></div>
-    </div>
-  </div>
-
-  <section class="tab" id="tab-sched">
-    <div class="grid2">
-      <div class="card">
-        <h2>⏱ Quick timer</h2>
-        <p class="d">Lock a list for N minutes right now.</p>
-        <label>List</label><select id="qList"></select>
-        <label>Minutes</label><input id="qMin" type="number" value="25" min="1" max="1440" />
-        <div class="btnrow"><button id="qStart" class="go">Start timer</button>
-        <button id="qFrozen" class="red">❄ Frozen lock (no undo)</button></div>
-      </div>
-      <div class="card">
-        <h2>🍅 Pomodoro</h2>
-        <p class="d">Focus / break cycles. Breaks auto-allow the list.</p>
-        <label>List</label><select id="pList"></select>
-        <div class="grid2">
-          <div><label>Focus min</label><input id="pFocus" type="number" value="25" /></div>
-          <div><label>Break min</label><input id="pBreak" type="number" value="5" /></div>
-        </div>
-        <label>Rounds</label><input id="pRounds" type="number" value="4" />
-        <div class="btnrow"><button id="pStart" class="go">Start Pomodoro</button></div>
-      </div>
-    </div>
-    <div class="card">
-      <h2>🗓 Recurring schedule</h2>
-      <p class="d">e.g. work hours Mon–Fri 9:00–17:00.</p>
-      <div class="grid2">
-        <div><label>List</label><select id="rList"></select></div>
-        <div><label>Name</label><input id="rName" value="Work hours" /></div>
-      </div>
-      <div class="grid2">
-        <div><label>Start (HH:MM)</label><input id="rStart" value="09:00" /></div>
-        <div><label>End (HH:MM)</label><input id="rEnd" value="17:00" /></div>
-      </div>
-      <label>Days</label><div class="days" id="rDays"></div>
-      <div class="btnrow"><button id="rAdd" class="go">Add schedule</button></div>
-    </div>
-    <div class="card"><h2>Active schedules</h2><p class="d">Frozen entries can't be deleted until they expire — that's the point. 🧊</p><div id="schedList"></div></div>
-  </section>
-
-  <section class="tab" id="tab-stats">
-    <section class="card" id="focusConnectNotice" hidden aria-labelledby="focusConnectHeading">
-      <h2 id="focusConnectHeading">Focus tools live with your account</h2>
-      <p class="d">Website tracking and boundaries keep working on this device. Connect an account to use focus credit, sessions, and tasks.</p>
-      <div class="btnrow"><button id="focusConnect" class="go" type="button">Connect account</button></div>
-    </section>
-    <div class="grid2">
-      <div class="card focus-balance" id="cloudBalanceCard">
-        <div class="listhead"><h2>Leisure balance</h2><span class="badge" id="focusRatioBadge">Work : scroll 4:1</span></div>
-        <p class="d" id="balanceCaption">Sign in to sync your Focus balance.</p>
-        <div class="rings">
-          <figure class="ring-item">
-            <svg class="ring" viewBox="0 0 120 120" role="img" aria-labelledby="focusRingLabel">
-              <circle class="ring-track" cx="60" cy="60" r="52"></circle>
-              <circle class="ring-value" id="focusRing" cx="60" cy="60" r="52" style="stroke-dasharray:326.7256;stroke-dashoffset:326.7256"></circle>
-            </svg>
-            <div class="ring-center"><strong id="focusPct">0%</strong><span>Focus</span></div>
-            <figcaption id="focusRingLabel"><b>Focus</b><span id="focusGoal">0 / 120 min today</span></figcaption>
-          </figure>
-          <figure class="ring-item">
-            <svg class="ring tasks" viewBox="0 0 120 120" role="img" aria-labelledby="taskRingLabel">
-              <circle class="ring-track" cx="60" cy="60" r="52"></circle>
-              <circle class="ring-value" id="taskRing" cx="60" cy="60" r="52" style="stroke-dasharray:326.7256;stroke-dashoffset:326.7256"></circle>
-            </svg>
-            <div class="ring-center"><strong id="taskCount">0</strong><span>Tasks</span></div>
-            <figcaption id="taskRingLabel"><b>Tasks</b><span id="taskGoal">0 / 7 done</span></figcaption>
-          </figure>
-        </div>
-        <p class="mut" id="leisureDetail">Real balance appears after your first sync.</p>
-      </div>
-      <div class="card" id="cloudGraphCard">
-        <h2>Focus through the day</h2>
-        <p class="d">Minutes focused per hour, from your real sessions today.</p>
-        <div class="hour-graph" id="hourGraph" aria-label="Focus minutes by hour"></div>
-        <div class="hour-axis" id="hourAxis"></div>
-        <p class="mut" id="hourEmpty" hidden>No focus sessions yet today.</p>
-      </div>
-    </div>
-
-    <div id="frogPanel" aria-label="Eat the Frog browser task"></div>
-    <div class="grid2" id="focusActions">
-      <div class="card" id="cloudWorkCard">
-        <h2>Log work</h2>
-        <p class="d">Credit earned = minutes ÷ ratio + task bonus, saved to your FocusLock account.</p>
-        <label>What did you work on?</label><input id="workTitle" placeholder="e.g. Ship the Focus page" autocomplete="off" />
-        <label>Minutes (1–480)</label><input id="workMinutes" type="number" min="1" max="480" value="25" />
-        <div class="btnrow"><button id="workLog" class="go">Log work</button><span class="mut" id="workPreview"></span></div>
-      </div>
-      <div class="card" id="cloudTimerCard">
-        <h2>Focus timer</h2>
-        <p class="d">15 / 25 / 50 minute sessions. Signed-in sessions earn shared credit; focus can keep running after this page closes.</p>
-        <div class="days" id="timerPresets" role="group" aria-label="Focus duration"><button type="button" data-min="15">15</button><button type="button" data-min="25" class="on">25</button><button type="button" data-min="50">50</button></div>
-        <div class="timer-face"><strong id="timerClock">25:00</strong><span class="mut" id="timerState">Ready</span></div>
-        <div class="btnrow"><button id="timerStart" class="go">Start</button><button id="timerFinish" class="ghost" disabled>Finish early</button></div>
-      </div>
-    </div>
-    <div class="card" id="cloudBankCard">
-      <h2>Scroll bank</h2>
-      <p class="d" id="scrollBankCaption">Sign in to see your scroll bank.</p>
-      <div class="bar bank"><i id="scrollBankBar" style="width:0%"></i></div>
-    </div>
-
-    <div class="card" id="cloudRecentCard">
-      <h2>Recent work</h2>
-      <p class="d" id="recentSum">Nothing logged yet.</p>
-      <div id="recentWork"></div>
-    </div>
-
-    <div class="grid2">
-      <div class="card"><h2>Today</h2><p class="d" id="statSum">…</p><div id="statTable"></div></div>
-      <div class="card"><h2>Blocked attempts</h2><p class="d" id="blockSum">…</p><div id="blockLog"></div>
-        <div class="btnrow"><button id="clearStats" class="ghost">Clear stats</button></div>
-      </div>
-    </div>
-  </section>
-
-  <section class="tab" id="tab-settings">
-    <div class="grid2">
-      <div class="card">
-        <h2>🔐 Password lock</h2>
-        <p class="d">Require a password to disable protection, edit frozen lists, or lift Nuclear early.</p>
-        <label>New password</label><input id="pw1" type="password" />
-        <label>Confirm</label><input id="pw2" type="password" />
-        <div class="btnrow"><button id="pwSet" class="go">Set password</button><button id="pwClear" class="ghost">Remove</button></div>
-        <p class="mut" id="pwState"></p>
-      </div>
-      <div class="card">
-        <h2>☢ Nuclear allow-list</h2>
-        <p class="d">When Nuclear is on, everything is blocked except these.</p>
-        <textarea id="nucAllow"></textarea>
-        <div class="btnrow"><button id="nucSave" class="go">Save</button><button id="nucStart" class="red">Start Nuclear 30m</button><button id="nucStop" class="ghost">Stop</button></div>
-      </div>
-    </div>
-    <div class="card">
-      <h2>Tracking</h2>
-      <p class="d">Time counts only when Chrome is focused, the tab is visible, and you're not idle.</p>
-      <label>Idle timeout (seconds)</label><input id="idleSec" type="number" min="15" max="600" />
-      <div class="btnrow"><button id="saveTrack" class="go">Save</button><button id="resetAll" class="red">Reset everything</button></div>
-    </div>
-    <div class="card">
-      <h2>Credit settings</h2>
-      <p class="d">Work-to-scroll ratio and task bonus sync across Android, Chrome, and Windows. The last edit wins per setting.</p>
-      <div class="range-head"><label for="ratioRange">Work : scroll ratio — <span id="ratioValue">4</span> : 1</label><output id="ratioValueOut" for="ratioRange">4 : 1</output></div>
-      <input id="ratioRange" type="range" min="1" max="20" step="1" value="4" />
-      <div class="range-head"><label for="bonusRange">Task completion bonus — <span id="bonusValue">5</span> min</label><output id="bonusValueOut" for="bonusRange">+5 min</output></div>
-      <input id="bonusRange" type="range" min="0" max="60" step="1" value="5" />
-      <p class="mut" id="prefsSyncState">Stored on this device. Sign in to sync.</p>
-    </div>
-    <div class="card" id="lockdownCard">
-      <div class="listhead"><h2>Lockdown</h2><span class="badge" id="lockdownBadge">Off</span></div>
-      <p class="d">Strict Mode and frozen lists keep your boundaries locked until their timers end.</p>
-      <div class="lockdown-row"><strong id="lockdownRemaining">No active lockdown</strong><span class="mut" id="lockdownDetail">Every list is editable.</span></div>
-      <div id="lockdownLists"></div>
-      <div class="btnrow">
-        <input id="lockdownMin" type="number" min="1" max="1440" value="30" style="max-width:110px" aria-label="Lockdown minutes" />
-        <button id="lockdownStart" class="red">Lock all boundaries</button>
-      </div>
-    </div>
-    <div class="grid2">
-      <div class="card">
-        <h2>System protection</h2>
-        <p class="d">Built live from the background tracker — no placeholders.</p>
-        <div id="protectionList" aria-live="polite"></div>
-      </div>
-      <div class="card">
-        <h2>Sync &amp; notifications</h2>
-        <p class="d">Background usage and device sync runs every four hours. Account and boundary changes sync promptly, and you can use Sync now for an immediate refresh. Boundaries keep enforcing locally while offline.</p>
-        <div id="syncList"></div>
-        <div class="tick-row">
-          <div><strong>TickTick tasks</strong><span class="mut" id="tickStatus">Task bonus applies to work you log here and to tasks completed in Android.</span></div>
-          <div class="btnrow" style="margin:0"><button id="openTickTick" class="ghost">Open TickTick</button></div>
-        </div>
-      </div>
-    </div>
-  </section>
-</main>
-</div>
-<div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
-<script src="../src/matcher.js"></script>
-<script src="../src/features.js"></script>
-<script src="../src/store.js"></script>
-<script src="options.js"></script>
-<script src="features.js"></script>
-<script src="shared-rules.js"></script>
-<script src="../dist/options-auth.js"></script>
+  </main>
+  <script src="../dist/options-auth.js"></script>
 </body>
 </html>
