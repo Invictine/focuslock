@@ -1739,7 +1739,10 @@ function DesktopApp() {
       if (!accountKey) throw new Error("Account identity is unavailable; sign in again.");
       const token = await auth.getSyncToken();
       if (!token) throw new Error("Sign in again to sync.");
-      await flushMutations(accountKey, token);
+      const replayed = await flushMutations(accountKey, token);
+      for (const result of replayed.values()) {
+        if (!result.ok) throw result.error;
+      }
       await accountClient(accountKey, token).query(api.focus.getAccount, {});
       await pushRef.current?.(true);
     } catch (error) {
@@ -4036,7 +4039,11 @@ function BoundariesPage({
   }
 
   async function submitAddSite() {
-    if (!guardUnlock(false)) return;
+    if (busy) return;
+    if (strictActive) {
+      setSiteError("Strict Mode keeps boundary settings locked until the commitment ends.");
+      return;
+    }
     const normalized = normalizeDomainInput(siteInput);
     if (!normalized) {
       setSiteError("Enter a valid domain, like example.com or a full URL.");
@@ -4047,19 +4054,29 @@ function BoundariesPage({
       return;
     }
     setBusy(true);
+    setSiteError(null);
     try {
+      const newSite: SiteItem = {
+        domain: normalized,
+        displayName: normalized,
+        isBlocked: true,
+        category: "Custom",
+        isCustom: true,
+      };
       const nextSites: SiteItem[] = [
         ...sites,
-        {
-          domain: normalized,
-          displayName: normalized,
-          isBlocked: true,
-          category: "Custom",
-          isCustom: true,
-        },
+        newSite,
       ];
-      const result = await saveSites({ sites: nextSites.map(stripSite), updatedAt: Date.now() });
-      if (result?.applied === false) throw new Error("Another device updated your websites. Reload and retry.");
+      // Add only this domain: a stale desktop snapshot must never replace
+      // another device's changes or upload synthetic permanent-block rows.
+      const result = await saveSite({
+        domain: newSite.domain,
+        displayName: newSite.displayName,
+        isBlocked: newSite.isBlocked,
+        category: newSite.category,
+        updatedAt: Date.now(),
+      });
+      if (result?.applied !== true) throw new Error("Your website wasn't confirmed by sync. Refresh and retry.");
       // Clear the picker before handing the new blocked target to Rust. The
       // Windows UI Automation reader can observe an edit control for one more
       // sample while the native payload is being applied; leaving the typed
@@ -4068,6 +4085,9 @@ function BoundariesPage({
       setShowAddSite(false);
       setSiteInput("");
       setSiteError(null);
+      setQ("");
+      setDebouncedQ("");
+      setCategory("All");
       await applyNative(appRows, nextSites);
       setNotice(`Added ${normalized}.`);
     } catch (e) {
@@ -4267,6 +4287,8 @@ function BoundariesPage({
           <button
             type="button"
             className="primary-button add-site-button"
+            disabled={busy || strictActive}
+            title={strictActive ? "Strict Mode keeps boundary settings locked until the commitment ends" : undefined}
             onClick={() => {
               setSiteError(null);
               setShowAddSite(true);
@@ -4553,7 +4575,7 @@ function BoundariesPage({
         <div
           className="boundary-dialog-backdrop"
           role="presentation"
-          onClick={() => setShowAddSite(false)}
+          onClick={() => !busy && setShowAddSite(false)}
         >
           <div
             className="boundary-dialog"
@@ -4566,21 +4588,28 @@ function BoundariesPage({
             <p>Paste a URL or enter a domain. FocusLock keeps the hostname only.</p>
             <input
               autoFocus
-               value={siteInput}
-               aria-label="Website domain"
-               onChange={(e) => {
+              value={siteInput}
+              aria-label="Website domain"
+              disabled={busy}
+              onChange={(e) => {
                 setSiteInput(e.target.value);
                 setSiteError(null);
               }}
-              onKeyDown={(e) => e.key === "Enter" && submitAddSite()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  void submitAddSite();
+                }
+              }}
               placeholder="example.com or https://example.com/page"
               aria-invalid={Boolean(siteError)}
             />
-            {siteError && <p className="inline-error">{siteError}</p>}
+            {siteError && <p className="inline-error" role="alert">{siteError}</p>}
             <div className="dialog-actions">
               <button
                 type="button"
                 className="secondary-button"
+                disabled={busy}
                 onClick={() => setShowAddSite(false)}
               >
                 Cancel
@@ -4589,9 +4618,9 @@ function BoundariesPage({
                 type="button"
                 className="primary-button"
                 onClick={submitAddSite}
-                disabled={busy || !siteInput.trim()}
+                disabled={busy || strictActive || !siteInput.trim()}
               >
-                Add Website
+                {busy ? "Adding…" : "Add Website"}
               </button>
             </div>
           </div>

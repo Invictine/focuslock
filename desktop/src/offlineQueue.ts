@@ -115,3 +115,26 @@ export function enqueueMutation(account: string, item: PendingMutation) {
 export function acknowledgeMutation(account: string, id: string) {
   window.localStorage.setItem(mutationKey(account), JSON.stringify(pendingMutations(account).filter((item) => item.id !== id)));
 }
+
+export type MutationReplayResult = { ok: true; value: unknown } | { ok: false; error: unknown };
+
+/** Attempt each saved change once; a rejected change must not starve later edits. */
+export async function replayMutations(
+  account: string,
+  send: (item: PendingMutation) => Promise<unknown>,
+): Promise<Map<string, MutationReplayResult>> {
+  const results = new Map<string, MutationReplayResult>();
+  for (;;) {
+    const item = pendingMutations(account).find((entry) => !results.has(entry.id));
+    if (!item) return results;
+    try {
+      const value = await send(item);
+      acknowledgeMutation(account, item.id);
+      results.set(item.id, { ok: true, value });
+    } catch (error) {
+      // Keep this entry for retry while allowing independent edits to reach
+      // the server. Re-read the queue so concurrent additions are included.
+      results.set(item.id, { ok: false, error });
+    }
+  }
+}

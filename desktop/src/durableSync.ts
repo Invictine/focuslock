@@ -2,9 +2,9 @@ import { useCallback, useEffect } from "react";
 import { ConvexHttpClient } from "convex/browser";
 import { getFunctionName, type FunctionReference, type FunctionArgs, type FunctionReturnType } from "convex/server";
 import { useFocusAuth } from "./auth";
-import { acknowledgeMutation, enqueueMutation, pendingMutations } from "./offlineQueue";
+import { enqueueMutation, pendingMutations, replayMutations, type MutationReplayResult } from "./offlineQueue";
 
-const flights = new Map<string, Promise<Map<string, unknown>>>();
+const flights = new Map<string, Promise<Map<string, MutationReplayResult>>>();
 
 export function accountClient(account: string, token: string) {
   const payload = token.split('.')[1];
@@ -20,14 +20,7 @@ export async function flushMutations(account: string, token: string) {
   if (existing) return existing;
   const task = (async () => {
     const client = accountClient(account, token);
-    const results = new Map<string, unknown>();
-    for (;;) {
-      const item = pendingMutations(account)[0];
-      if (!item) return results;
-      const result = await client.mutation(item.path as any, item.args);
-      acknowledgeMutation(account, item.id);
-      results.set(item.id, result);
-    }
+    return replayMutations(account, (item) => client.mutation(item.path as any, item.args));
   })();
   flights.set(account, task);
   try { return await task; } finally { flights.delete(account); }
@@ -45,9 +38,13 @@ export function useDurableMutation<F extends FunctionReference<"mutation">>(refe
       const token = await auth.getSyncToken();
       if (!token) throw new Error('Sign in again to sync.');
       const results = await flushMutations(account, token);
-      return results.get(id) as FunctionReturnType<F>;
-    } catch {
-      throw new Error('Saved on this device. Sync will retry when your account is connected.');
+      const result = results.get(id);
+      if (!result) throw new Error('This change is waiting for sync.');
+      if (!result.ok) throw result.error;
+      return result.value as FunctionReturnType<F>;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : 'The server did not confirm this change.';
+      throw new Error(`${detail} Saved on this device for retry when your account is connected.`);
     }
   }, [auth.user?.id, auth.getSyncToken, path]);
 }
