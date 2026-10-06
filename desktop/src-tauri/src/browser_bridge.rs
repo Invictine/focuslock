@@ -602,7 +602,7 @@ mod platform {
             },
             WindowsAndMessaging::{
                 EnumWindows, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-                GetWindowThreadProcessId, IsWindowVisible,
+                GetWindowThreadProcessId, IsWindowVisible, IsIconic,
             },
         },
     };
@@ -655,7 +655,11 @@ mod platform {
             let search = &*(lparam.0 as *const WindowSearch);
             let mut owner = 0;
             GetWindowThreadProcessId(hwnd, Some(&mut owner));
-            if owner == 0 || !IsWindowVisible(hwnd).as_bool() {
+            if owner == 0
+                || !IsWindowVisible(hwnd).as_bool()
+                || IsIconic(hwnd).as_bool()
+                || !crate::browser_window::is_browser_content_window(hwnd.0 as isize)
+            {
                 return BOOL(1);
             }
             let length = GetWindowTextLengthW(hwnd).max(0) as usize;

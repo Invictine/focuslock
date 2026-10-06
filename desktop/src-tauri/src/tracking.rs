@@ -1196,7 +1196,8 @@ fn update_browser_repair_guard(
         }
     }
 
-    if let Some(window) = foreground.filter(|window| crate::browser_guard::is_browser(&window.app_id)) {
+    if let Some(window) = foreground.filter(|window| crate::browser_guard::is_browser(&window.app_id)
+        && crate::browser_window::is_browser_content_window(window.window_handle)) {
         known_windows.insert(window.window_handle, (window.process_id, window.app_id.clone()));
         samples.insert(window.window_handle, BrowserWindowSample {
             healthy: required

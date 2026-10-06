@@ -7,6 +7,7 @@ mod browser_bridge;
 mod browser_guard;
 mod browser_launch;
 mod browser_warning;
+mod browser_window;
 mod tracking;
 mod windows_capture;
 

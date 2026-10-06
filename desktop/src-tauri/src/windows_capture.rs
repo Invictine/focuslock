@@ -207,6 +207,11 @@ mod platform {
     /// it. This makes handle reuse harmless and prevents closing a replacement
     /// process that happens to receive the old numeric HWND.
     pub fn browser_window_identity(hwnd_value: isize) -> Option<BrowserWindowIdentity> {
+        // Chrome menus, tab previews, tooltips and owned dialogs belong to the
+        // browser process but cannot carry an extension window lease.
+        if !crate::browser_window::is_browser_content_window(hwnd_value) {
+            return None;
+        }
         let hwnd = HWND(hwnd_value as *mut _);
         if hwnd.0.is_null() {
             return None;
