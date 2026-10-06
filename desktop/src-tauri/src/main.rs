@@ -24,6 +24,14 @@ fn main() {
             }
             let runtime = TrackerRuntime::load(data_dir.join("activity-v1.json"))
                 .map_err(Box::<dyn std::error::Error>::from)?;
+            // Every webview can invoke commands as soon as it loads. Register
+            // their state before creating either the main or helper windows.
+            app.manage(auth::BrowserAuthRuntime::load(
+                data_dir.join("auth-session.json"),
+            ));
+            app.manage(blocker::BlockerRuntime::new());
+            app.manage(browser_warning::BrowserRepairRuntime::default());
+            app.manage(runtime);
             // The blocker window exists for the whole app lifetime, hidden.
             // If it cannot be created the tracker falls back to minimizing.
             if let Err(error) = blocker::build_blocker_window(app.handle()) {
@@ -32,11 +40,13 @@ fn main() {
             if let Err(error) = browser_warning::build_browser_warning_window(app.handle()) {
                 eprintln!("Could not create the browser repair notice: {error}");
             }
-            app.manage(blocker::BlockerRuntime::new());
-            app.manage(browser_warning::BrowserRepairRuntime::default());
-            runtime.start(app.handle().clone());
-            app.manage(runtime);
-            app.manage(auth::BrowserAuthRuntime::load(data_dir.join("auth-session.json")));
+            // Tauri creates automatic windows before this setup hook, so the
+            // configured main window has create:false and is built here.
+            let main_window = app.config().app.windows.iter()
+                .find(|window| window.label == "main")
+                .ok_or("Missing main window configuration")?;
+            tauri::WebviewWindowBuilder::from_config(app.handle(), main_window)?.build()?;
+            app.state::<TrackerRuntime>().start(app.handle().clone());
             Ok(())
         })
         .on_window_event(|window, event| match event {
