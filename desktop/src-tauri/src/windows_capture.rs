@@ -5,8 +5,6 @@ use url::Url;
 pub struct CapturedWindow {
     pub window_handle: isize,
     pub process_id: u32,
-    /// Committed address-bar value; never a focused omnibox edit.
-    pub browser_url: Option<String>,
     pub app_id: String,
     pub app_name: String,
     pub executable_path: Option<String>,
@@ -21,6 +19,14 @@ pub struct RunningApp {
     pub app_name: String,
     pub executable_path: Option<String>,
     pub window_title: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrowserWindowIdentity {
+    pub window_handle: isize,
+    pub process_id: u32,
+    pub app_id: String,
+    pub app_name: String,
 }
 
 pub fn normalized_domain(value: &str) -> Option<String> {
@@ -115,8 +121,9 @@ mod platform {
                 WindowsAndMessaging::{
                     EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowTextLengthW,
                     GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
-                    SetForegroundWindow, SetWindowPos, ShowWindow, HWND_TOPMOST, SWP_NOMOVE,
-                    SWP_NOSIZE, SWP_SHOWWINDOW, SW_MINIMIZE,
+                    PostMessageW, SetForegroundWindow, SetWindowPos, ShowWindow, HWND_TOPMOST,
+                    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_MINIMIZE,
+                    SW_SHOWNOACTIVATE, WM_CLOSE,
                 },
             },
         },
@@ -151,7 +158,6 @@ mod platform {
             Ok(Some(CapturedWindow {
                 window_handle: hwnd.0 as isize,
                 process_id,
-                browser_url,
                 app_name: friendly_app_name(&app_id),
                 app_id,
                 executable_path: path,
@@ -197,6 +203,58 @@ mod platform {
         }
     }
 
+    /// Recheck a pending HWND's PID and executable before retaining or closing
+    /// it. This makes handle reuse harmless and prevents closing a replacement
+    /// process that happens to receive the old numeric HWND.
+    pub fn browser_window_identity(hwnd_value: isize) -> Option<BrowserWindowIdentity> {
+        let hwnd = HWND(hwnd_value as *mut _);
+        if hwnd.0.is_null() {
+            return None;
+        }
+        unsafe {
+            if !IsWindow(Some(hwnd)).as_bool() {
+                return None;
+            }
+            let mut pid = 0_u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid == 0 {
+                return None;
+            }
+            let path = process_path(hwnd)?;
+            let app_id = Path::new(&path)
+                .file_name()
+                .and_then(|v| v.to_str())?
+                .to_ascii_lowercase();
+            crate::browser_guard::is_browser(&app_id).then(|| BrowserWindowIdentity {
+                window_handle: hwnd_value,
+                process_id: pid,
+                app_name: friendly_app_name(&app_id),
+                app_id,
+            })
+        }
+    }
+
+    /// Request a normal close only after revalidating the current HWND, PID,
+    /// and browser executable against the identity recorded by the guard.
+    pub fn request_browser_window_close(
+        hwnd_value: isize,
+        expected_pid: u32,
+        expected_app_id: &str,
+    ) -> Result<(), String> {
+        let current = browser_window_identity(hwnd_value)
+            .ok_or_else(|| "Browser window no longer exists".to_string())?;
+        if current.process_id != expected_pid
+            || !current.app_id.eq_ignore_ascii_case(expected_app_id)
+        {
+            return Err("Browser window identity changed; close request cancelled".into());
+        }
+        let hwnd = HWND(hwnd_value as *mut _);
+        unsafe {
+            PostMessageW(Some(hwnd), WM_CLOSE, Default::default(), Default::default())
+                .map_err(|error| format!("Could not request browser window close: {error}"))
+        }
+    }
+
     /// Physical screen rectangle (`left`, `top`, `right`, `bottom`) of a window.
     pub fn window_rect(hwnd: isize) -> Option<(i32, i32, i32, i32)> {
         let hwnd = HWND(hwnd as *mut _);
@@ -221,6 +279,29 @@ mod platform {
             }
             let _ = ShowWindow(hwnd, SW_MINIMIZE);
             Ok(())
+        }
+    }
+
+    pub fn show_nonactivating_topmost(hwnd_value: isize) -> Result<(), String> {
+        let hwnd = HWND(hwnd_value as *mut _);
+        if hwnd.0.is_null() {
+            return Err("Warning window is unavailable".into());
+        }
+        unsafe {
+            if !IsWindow(Some(hwnd)).as_bool() {
+                return Err("Warning window no longer exists".into());
+            }
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE,
+            )
+            .map_err(|error| format!("Could not show browser repair notice: {error}"))
         }
     }
 
@@ -415,10 +496,19 @@ mod platform {
     pub fn foreground_window() -> Option<isize> {
         None
     }
+    pub fn browser_window_identity(_: isize) -> Option<BrowserWindowIdentity> {
+        None
+    }
+    pub fn request_browser_window_close(_: isize, _: u32, _: &str) -> Result<(), String> {
+        Err("Browser window close is only available on Windows".into())
+    }
     pub fn window_rect(_: isize) -> Option<(i32, i32, i32, i32)> {
         None
     }
     pub fn minimize_window(_: isize) -> Result<(), String> {
+        Ok(())
+    }
+    pub fn show_nonactivating_topmost(_: isize) -> Result<(), String> {
         Ok(())
     }
     pub fn focus_window(_: isize) {}
@@ -427,8 +517,9 @@ mod platform {
     }
 }
 pub use platform::{
-    capture_foreground, focus_window, foreground_window, get_running_windows, idle_seconds,
-    minimize_foreground, minimize_window, window_rect,
+    browser_window_identity, capture_foreground, focus_window, foreground_window,
+    get_running_windows, idle_seconds, minimize_foreground, minimize_window,
+    request_browser_window_close, show_nonactivating_topmost, window_rect,
 };
 
 #[cfg(test)]

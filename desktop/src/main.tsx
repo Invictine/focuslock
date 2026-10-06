@@ -5,6 +5,7 @@ import { ConvexProviderWithClerk } from "convex/react-clerk";
 import { ConvexProvider, ConvexReactClient } from "convex/react";
 import App from "./App";
 import BlockerPage from "./BlockerPage";
+import BrowserRepairPage from "./BrowserRepairPage";
 import { ClerkWebAuthProvider, DesktopBrowserAuthProvider } from "./auth";
 import { ErrorBoundary } from "./ErrorBoundary";
 import "./bootstrap.css";
@@ -44,7 +45,15 @@ const root = ReactDOM.createRoot(document.getElementById("root")!);
 
 // The Rust side opens the blocker webview at `index.html#/blocked`. That screen
 // is fully native/local, so it renders before (and without) Clerk/Convex setup.
-if (window.location.hash.startsWith("#/blocked")) {
+if (window.location.hash.startsWith("#/browser-repair")) {
+  root.render(
+    <React.StrictMode>
+      <ErrorBoundary>
+        <BrowserRepairPage />
+      </ErrorBoundary>
+    </React.StrictMode>,
+  );
+} else if (window.location.hash.startsWith("#/blocked")) {
   root.render(
     <React.StrictMode>
       <ErrorBoundary>

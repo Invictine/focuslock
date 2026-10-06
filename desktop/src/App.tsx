@@ -635,13 +635,10 @@ function usageRangeLabel(range: UsageRange): string {
 // ---------------------------------------------------------------------------
 // Daily-limit enforcement
 //
-// Desktop has no Rust-side limit engine: `TrackerRuntime` merely minimises the
-// foreground window when its `BlockedTargets` match (exact appId, or domain
-// equality / subdomain suffix). A daily limit is therefore enforced by UNIONing
-// the exhausted target into the same `set_blocked_targets` payload the
-// Boundaries page already drives ("over the limit" == "blocked"). The payload is
-// rebuilt from the current dashboard + today's summary on every pass, so
-// previously-blocked targets are always preserved (union, never replace).
+// Native app boundaries and daily app limits use `BlockedTargets`; website
+// entries require the browser extension, which owns website enforcement. The
+// desktop still monitors browser-extension health and gives the user a repair
+// window if that connection is lost.
 //
 // Usage rule: combinedSeconds = max(localSecondsToday, serverSecondsToday).
 // - The ~25s upload cadence means the server total lags and may not include
@@ -5029,7 +5026,7 @@ function SettingsPage({
         <SettingRow
           icon="shield"
           title="Browser extension protection"
-          detail="Automatic with website boundaries, website limits, or Frog. Allow the extension on all websites and in incognito. A missing connection blocks browsing after the setup grace; extension settings stay available for repair. Closing this window minimizes FocusLock while protection is active."
+          detail="Website rules are enforced by the extension. FocusLock checks that it is connected and gives 60 seconds to install or enable it before closing the affected browser. Allow it on all websites and in incognito."
         >
           <span className="setting-value" role="status">
             {!status?.browserProtectionRequired ? "Waiting for website rules" :
@@ -5037,7 +5034,7 @@ function SettingsPage({
               status.browserProtection.healthy ? `${status.browserProtection.browser} · Connected` :
               status.browserProtection.reason === "browser_unsupported" ? "Use a supported browser" :
               status.browserProtection.graceRemainingSeconds > 0 ? `Enable extension · ${status.browserProtection.graceRemainingSeconds}s` :
-              "Restore extension to browse"}
+              "Browser closes if extension stays unavailable"}
           </span>
         </SettingRow>
         <SettingRow

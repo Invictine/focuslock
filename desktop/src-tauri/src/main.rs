@@ -5,6 +5,7 @@ mod auth;
 mod blocker;
 mod browser_bridge;
 mod browser_guard;
+mod browser_warning;
 mod tracking;
 mod windows_capture;
 
@@ -28,7 +29,11 @@ fn main() {
             if let Err(error) = blocker::build_blocker_window(app.handle()) {
                 eprintln!("Could not create the blocker window: {error}");
             }
+            if let Err(error) = browser_warning::build_browser_warning_window(app.handle()) {
+                eprintln!("Could not create the browser repair notice: {error}");
+            }
             app.manage(blocker::BlockerRuntime::new());
+            app.manage(browser_warning::BrowserRepairRuntime::default());
             runtime.start(app.handle().clone());
             app.manage(runtime);
             app.manage(auth::BrowserAuthRuntime::load(data_dir.join("auth-session.json")));
@@ -36,6 +41,11 @@ fn main() {
         })
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
+                if window.label() == browser_warning::WINDOW_LABEL {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    return;
+                }
                 if window.label() == "main" && window.app_handle().try_state::<TrackerRuntime>()
                     .is_some_and(|state| state.browser_protection_active()) {
                     api.prevent_close();
@@ -85,6 +95,7 @@ fn main() {
             tracking::set_tracker_config,
             tracking::set_browser_protection_policy,
             tracking::open_browser_extension_settings,
+            browser_warning::get_browser_repair_state,
             tracking::set_blocked_targets,
             tracking::get_permanent_targets,
             tracking::add_permanent_targets,

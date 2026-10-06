@@ -1,487 +1,371 @@
-//! Runtime policy for the desktop browser-extension guard.
+//! Companion monitor for browser extension health.
 //!
-//! The tracker supplies only committed address-bar URLs. A missing extension
-//! gets one setup grace period per browser executable while protection stays
-//! required; changing processes, tabs, or HWNDs does not restart it. Firefox
-//! is recognized so it can fail closed as unsupported.
+//! Website policy remains in the extension. This module only starts a local
+//! repair grace for browser windows that do not have a valid extension lease,
+//! then asks Windows to close that exact browser window after the grace ends.
 
+use serde::Serialize;
 use std::collections::HashMap;
-use url::Url;
 
 pub const GRACE_MS: u64 = 60_000;
-pub const RECOVERY_HANDOFF_MS: u64 = 15_000;
+const CLOSE_RETRY_MS: u64 = 2_000;
 
-const MAX_BROWSER_INCIDENTS: usize = 256;
-const MAX_RECOVERIES: usize = 256;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BrowserKind {
-    Chromium,
-    Unsupported,
-    Other,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrowserWindowSample {
+    pub window_handle: isize,
+    pub process_id: u32,
+    pub app_id: String,
+    pub browser: String,
+    pub healthy: bool,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct Incident {
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserRepairState {
+    pub browser: String,
+    pub app_id: String,
+    pub grace_remaining_seconds: u64,
+    pub reason: &'static str,
+}
+
+#[derive(Clone, Debug)]
+struct PendingWindow {
+    process_id: u32,
+    app_id: String,
+    browser: String,
     started_at_ms: u64,
+    reason: &'static str,
+    last_close_attempt_ms: Option<u64>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct Recovery {
-    opened_while_missing: bool,
-    healthy_until: Option<u64>,
-}
-
-/// In-memory extension health state. A browser executable's first missing
-/// sample starts its grace; health and process restarts never reset that start.
-/// An extension page opened while missing gets a 15-second return handoff once
-/// that same process reports healthy.
+/// Keeps a separate, nonrenewable deadline for each observed browser HWND.
+/// A healthy profile can cancel only its own window's pending deadline.
 #[derive(Debug, Default)]
 pub struct BrowserGuard {
-    incidents: HashMap<String, Incident>,
-    recoveries: HashMap<(String, u32), Recovery>,
+    incidents: HashMap<String, u64>,
+    pending: HashMap<isize, PendingWindow>,
 }
 
 impl BrowserGuard {
-    /// Evaluate a foreground sample. `committed_url` must be `None` while the
-    /// address bar is being edited, so uncommitted text never opens a recovery
-    /// exception or triggers an internal-page rule.
-    pub fn evaluate(
+    /// Observe the current foreground browser plus already-pending windows and
+    /// return windows whose close request should be retried. `known_windows` is the caller's
+    /// current identity check for existing pending HWNDs; stale/reused handles
+    /// are forgotten before they can receive a close message.
+    pub fn update(
         &mut self,
-        app_id: &str,
-        process_id: u32,
         required: bool,
-        healthy: bool,
-        committed_url: Option<&str>,
+        windows: &[BrowserWindowSample],
+        known_windows: &HashMap<isize, (u32, String)>,
         now_ms: u64,
-    ) -> Option<&'static str> {
+    ) -> (Option<BrowserRepairState>, Vec<BrowserWindowSample>) {
         if !required {
             self.incidents.clear();
-            self.recoveries.clear();
-            return None;
+            self.pending.clear();
+            return (None, Vec::new());
         }
 
-        match browser_kind(app_id) {
-            BrowserKind::Other => return None,
-            BrowserKind::Unsupported => return Some("browser_unsupported"),
-            BrowserKind::Chromium => {}
-        }
+        self.pending.retain(|hwnd, pending| {
+            known_windows.get(hwnd).is_some_and(|(pid, app_id)| {
+                *pid == pending.process_id && app_id.eq_ignore_ascii_case(&pending.app_id)
+            })
+        });
 
-        let extension_page = committed_url.is_some_and(is_extension_page);
-        let reset_page = committed_url.is_some_and(is_reset_page);
-
-        let browser_id = normalized_browser_id(app_id);
-        let recovery_key = (browser_id.clone(), process_id);
-        if process_id != 0 && committed_url.is_some() && !extension_page {
-            // Leaving extension management ends the short handoff. A later
-            // visit is a new settings entry and remains blocked.
-            self.recoveries.remove(&recovery_key);
-        }
-
-        if healthy {
-            if reset_page {
-                return Some("extension_settings");
+        let mut healthy_browsers = Vec::new();
+        for window in windows {
+            if window.window_handle == 0 || window.process_id == 0 {
+                continue;
             }
-            if extension_page {
-                if let Some(recovery) = self.recoveries.get_mut(&recovery_key) {
-                    if recovery.opened_while_missing {
-                        // Set once. A later health loss on the same page cannot
-                        // renew the deadline.
-                        let healthy_until = *recovery
-                            .healthy_until
-                            .get_or_insert_with(|| now_ms.saturating_add(RECOVERY_HANDOFF_MS));
-                        if now_ms < healthy_until {
-                            return None;
-                        }
-                    }
+            if window.healthy {
+                // Recovery cancels this window's deadline only. Another
+                // unhealthy profile in the same process keeps its own timer.
+                if self
+                    .pending
+                    .get(&window.window_handle)
+                    .is_some_and(|pending| {
+                        pending.process_id == window.process_id
+                            && pending.app_id.eq_ignore_ascii_case(&window.app_id)
+                    })
+                {
+                    self.pending.remove(&window.window_handle);
                 }
-                return Some("extension_settings");
+                healthy_browsers.push(base_app_id(&window.app_id));
+                continue;
             }
-            return None;
+
+            let reason = if is_unsupported_browser(&window.app_id) {
+                "browser_unsupported"
+            } else {
+                "extension_missing"
+            };
+            let browser_id = base_app_id(&window.app_id);
+            let started_at_ms = *self.incidents.entry(browser_id).or_insert(now_ms);
+            let same_identity = self
+                .pending
+                .get(&window.window_handle)
+                .is_some_and(|pending| {
+                    pending.process_id == window.process_id
+                        && pending.app_id.eq_ignore_ascii_case(&window.app_id)
+                });
+            if !same_identity {
+                self.pending.insert(
+                    window.window_handle,
+                    PendingWindow {
+                        process_id: window.process_id,
+                        app_id: window.app_id.clone(),
+                        browser: window.browser.clone(),
+                        started_at_ms,
+                        reason,
+                        last_close_attempt_ms: None,
+                    },
+                );
+            }
         }
 
-        let started_at_ms = if process_id == 0 {
-            None
-        } else {
-            match self.incidents.get(&browser_id) {
-                Some(incident) => Some(incident.started_at_ms),
-                None => {
-                    if !self.begin_incident(browser_id, now_ms) {
-                        // At capacity, preserve all live incidents and fail closed
-                        // for an untrackable browser executable.
-                        return if extension_page && !reset_page {
-                            None
-                        } else {
-                            Some("extension_missing")
-                        };
-                    }
-                    Some(now_ms)
+        // Only an actual healthy lease can resolve an executable incident.
+        // Empty enumeration, closed windows, or a newly opened HWND cannot
+        // silently buy another grace period.
+        for browser_id in healthy_browsers {
+            if !self
+                .pending
+                .values()
+                .any(|pending| base_app_id(&pending.app_id) == browser_id)
+            {
+                self.incidents.remove(&browser_id);
+            }
+        }
+
+        let mut due: Vec<_> = self
+            .pending
+            .iter_mut()
+            .filter_map(|(hwnd, pending)| {
+                if now_ms.saturating_sub(pending.started_at_ms) < GRACE_MS
+                    || pending
+                        .last_close_attempt_ms
+                        .is_some_and(|last| now_ms.saturating_sub(last) < CLOSE_RETRY_MS)
+                {
+                    return None;
                 }
-            }
-        };
+                pending.last_close_attempt_ms = Some(now_ms);
+                Some(BrowserWindowSample {
+                    window_handle: *hwnd,
+                    process_id: pending.process_id,
+                    app_id: pending.app_id.clone(),
+                    browser: pending.browser.clone(),
+                    healthy: false,
+                })
+            })
+            .collect();
+        due.sort_by_key(|window| window.window_handle);
 
-        // A missing extension may recover on its management page. Reset pages
-        // always block, but still start the browser's one-time grace period.
-        if reset_page {
-            return Some("extension_settings");
-        }
-        if extension_page {
-            if process_id != 0 {
-                self.note_recovery_page(recovery_key);
-            }
-            return None;
-        }
-
-        let Some(started_at_ms) = started_at_ms else {
-            return Some("extension_missing");
-        };
-        (now_ms.saturating_sub(started_at_ms) >= GRACE_MS).then_some("extension_missing")
+        let state = self
+            .pending
+            .values()
+            .min_by_key(|pending| pending.started_at_ms)
+            .map(|pending| BrowserRepairState {
+                browser: pending.browser.clone(),
+                app_id: pending.app_id.clone(),
+                grace_remaining_seconds: GRACE_MS
+                    .saturating_sub(now_ms.saturating_sub(pending.started_at_ms))
+                    .div_ceil(1_000),
+                reason: pending.reason,
+            });
+        (state, due)
     }
 
-    /// Remaining initial setup grace for a browser executable. `None` means
-    /// no missing sample has started its grace; expired incidents return 0.
-    pub fn missing_remaining_ms(&self, app_id: &str, now_ms: u64) -> Option<u64> {
-        self.incidents
-            .get(&normalized_browser_id(app_id))
-            .map(|incident| GRACE_MS.saturating_sub(now_ms.saturating_sub(incident.started_at_ms)))
+    #[cfg(test)]
+    pub fn pending_count(&self) -> usize {
+        self.pending.len()
     }
 
-    fn begin_incident(&mut self, browser_id: String, now_ms: u64) -> bool {
-        // Keep the deadline until protection is removed, including long
-        // commitments. Only the finite supported-browser names become keys.
-        if self.incidents.len() >= MAX_BROWSER_INCIDENTS {
-            return false;
-        }
-        self.incidents.insert(
-            browser_id,
-            Incident {
-                started_at_ms: now_ms,
-            },
-        );
-        true
+    pub fn pending_identities(&self) -> Vec<(isize, u32, String)> {
+        self.pending
+            .iter()
+            .map(|(hwnd, pending)| (*hwnd, pending.process_id, pending.app_id.clone()))
+            .collect()
     }
 
-    fn note_recovery_page(&mut self, key: (String, u32)) {
-        if self.recoveries.contains_key(&key) {
-            if let Some(recovery) = self.recoveries.get_mut(&key) {
-                recovery.opened_while_missing = true;
-            }
-            return;
+    pub fn retry_close(&mut self, hwnd: isize) {
+        if let Some(pending) = self.pending.get_mut(&hwnd) {
+            pending.last_close_attempt_ms = None;
         }
-        if self.recoveries.len() >= MAX_RECOVERIES {
-            return;
-        }
-        self.recoveries.insert(
-            key,
-            Recovery {
-                opened_while_missing: true,
-                healthy_until: None,
-            },
-        );
     }
 }
 
-fn browser_kind(app_id: &str) -> BrowserKind {
-    match normalized_browser_id(app_id).as_str() {
-        "chrome.exe" | "msedge.exe" | "brave.exe" | "vivaldi.exe" | "opera.exe"
-        | "opera_gx.exe" | "arc.exe" => BrowserKind::Chromium,
-        "firefox.exe" | "firefox" => BrowserKind::Unsupported,
-        _ => BrowserKind::Other,
-    }
-}
-
-fn normalized_browser_id(app_id: &str) -> String {
-    app_id.trim().to_ascii_lowercase()
-}
-
-/// Recognize browser-owned extension management pages for recovery and
-/// enforcement. Normal settings pages remain usable.
-fn is_extension_page(raw: &str) -> bool {
-    let Some((scheme, host, _path)) = parsed_internal_url(raw) else {
-        return false;
-    };
+pub fn is_browser(app_id: &str) -> bool {
     matches!(
-        (scheme.as_str(), host.as_str()),
-        ("chrome", "extensions")
-            | ("edge", "extensions")
-            | ("brave", "extensions")
-            | ("vivaldi", "extensions")
-            | ("opera", "extensions")
-            | ("arc", "extensions")
+        base_app_id(app_id).as_str(),
+        "chrome.exe"
+            | "msedge.exe"
+            | "brave.exe"
+            | "firefox.exe"
+            | "vivaldi.exe"
+            | "opera.exe"
+            | "opera_gx.exe"
+            | "arc.exe"
     )
 }
 
-/// Reset pages always block while protection is required, including when
-/// extension health is missing; they can undo browser configuration.
-fn is_reset_page(raw: &str) -> bool {
-    let Some((scheme, host, path)) = parsed_internal_url(raw) else {
-        return false;
-    };
-    let settings_host = matches!(
-        (scheme.as_str(), host.as_str()),
-        ("chrome", "settings")
-            | ("edge", "settings")
-            | ("brave", "settings")
-            | ("vivaldi", "settings")
-            | ("opera", "settings")
-            | ("arc", "settings")
-    );
-    settings_host
-        && (path == "/reset"
-            || path.starts_with("/reset/")
-            || path == "/resetprofilesettings"
-            || path.starts_with("/resetprofilesettings/"))
+pub fn is_unsupported_browser(app_id: &str) -> bool {
+    base_app_id(app_id) == "firefox.exe"
 }
 
-fn parsed_internal_url(raw: &str) -> Option<(String, String, String)> {
-    let Ok(url) = Url::parse(raw) else {
-        return None;
-    };
-    if !url.username().is_empty() || url.password().is_some() {
-        return None;
-    }
-
-    let scheme = url.scheme().to_ascii_lowercase();
-    let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
-    let path = url.path().trim_end_matches('/').to_ascii_lowercase();
-    Some((scheme, host, path))
+fn base_app_id(app_id: &str) -> String {
+    app_id
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(app_id)
+        .to_ascii_lowercase()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn eval(
-        guard: &mut BrowserGuard,
-        app: &str,
-        pid: u32,
-        healthy: bool,
-        url: Option<&str>,
-        now: u64,
-    ) -> Option<&'static str> {
-        guard.evaluate(app, pid, true, healthy, url, now)
-    }
-
-    #[test]
-    fn one_grace_period_survives_process_and_window_switches() {
-        let mut guard = BrowserGuard::default();
-        assert_eq!(eval(&mut guard, "chrome.exe", 10, false, None, 100), None);
-        assert_eq!(
-            guard.missing_remaining_ms("chrome.exe", 30_000),
-            Some(30_100)
-        );
-        assert_eq!(
-            eval(&mut guard, "chrome.exe", 11, false, None, 45_000),
-            None
-        );
-        assert_eq!(
-            eval(&mut guard, "chrome.exe", 12, false, None, 60_100),
-            Some("extension_missing")
-        );
-    }
-
-    #[test]
-    fn healthy_samples_and_browser_restart_do_not_reset_initial_grace() {
-        let mut guard = BrowserGuard::default();
-        eval(&mut guard, "chrome.exe", 10, false, None, 0);
-        assert_eq!(eval(&mut guard, "chrome.exe", 11, true, None, 20_000), None);
-        assert_eq!(
-            guard.missing_remaining_ms("chrome.exe", 20_000),
-            Some(40_000)
-        );
-        assert_eq!(
-            eval(
-                &mut guard,
-                "chrome.exe",
-                12,
-                false,
-                Some("chrome://extensions/?id=abc"),
-                50_000
-            ),
-            None
-        );
-        assert_eq!(
-            guard.missing_remaining_ms("chrome.exe", 50_000),
-            Some(10_000)
-        );
-        assert_eq!(eval(&mut guard, "chrome.exe", 12, true, None, 55_000), None);
-        assert_eq!(
-            guard.missing_remaining_ms("chrome.exe", 55_000),
-            Some(5_000)
-        );
-        assert_eq!(
-            eval(&mut guard, "chrome.exe", 99, false, None, 60_000),
-            Some("extension_missing")
-        );
-        assert_eq!(guard.missing_remaining_ms("chrome.exe", 60_000), Some(0));
-    }
-
-    #[test]
-    fn recovery_pages_and_settings_rules_are_narrow() {
-        for url in [
-            "chrome://extensions/",
-            "edge://extensions/?id=abc",
-            "brave://extensions/subpage",
-            "vivaldi://settings/reset",
-            "opera://settings/resetProfileSettings/confirm",
-        ] {
-            assert!(
-                is_extension_page(url) || is_reset_page(url),
-                "expected match: {url}"
-            );
-        }
-        for url in [
-            "chrome://settings/",
-            "chrome://settings/privacy",
-            "https://example.com/?next=chrome://extensions",
-            "https://extensions/",
-            "chrome://extensions.evil/",
-            "chrome://user@extensions/",
-            "chrome://settings/?search=reset",
-            "chrome://settings/resetting",
-            "not a url",
-        ] {
-            assert!(
-                !is_extension_page(url) && !is_reset_page(url),
-                "unexpected match: {url}"
-            );
+    fn sample(hwnd: isize, pid: u32, app_id: &str, healthy: bool) -> BrowserWindowSample {
+        BrowserWindowSample {
+            window_handle: hwnd,
+            process_id: pid,
+            app_id: app_id.into(),
+            browser: app_id.into(),
+            healthy,
         }
     }
 
+    fn known(samples: &[BrowserWindowSample]) -> HashMap<isize, (u32, String)> {
+        samples
+            .iter()
+            .map(|window| {
+                (
+                    window.window_handle,
+                    (window.process_id, window.app_id.clone()),
+                )
+            })
+            .collect()
+    }
+
     #[test]
-    fn extension_page_blocks_when_healthy_and_recovers_when_missing_but_reset_always_blocks() {
+    fn deadline_is_per_window_and_independent_of_foreground_switches() {
         let mut guard = BrowserGuard::default();
-        let url = Some("chrome://extensions/");
+        let first = sample(10, 100, "chrome.exe", false);
+        let (state, due) = guard.update(true, &[first.clone()], &known(&[first.clone()]), 0);
+        assert_eq!(state.unwrap().grace_remaining_seconds, 60);
+        assert!(due.is_empty());
+
+        let second = sample(11, 101, "chrome.exe", false);
+        let all = [first.clone(), second.clone()];
+        let (state, due) = guard.update(true, &[second], &known(&all), 20_000);
+        assert_eq!(state.unwrap().grace_remaining_seconds, 40);
+        assert!(due.is_empty());
+
+        let (_, due) = guard.update(true, &[], &known(&all), 60_000);
+        assert_eq!(due.len(), 2);
         assert_eq!(
-            eval(&mut guard, "chrome.exe", 1, true, url, 0),
-            Some("extension_settings")
+            due.iter()
+                .map(|window| window.window_handle)
+                .collect::<Vec<_>>(),
+            [10, 11]
         );
-        assert_eq!(eval(&mut guard, "chrome.exe", 2, false, url, 0), None);
+        let (_, due) = guard.update(true, &[], &known(&all), 61_999);
+        assert!(due.is_empty());
+        let (_, due) = guard.update(true, &[], &known(&all), 62_000);
         assert_eq!(
-            guard.missing_remaining_ms("chrome.exe", 1),
-            Some(GRACE_MS - 1)
-        );
-        assert_eq!(
-            eval(
-                &mut guard,
-                "chrome.exe",
-                2,
-                false,
-                Some("chrome://settings/reset"),
-                10
-            ),
-            Some("extension_settings")
+            due.len(),
+            2,
+            "queued close requests are retried while unhealthy"
         );
     }
 
     #[test]
-    fn unsupported_firefox_is_immediate_and_chromium_health_isolated() {
+    fn healthy_profile_cancels_only_its_own_window() {
         let mut guard = BrowserGuard::default();
-        eval(&mut guard, "chrome.exe", 10, false, None, 0);
+        let one = sample(10, 100, "chrome.exe", false);
+        let two = sample(11, 100, "chrome.exe", false);
+        let both = [one.clone(), two.clone()];
+        guard.update(true, &both, &known(&both), 0);
+        let healthy_one = sample(10, 100, "chrome.exe", true);
+        let (_, due) = guard.update(true, &[healthy_one, two.clone()], &known(&both), 59_000);
+        assert!(due.is_empty());
+        assert_eq!(guard.pending_count(), 1);
+        let (_, due) = guard.update(true, &[], &known(&[two]), 60_000);
         assert_eq!(
-            eval(&mut guard, "firefox.exe", 11, true, None, 1),
-            Some("browser_unsupported")
-        );
-        assert_eq!(
-            guard.missing_remaining_ms("chrome.exe", 1),
-            Some(GRACE_MS - 1)
-        );
-        assert_eq!(eval(&mut guard, "notepad.exe", 10, true, None, 2), None);
-        assert_eq!(
-            guard.missing_remaining_ms("chrome.exe", 2),
-            Some(GRACE_MS - 2)
+            due.iter()
+                .map(|window| window.window_handle)
+                .collect::<Vec<_>>(),
+            [11]
         );
     }
 
     #[test]
-    fn disabling_requirement_clears_incidents_but_non_browser_does_not() {
+    fn firefox_gets_same_grace_with_unsupported_reason() {
+        assert!(is_browser("C:\\Apps\\Firefox.exe"));
+        assert!(is_unsupported_browser("firefox.exe"));
         let mut guard = BrowserGuard::default();
-        eval(&mut guard, "chrome.exe", 10, false, None, 0);
-        assert_eq!(guard.evaluate("notepad.exe", 0, true, true, None, 1), None);
-        assert_eq!(
-            guard.missing_remaining_ms("chrome.exe", 1),
-            Some(GRACE_MS - 1)
-        );
-        assert_eq!(guard.evaluate("chrome.exe", 0, false, false, None, 2), None);
-        assert_eq!(guard.missing_remaining_ms("chrome.exe", 2), None);
+        let firefox = sample(20, 200, "firefox.exe", false);
+        let (state, due) =
+            guard.update(true, &[firefox.clone()], &known(&[firefox.clone()]), 1_000);
+        let state = state.unwrap();
+        assert_eq!(state.reason, "browser_unsupported");
+        assert_eq!(state.grace_remaining_seconds, 60);
+        assert!(due.is_empty());
+        let (_, due) = guard.update(true, &[], &known(&[firefox]), 61_000);
+        assert_eq!(due.len(), 1);
     }
 
     #[test]
-    fn zero_pid_fails_closed_without_grace() {
+    fn healthy_restoration_cancels_and_later_outage_gets_new_grace() {
         let mut guard = BrowserGuard::default();
-        assert_eq!(
-            eval(&mut guard, "chrome.exe", 0, false, None, 0),
-            Some("extension_missing")
-        );
-        assert_eq!(guard.missing_remaining_ms("chrome.exe", 0), None);
+        let unhealthy = sample(10, 100, "chrome.exe", false);
+        let known = known(&[unhealthy.clone()]);
+        guard.update(true, &[unhealthy.clone()], &known, 0);
+        let healthy = sample(10, 100, "chrome.exe", true);
+        assert!(guard.update(true, &[healthy], &known, 30_000).0.is_none());
+        let (state, _) = guard.update(true, &[unhealthy.clone()], &known, 40_000);
+        assert_eq!(state.unwrap().grace_remaining_seconds, 60);
     }
 
     #[test]
-    fn missing_extension_page_gets_handoff_then_leaving_removes_it() {
+    fn destroyed_or_reused_hwnds_are_forgotten_without_closing_new_identity() {
         let mut guard = BrowserGuard::default();
-        let extension_page = Some("chrome://extensions/");
-        assert_eq!(
-            eval(&mut guard, "chrome.exe", 41, false, extension_page, 0),
-            None
+        let old = sample(10, 100, "chrome.exe", false);
+        guard.update(
+            true,
+            &[old],
+            &known(&[sample(10, 100, "chrome.exe", false)]),
+            0,
         );
-        assert_eq!(
-            eval(&mut guard, "chrome.exe", 41, true, extension_page, 1_000),
-            None
-        );
-        assert_eq!(
-            eval(
-                &mut guard,
-                "chrome.exe",
-                41,
-                true,
-                Some("https://example.com/"),
-                2_000
-            ),
-            None
-        );
-        assert_eq!(
-            eval(&mut guard, "chrome.exe", 41, true, extension_page, 3_000),
-            Some("extension_settings")
-        );
+        let reused = sample(10, 200, "msedge.exe", false);
+        let (state, due) = guard.update(true, &[reused.clone()], &known(&[reused]), 60_000);
+        assert_eq!(state.unwrap().grace_remaining_seconds, 60);
+        assert!(due.is_empty());
     }
 
     #[test]
-    fn recovery_handoff_expires_and_health_loss_does_not_renew_it() {
+    fn closing_and_reopening_browser_does_not_renew_unresolved_executable_deadline() {
         let mut guard = BrowserGuard::default();
-        let extension_page = Some("chrome://extensions/");
-        assert_eq!(
-            eval(&mut guard, "chrome.exe", 41, false, extension_page, 0),
-            None
+        let old = sample(10, 100, "chrome.exe", false);
+        guard.update(true, &[old.clone()], &known(&[old]), 0);
+        // Browser closes; the HWND can be forgotten, but no healthy lease was
+        // observed, so the Chrome incident remains unresolved.
+        assert!(guard.update(true, &[], &HashMap::new(), 20_000).0.is_none());
+        let reopened = sample(11, 200, "chrome.exe", false);
+        let (state, due) = guard.update(
+            true,
+            &[reopened.clone()],
+            &known(&[reopened.clone()]),
+            40_000,
         );
-        assert_eq!(
-            eval(&mut guard, "chrome.exe", 41, true, extension_page, 1_000),
-            None
-        );
-        assert_eq!(
-            eval(&mut guard, "chrome.exe", 41, false, extension_page, 10_000),
-            None
-        );
-        assert_eq!(
-            eval(&mut guard, "chrome.exe", 41, true, extension_page, 15_999),
-            None
-        );
-        assert_eq!(
-            eval(&mut guard, "chrome.exe", 41, true, extension_page, 16_000),
-            Some("extension_settings")
-        );
+        assert_eq!(state.unwrap().grace_remaining_seconds, 20);
+        assert!(due.is_empty());
+        let (_, due) = guard.update(true, &[], &known(&[reopened]), 60_000);
+        assert_eq!(due.len(), 1);
     }
 
     #[test]
-    fn recovery_handoff_does_not_cross_processes() {
+    fn disabling_requirement_clears_all_pending_windows() {
         let mut guard = BrowserGuard::default();
-        let extension_page = Some("chrome://extensions/");
-        assert_eq!(
-            eval(&mut guard, "chrome.exe", 41, false, extension_page, 0),
-            None
-        );
-        assert_eq!(
-            eval(&mut guard, "chrome.exe", 42, true, extension_page, 1_000),
-            Some("extension_settings")
-        );
+        let chrome = sample(10, 100, "chrome.exe", false);
+        guard.update(true, &[chrome.clone()], &known(&[chrome]), 0);
+        assert!(guard.update(false, &[], &HashMap::new(), 1).0.is_none());
+        assert_eq!(guard.pending_count(), 0);
     }
 }

@@ -1,99 +1,104 @@
 # Browser extension protection on Windows
 
-FocusLock checks a live local connection from the extension while website
-boundaries, website limits, or Frog are configured. No cloud heartbeat or
-account sign-in is required for the native check. Rules and an active Strict
-Mode deadline persist in the desktop activity store.
+The extension owns website boundaries, website limits, schedules, and Frog
+website enforcement. The desktop records browser usage and checks that the
+extension is available; it does not cover websites with a second blocker.
+Explicit application boundaries, including a browser executable selected as an
+app, still use the native app blocker.
+
+The companion check runs while website boundaries, website limits, schedules,
+or Frog require protection. Rules and an active Strict Mode deadline persist
+in the desktop activity store. The local check needs no cloud heartbeat or
+account sign-in.
 
 ## Setup
 
 1. Build/reload the extension from `build/extension-unpacked` and open the
-   updated desktop app. The app registers its executable as the current user's
+   updated desktop app. It registers the current user's
    `com.focuslock.browser` native messaging host on startup.
-2. Install/enable FocusLock in every browser profile used for browsing.
+2. Install or enable FocusLock in each browser profile you use.
 3. Give it access to all websites and enable **Allow in incognito** (or the
-   browser's equivalent). The extension's existing site blocking remains in
-   charge; the desktop checks its availability.
+   browser's equivalent).
 4. Settings → Windows tracking → Browser extension protection shows the most
    recently used browser's connection state.
 
 Chrome, Edge, Brave, Vivaldi, Opera/Opera GX, and Arc use the Chromium bridge.
-Firefox is blocked while protection is required because the current FocusLock
-extension has no Firefox implementation. Native host discovery and actual
-behavior must be verified individually on each browser/version.
+Firefox has no FocusLock extension yet, so its warning asks you to use a
+supported browser. Browser brands other than Chromium still need individual
+native acceptance testing.
 
-## Enforcement and recovery
+## Countdown and recovery
 
-- Extension heartbeats arrive every two seconds. The native host derives the
-  browser PID from its process ancestry and matches reported active-tab titles
-  and window bounds to visible native Windows handles. A healthy window cannot
-  authorize another browser process or a window in an unprotected profile.
-- Leases expire after ten seconds. Missing permission, disabled/removed
-  extensions, guest profiles, or disconnected/crashed hosts cannot produce a
-  healthy lease.
-- The first missing connection gets one 60-second setup grace per browser
-  executable for the current protection period. Changing windows/profiles or
-  restarting the browser does not renew it. Healthy connections resume browsing
-  immediately; further missing connections use the original grace deadline.
-- After grace, the existing native blocker covers the foreground browser;
-  minimizing is the fallback if its window cannot be shown. This does not kill
-  the browser or discard unsaved tabs.
-- Extension-management pages are blocked while the extension is healthy.
-  They remain available for recovery when it is missing. Browser-reset pages
-  stay blocked. A focused/edited address bar never grants the recovery exception.
-- **Open extension settings** opens the browser's management page. If the
-  browser selects a different profile, open the affected profile's extension
-  settings manually. Re-enable FocusLock, restore permissions, and return to
-  the browsing tab. A settings page opened for recovery gets 15 seconds to
-  return to browsing after its connection becomes healthy. Existing app,
-  domain, Frog, and permanent blocks keep their
-  precedence over recovery; protection never clears those rules.
-- Tracking cannot be paused in the app while browser protection is required.
-  Adding website rules resumes a tracker that was paused before activation.
-  Closing the main window minimizes it to the taskbar instead of stopping
-  enforcement. Removing the website rules outside a commitment allows normal
-  closing again.
+- Heartbeats arrive every two seconds. The native host derives the browser PID
+  from its process ancestry and matches active-tab titles and window bounds
+  to native Windows handles. A healthy profile cannot authorize a different
+  unprotected window or process.
+- Leases expire after ten seconds. Missing permissions, disabled or removed
+  extensions, guest profiles, or crashed native hosts produce a missing lease.
+- When an unprotected browser window is observed, a compact notice gives you
+  60 seconds to install or enable the extension. The notice leaves the browser
+  usable. Extension settings and browser settings remain available.
+- The countdown continues when another app takes focus. Switching windows,
+  profiles, or processes does not renew an unresolved browser deadline.
+  Closing the notice does not cancel the countdown.
+- A valid extension connection cancels that window's pending close. A later
+  outage starts a fresh countdown after all outstanding windows of that browser
+  have recovered. Restoring one profile does not cancel another profile's close.
+- At the deadline, FocusLock asks the affected browser window to close using
+  Windows' normal close message, after checking its handle, PID, and executable.
+  It does not terminate unrelated browser profiles or processes. A browser may
+  show its own unsaved-work confirmation; unresolved closes are retried.
+- **Open extension settings** opens the affected browser's management page.
+  If the browser selects another profile, switch to the affected profile before
+  enabling the extension. Give it the required permissions and return to your
+  browsing tab so the desktop can verify the connection.
+- Tracking cannot be paused while browser protection is required. Adding
+  website rules resumes a paused tracker. Closing the main window minimizes it
+  while protection is active. Removing the rules outside a commitment restores
+  normal closing.
 
 ## Scope
 
-This is a desktop companion guard, not a force-installed enterprise policy.
-It requires FocusLock to remain running. An administrator or another program
-running as the same Windows user can stop the desktop app, change its data,
-or forge local evidence. Arbitrarily renamed/custom browsers are not detected.
-Window matching fails closed if titles/bounds are unavailable or ambiguous;
-unusual displays, languages, and browser versions need native verification.
+This check requires the desktop app to remain running. Administrators and
+programs running as the same Windows user can stop it or alter its local data.
+Arbitrarily renamed/custom browsers are not detected. Window matching fails
+closed when titles/bounds are missing or ambiguous; unusual displays,
+languages, and browser versions need native verification.
 
-The host stores short-lived window-health evidence in
-`%APPDATA%\com.focuslock.desktop\browser-leases`. It does not store web URLs,
-webpage contents, account tokens, or credentials. The matching titles are
-processed in memory, while leases contain only process and window identifiers.
+Short-lived evidence is stored in
+`%APPDATA%\com.focuslock.desktop\browser-leases`. It contains process and window
+identifiers, not URLs, webpage contents, account tokens, or credentials. Tab
+titles are matched in memory.
 
-The change is confined to the FocusLock desktop host and extension. Standalone
-Void does not own website policies or a browser extension, so there is no shared
-launcher change or standalone backport.
+These changes concern the FocusLock desktop host. Standalone Void owns neither
+website policy nor an extension, so no shared launcher source or standalone
+backport is involved.
 
 ## Checks
 
-Run desktop `npm run build`, native `cargo test`, root
-`npm test -- --run tests/browser-protection.test.ts`, and extension
-`npm test`, `npm run test:desktop-bridge`, `npm run check`, and `npm run build`.
-Use a disposable browser profile for native enable → disable → block →
-re-enable acceptance; builds and cloud-sync fixtures are not proof of this flow.
+Run desktop `npm run build`, native `cargo test`, and root
+`npm test -- --run tests/browser-protection.test.ts`. The extension bridge is
+unchanged by the countdown revision.
 
-`scripts/verify-browser-protection.mjs` runs that Windows acceptance with a
-separate Tauri app identity and two disposable Chromium profiles. First build
-with a temporary Tauri config whose identifier starts with
-`com.focuslock.browserqa.`, copy the resulting executable to an isolated QA
-path, then pass its absolute path as `--exe` and its identifier as `--identifier`.
-The runner verifies the registered app-data directory before changing policies.
-It saves and restores the 12 exact native-host registry default values and
-writes a report and blocker screenshots under `build/browser-protection`.
-After an interrupted run, use `--restore <registry-backup.json>`.
-Rebuild normally afterward so the production executable retains its usual
-app identity.
+`scripts/verify-browser-protection.mjs` uses a separate Tauri app identity and
+disposable Chromium profiles. Build with a temporary config whose identifier
+starts with `com.focuslock.browserqa.`, copy that executable to an isolated
+path, then supply its absolute path with `--exe` and the identifier with
+`--identifier`. The runner verifies the isolated app-data directory before
+sending policy commands. It tests normal browsing without a desktop website
+overlay, settings access, the visible countdown, recovery, profile isolation,
+and closure with another app in foreground.
 
-The October 6, 2026 native Chromium acceptance verified a real heartbeat,
-extension-settings blocking, normal browsing, disabling the extension, the
-60-second grace, decreasing grace across profiles/focus changes, the missing
-extension blocker, and restoration after re-enabling. Other browser brands
-still require individual native acceptance.
+The runner saves/restores the 12 exact native-host registry default values and
+writes reports/screenshots under `build/browser-protection`. After an
+interrupted run, use `--restore <registry-backup.json>`. Rebuild normally after
+acceptance to restore the production executable's usual identity. Passing
+builds or isolated Chromium acceptance does not establish signed-in device
+sync or acceptance on every supported browser brand.
+
+The October 6, 2026 Chromium acceptance passed: configured website targets
+and extension settings produced no desktop overlay; disabling the extension
+showed a nonmodal countdown; enabling it canceled the close. A second profile
+without the extension closed 59.9 seconds after its countdown was observed,
+with the desktop in foreground and the healthy profile still open. The repair
+notice cleared afterward, and the native-host registry entries were restored.

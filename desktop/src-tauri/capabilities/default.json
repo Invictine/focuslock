@@ -2,7 +2,7 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "FocusLock desktop capabilities",
-  "windows": ["main", "blocker"],
+  "windows": ["main", "blocker", "browser-repair"],
   "permissions": [
     "core:default",
     "store:default",

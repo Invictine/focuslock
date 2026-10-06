@@ -1,7 +1,11 @@
 use crate::{
     blocker::BlockerRuntime,
+    browser_guard::{BrowserGuard, BrowserWindowSample},
+    browser_warning::BrowserRepairRuntime,
     windows_capture::{
-        capture_foreground, get_running_windows, idle_seconds, minimize_foreground, CapturedWindow,
+        browser_window_identity, capture_foreground, get_running_windows, idle_seconds,
+        minimize_foreground, request_browser_window_close,
+        CapturedWindow,
     },
 };
 use chrono::Local;
@@ -260,7 +264,6 @@ pub struct BlockedMatch {
 #[derive(Clone, Debug)]
 pub struct BlockedMatcher {
     app_ids: HashSet<String>,
-    domains: HashSet<String>,
     reasons: HashMap<String, String>,
     own_app_id: String,
 }
@@ -269,7 +272,6 @@ impl BlockedMatcher {
     pub fn new(targets: &BlockedTargets, reasons: &HashMap<String, String>) -> Self {
         Self {
             app_ids: targets.app_ids.iter().cloned().collect(),
-            domains: targets.domains.iter().cloned().collect(),
             reasons: reasons.clone(),
             own_app_id: own_app_id().to_string(),
         }
@@ -293,46 +295,6 @@ impl BlockedMatcher {
                     .cloned()
                     .unwrap_or_else(|| DEFAULT_REASON.to_string()),
             });
-        }
-        let domain = captured.browser_domain.as_deref()?;
-        let target = self.match_domain(domain)?;
-        let reason = self
-            .domain_reason(domain)
-            .or_else(|| self.reasons.get(&target).cloned())
-            .unwrap_or_else(|| DEFAULT_REASON.to_string());
-        Some(BlockedMatch {
-            target,
-            kind: "domain",
-            reason,
-        })
-    }
-
-    /// Exact domain first, then each parent label (`m.youtube.com` matches a
-    /// blocked `youtube.com`).
-    fn match_domain(&self, domain: &str) -> Option<String> {
-        if self.domains.contains(domain) {
-            return Some(domain.to_string());
-        }
-        let mut remainder = domain;
-        while let Some(index) = remainder.find('.') {
-            remainder = &remainder[index + 1..];
-            if self.domains.contains(remainder) {
-                return Some(remainder.to_string());
-            }
-        }
-        None
-    }
-
-    fn domain_reason(&self, domain: &str) -> Option<String> {
-        if let Some(reason) = self.reasons.get(domain) {
-            return Some(reason.clone());
-        }
-        let mut remainder = domain;
-        while let Some(index) = remainder.find('.') {
-            remainder = &remainder[index + 1..];
-            if let Some(reason) = self.reasons.get(remainder) {
-                return Some(reason.clone());
-            }
         }
         None
     }
@@ -566,13 +528,14 @@ impl TrackerRuntime {
         let store_path = self.store_path.clone();
         let matcher = self.matcher.clone();
         let browser_protection = self.browser_protection.clone();
+        let repair_runtime = app.try_state::<BrowserRepairRuntime>().map(|state| state.inner().clone());
         let worker = thread::Builder::new()
             .name("focuslock-activity-tracker".into())
             .spawn(move || {
                 let mut previous_key = None;
                 let mut samples_since_save = 0_u64;
                 let mut consecutive_capture_errors = 0_u32;
-                let mut guard = crate::browser_guard::BrowserGuard::default();
+                let mut guard = BrowserGuard::default();
                 let lease_dir = store_path.parent().unwrap_or(Path::new(".")).to_path_buf();
                 let guard_started = std::time::Instant::now();
                 while running.load(Ordering::SeqCst) {
@@ -580,6 +543,18 @@ impl TrackerRuntime {
                         Ok(s) => (s.config.clone(), s.device.clone(), s.browser_protection_active()),
                         Err(_) => break,
                     };
+                    let foreground = capture_foreground(config.capture_browser_domains);
+                    update_browser_repair_guard(
+                        &app,
+                        repair_runtime.as_ref(),
+                        &mut guard,
+                        &lease_dir,
+                        protection_required,
+                        guard_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                        now_ms(),
+                        foreground.as_ref().ok().and_then(|window| window.as_ref()),
+                        &last_error,
+                    );
                     let matcher = match matcher.lock() {
                         Ok(value) => value.clone(),
                         Err(_) => break,
@@ -587,22 +562,25 @@ impl TrackerRuntime {
                     let idle = idle_seconds()
                         .map(|v| v >= config.idle_threshold_seconds)
                         .unwrap_or(false);
-                    match capture_foreground(config.capture_browser_domains) {
+                    match foreground {
                         Ok(Some(captured)) => {
                             consecutive_capture_errors = 0;
-                            let guard_now = guard_started.elapsed().as_millis().min(u64::MAX as u128) as u64;
                             let healthy = protection_required && crate::browser_bridge::read_window_health(
                                 &lease_dir, captured.window_handle, captured.process_id,
                                 &captured.app_id, now_ms());
-                            let guard_reason = guard.evaluate(&captured.app_id, captured.process_id,
-                                protection_required, healthy, captured.browser_url.as_deref(), guard_now);
-                            if crate::windows_capture::is_supported_browser(&captured.app_id) {
+                            if crate::browser_guard::is_browser(&captured.app_id) {
+                                let repair_state = repair_runtime.as_ref().and_then(|runtime| {
+                                    runtime.shared_state().lock().ok().and_then(|value| value.clone())
+                                });
                                 if let Ok(mut status) = browser_protection.lock() {
                                     *status = Some(BrowserProtectionStatus {
                                         browser: captured.app_name.clone(), healthy,
-                                        grace_remaining_seconds: guard.missing_remaining_ms(&captured.app_id, guard_now)
-                                            .unwrap_or(0).div_ceil(1_000),
-                                        reason: guard_reason.map(str::to_string),
+                                        grace_remaining_seconds: repair_state.as_ref()
+                                            .filter(|state| state.app_id.eq_ignore_ascii_case(&captured.app_id))
+                                            .map(|state| state.grace_remaining_seconds).unwrap_or(0),
+                                        reason: repair_state.as_ref()
+                                            .filter(|state| state.app_id.eq_ignore_ascii_case(&captured.app_id))
+                                            .map(|state| state.reason.to_string()),
                                         window_handle: captured.window_handle,
                                         process_id: captured.process_id,
                                         app_id: captured.app_id.clone(),
@@ -612,10 +590,8 @@ impl TrackerRuntime {
                             } else if !protection_required {
                                 if let Ok(mut status) = browser_protection.lock() { *status = None; }
                             }
-                            // Existing app/domain blocks keep precedence (including Frog and permanent).
-                            let blocked_match = matcher.match_target(&captured).or_else(|| guard_reason.map(|reason| BlockedMatch {
-                                target: captured.app_id.clone(), kind: "browser", reason: reason.to_string(),
-                            }));
+                            // Explicit app blocks keep precedence (including Frog and permanent).
+                            let blocked_match = matcher.match_target(&captured);
                             let observation = ActivityObservation {
                                 captured_at_ms: now_ms(),
                                 app_id: captured.app_id.clone(),
@@ -919,14 +895,21 @@ pub fn set_browser_protection_policy(
 
 #[tauri::command]
 pub fn open_browser_extension_settings(
-    app: AppHandle,
-    blocker: State<'_, BlockerRuntime>,
+    app_id: Option<String>,
+    repair: State<'_, BrowserRepairRuntime>,
 ) -> Result<(), String> {
-    let target = blocker.state().target.ok_or("No browser to repair")?;
+    let target = app_id.or_else(|| {
+        repair.shared_state().lock().ok().and_then(|state| {
+            state.as_ref().map(|state| state.app_id.clone())
+        })
+    }).ok_or("No browser to repair")?.to_ascii_lowercase();
+    if crate::browser_guard::is_unsupported_browser(&target) {
+        return Err("Firefox is not supported for FocusLock extension protection. Use Chrome, Edge, Brave, Vivaldi, Opera, or Arc.".into());
+    }
     if !crate::browser_bridge::supported_browser(&target) {
         return Err("Use Chrome, Edge, Brave, Vivaldi, Opera, or Arc with the FocusLock extension.".into());
     }
-    let browser = get_running_windows()?.into_iter().find(|window| window.app_id == target)
+    let browser = get_running_windows()?.into_iter().find(|window| window.app_id.eq_ignore_ascii_case(&target))
         .ok_or("Browser window is no longer open")?;
     let path = browser.executable_path.ok_or("Browser executable is unavailable")?;
     if Path::new(&path).file_name().and_then(|name| name.to_str()).is_none_or(|name| !name.eq_ignore_ascii_case(&target)) {
@@ -940,7 +923,6 @@ pub fn open_browser_extension_settings(
         _ => "chrome://extensions/",
     };
     std::process::Command::new(path).arg(url).spawn().map_err(|error| format!("Could not open extension settings: {error}"))?;
-    blocker.hide(&app);
     Ok(())
 }
 
@@ -1107,6 +1089,84 @@ fn persist_store(path: &Path, store: &TrackingStore) -> Result<(), String> {
     fs::write(path, bytes).map_err(|e| format!("Could not save tracking data: {e}"))
 }
 
+fn update_browser_repair_guard(
+    app: &AppHandle,
+    runtime: Option<&BrowserRepairRuntime>,
+    guard: &mut BrowserGuard,
+    lease_dir: &Path,
+    required: bool,
+    guard_now: u64,
+    wall_now: u64,
+    foreground: Option<&CapturedWindow>,
+    last_error: &Arc<Mutex<Option<String>>>,
+) {
+    let mut known_windows = HashMap::new();
+    let mut samples = HashMap::new();
+    // Recheck already-pending handles even when a window is minimized or
+    // has lost foreground. Invalid/reused handles are omitted and the policy
+    // drops their stale deadlines. New deadlines start only when a browser
+    // window is observed in the foreground.
+    for (hwnd, expected_pid, expected_app) in guard.pending_identities() {
+        if let Some(identity) = browser_window_identity(hwnd) {
+            if identity.process_id == expected_pid
+                && identity.app_id.eq_ignore_ascii_case(&expected_app)
+            {
+                known_windows.insert(hwnd, (identity.process_id, identity.app_id.clone()));
+                samples.insert(hwnd, BrowserWindowSample {
+                    healthy: required
+                        && crate::browser_bridge::supported_browser(&identity.app_id)
+                        && crate::browser_bridge::read_window_health(
+                            lease_dir, hwnd, identity.process_id, &identity.app_id, wall_now,
+                        ),
+                    window_handle: hwnd,
+                    process_id: identity.process_id,
+                    app_id: identity.app_id,
+                    browser: identity.app_name,
+                });
+            }
+        }
+    }
+
+    if let Some(window) = foreground.filter(|window| crate::browser_guard::is_browser(&window.app_id)) {
+        known_windows.insert(window.window_handle, (window.process_id, window.app_id.clone()));
+        samples.insert(window.window_handle, BrowserWindowSample {
+            healthy: required
+                && crate::browser_bridge::supported_browser(&window.app_id)
+                && crate::browser_bridge::read_window_health(
+                    lease_dir,
+                    window.window_handle,
+                    window.process_id,
+                    &window.app_id,
+                    wall_now,
+                ),
+            window_handle: window.window_handle,
+            process_id: window.process_id,
+            app_id: window.app_id.clone(),
+            browser: window.app_name.clone(),
+        });
+    }
+    let samples: Vec<_> = samples.into_values().collect();
+    let (repair_state, due) = guard.update(required, &samples, &known_windows, guard_now);
+    if let Some(runtime) = runtime {
+        runtime.set(repair_state.clone());
+    }
+    crate::browser_warning::sync_window(app, repair_state.as_ref());
+
+    for window in due {
+        if let Err(error) = request_browser_window_close(
+            window.window_handle,
+            window.process_id,
+            &window.app_id,
+        ) {
+            // Keep the original deadline and retry on the next tracker pass.
+            guard.retry_close(window.window_handle);
+            if let Ok(mut last) = last_error.lock() {
+                *last = Some(error);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1159,7 +1219,6 @@ mod tests {
         CapturedWindow {
             window_handle: 0,
             process_id: 0,
-            browser_url: None,
             app_id: app_id.into(),
             app_name: "Chrome".into(),
             executable_path: None,
@@ -1168,24 +1227,20 @@ mod tests {
         }
     }
     #[test]
-    fn target_matching_includes_subdomains() {
+    fn website_targets_are_not_enforced_natively_but_explicit_app_targets_are() {
         let targets = BlockedTargets {
-            app_ids: vec![],
+            app_ids: vec!["chrome.exe".into()],
             domains: vec!["youtube.com".into()],
         };
         let matcher = BlockedMatcher::new(&targets, &HashMap::new());
-        let matched = matcher
-            .match_target(&captured_window("chrome.exe", Some("m.youtube.com")))
-            .expect("subdomain should match");
-        assert_eq!(matched.target, "youtube.com");
-        assert_eq!(matched.kind, "domain");
-        assert_eq!(matched.reason, DEFAULT_REASON);
-        assert!(matcher
-            .match_target(&captured_window("chrome.exe", Some("notyoutube.com")))
-            .is_none());
+        let matched = matcher.match_target(&captured_window("chrome.exe", Some("m.youtube.com")))
+            .expect("explicit browser app block should remain active");
+        assert_eq!(matched.target, "chrome.exe");
+        assert_eq!(matched.kind, "app");
+        assert!(matcher.match_target(&captured_window("msedge.exe", Some("m.youtube.com"))).is_none());
     }
     #[test]
-    fn reasons_are_looked_up_by_app_domain_and_suffix() {
+    fn reasons_are_looked_up_by_explicit_app_target_only() {
         let targets = BlockedTargets {
             app_ids: vec!["steam.exe".into()],
             domains: vec!["youtube.com".into()],
@@ -1200,10 +1255,7 @@ mod tests {
             .unwrap();
         assert_eq!(app.kind, "app");
         assert_eq!(app.reason, "limit");
-        let domain = matcher
-            .match_target(&captured_window("chrome.exe", Some("m.youtube.com")))
-            .unwrap();
-        assert_eq!(domain.reason, "frog");
+        assert!(matcher.match_target(&captured_window("chrome.exe", Some("m.youtube.com"))).is_none());
     }
     #[test]
     fn own_process_is_never_blocked() {

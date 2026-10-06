@@ -243,14 +243,11 @@ let chromiumContext = null;
 let secondaryContext = null;
 let localServer = null;
 let appMainPage = null;
-let blockerPage = null;
 let testPage = null;
 let testUrl = null;
 let qaPid = null;
 let debugPort = null;
 let qaIdentityVerified = false;
-let activeChromePage = null;
-let activeProfileDir = null;
 
 async function log(message, details = {}) {
   const entry = { at: new Date().toISOString(), message, ...details };
@@ -298,6 +295,10 @@ async function trackerStatus() {
   return tauriInvoke(appMainPage, 'get_tracker_status');
 }
 
+async function repairState() {
+  return tauriInvoke(appMainPage, 'get_browser_repair_state');
+}
+
 async function blockerState() {
   return tauriInvoke(appMainPage, 'get_blocker_state');
 }
@@ -310,12 +311,27 @@ async function foregroundPid(pid) {
     public static class FocusLockQaForeground {
       [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
       [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+      [DllImport("user32.dll")] public static extern void keybd_event(byte key, byte scan, uint flags, UIntPtr extra);
+      [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+      [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr processId);
+      [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+      [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint from, uint to, bool attach);
+      [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
     }
 '@
     $target = Get-Process -Id ${Number(pid)} -ErrorAction SilentlyContinue
     if ($null -eq $target -or $target.MainWindowHandle -eq 0) { exit 3 }
     [void][FocusLockQaForeground]::ShowWindowAsync($target.MainWindowHandle, 9)
-    if (-not [FocusLockQaForeground]::SetForegroundWindow($target.MainWindowHandle)) { exit 4 }
+    [FocusLockQaForeground]::keybd_event(18, 0, 0, [UIntPtr]::Zero)
+    [FocusLockQaForeground]::keybd_event(18, 0, 2, [UIntPtr]::Zero)
+    $foregroundThread = [FocusLockQaForeground]::GetWindowThreadProcessId([FocusLockQaForeground]::GetForegroundWindow(), [IntPtr]::Zero)
+    $currentThread = [FocusLockQaForeground]::GetCurrentThreadId()
+    $attached = [FocusLockQaForeground]::AttachThreadInput($currentThread, $foregroundThread, $true)
+    try {
+      [void][FocusLockQaForeground]::BringWindowToTop($target.MainWindowHandle)
+      [void][FocusLockQaForeground]::SetForegroundWindow($target.MainWindowHandle)
+      if ([FocusLockQaForeground]::GetForegroundWindow() -ne $target.MainWindowHandle) { exit 4 }
+    } finally { if ($attached) { [void][FocusLockQaForeground]::AttachThreadInput($currentThread, $foregroundThread, $false) } }
     exit 0
   `;
   const result = spawnSync('powershell.exe', [
@@ -365,8 +381,6 @@ async function foregroundChrome(profileDir) {
 }
 
 async function bringChromeToFront(page, profileDir) {
-  activeChromePage = page;
-  activeProfileDir = profileDir;
   await page.bringToFront();
   if (!await foregroundChrome(profileDir)) throw new Error('The disposable Chromium window could not take native foreground focus.');
 }
@@ -374,9 +388,61 @@ async function bringChromeToFront(page, profileDir) {
 async function waitForTracker(label, predicate, timeoutMs = 15_000) {
   return poll(label, async () => {
     const status = await trackerStatus();
-    if (!predicate(status) && activeChromePage && activeProfileDir) await bringChromeToFront(activeChromePage, activeProfileDir);
     return predicate(status) ? { done: true, value: status } : { done: false, status };
   }, { timeoutMs, log });
+}
+
+async function waitForRepairState(label, predicate, timeoutMs = 15_000) {
+  return poll(label, async () => {
+    const state = await repairState();
+    return predicate(state) ? { done: true, value: state } : { done: false, state };
+  }, { timeoutMs, intervalMs: 500, log });
+}
+
+async function findRepairPage(browser) {
+  const pages = await findAppPages(browser);
+  return pages.find(page => page.url().includes('#/browser-repair') || page.url().includes('/browser-repair')) || null;
+}
+
+async function waitForRepairPage(timeoutMs = 15_000) {
+  return poll('visible browser repair window', async () => {
+    const page = await findRepairPage(cdpBrowser);
+    if (!page) return { done: false, found: false };
+    let inspection;
+    try {
+      inspection = await page.evaluate(() => ({
+        visible: document.visibilityState === 'visible',
+        title: document.title,
+        width: window.innerWidth,
+        height: window.innerHeight,
+        text: String(document.body?.innerText || '').replace(/\s+/g, ' ').slice(0, 500),
+        buttonBottom: document.querySelector('button')?.getBoundingClientRect().bottom ?? 0,
+      }));
+    } catch (error) {
+      return { done: false, error: error.message };
+    }
+    return inspection.visible && inspection.width <= 720 && inspection.height <= 560 &&
+      /extension/i.test(inspection.text) && /(enable|install)/i.test(inspection.text) && /\d+\s*(s|sec|second)/i.test(inspection.text)
+      ? { done: true, value: { page, inspection } }
+      : { done: false, inspection };
+  }, { timeoutMs, intervalMs: 400, log });
+}
+
+function assertRepairState(state, label) {
+  if (!state || typeof state !== 'object') throw new Error(`${label}: browser repair state is missing.`);
+  for (const field of ['browser', 'appId', 'graceRemainingSeconds', 'reason']) {
+    if (!(field in state)) throw new Error(`${label}: repair state is missing ${field}.`);
+  }
+  if (!/chrome/i.test(String(state.browser)) || state.reason !== 'extension_missing') {
+    throw new Error(`${label}: unexpected repair target or reason: ${JSON.stringify(state)}`);
+  }
+  if (typeof state.appId !== 'string' || state.appId.length === 0) {
+    throw new Error(`${label}: repair state appId is empty or not a string.`);
+  }
+  if (!Number.isFinite(state.graceRemainingSeconds)) {
+    throw new Error(`${label}: repair countdown is not numeric: ${JSON.stringify(state)}`);
+  }
+  return state;
 }
 
 async function inspectChromeControls(page) {
@@ -484,27 +550,6 @@ async function startLocalTestServer() {
   return testUrl;
 }
 
-async function waitForBlocker(expectedReason, timeoutMs = 20_000) {
-  return poll(`native blocker reason ${expectedReason}`, async () => {
-    const state = await blockerState();
-    if (!state.visible && activeChromePage && activeProfileDir) await bringChromeToFront(activeChromePage, activeProfileDir);
-    return state.visible && state.reason === expectedReason
-      ? { done: true, value: state }
-      : { done: false, state };
-  }, { timeoutMs, intervalMs: 500, log });
-}
-
-async function screenshotBlocker(file) {
-  if (!blockerPage) return null;
-  try {
-    await blockerPage.screenshot({ path: file, timeout: 5000 });
-    return file;
-  } catch (error) {
-    await log('Blocker screenshot was unavailable', { error: error.message });
-    return null;
-  }
-}
-
 async function assertQaHostRegistered() {
   const entries = allRegistryEntries();
   const registered = entries.filter(entry => entry.defaultValue);
@@ -603,11 +648,6 @@ try {
     const page = pages.find(candidate => !candidate.url().includes('#/blocked') && !candidate.url().includes('/blocked'));
     return page ? { done: true, value: page } : null;
   }, { timeoutMs: 15_000, intervalMs: 400, log });
-  blockerPage = await poll('Tauri blocker WebView2 page', async () => {
-    const pages = await findAppPages(cdpBrowser);
-    const page = pages.find(candidate => candidate.url().includes('#/blocked') || candidate.url().includes('/blocked'));
-    return page ? { done: true, value: page } : null;
-  }, { timeoutMs: 15_000, intervalMs: 400, log });
   report.checks.webview2 = { connected: true, debugPort, qaPid };
   const registeredEntries = await assertQaHostRegistered();
   report.checks.nativeHost.registryViewCount = registeredEntries.length;
@@ -673,42 +713,72 @@ try {
   report.checks.healthyNativeHeartbeat = healthyStatus.browserProtection;
   if (!healthyStatus.browserProtection.healthy) throw new Error('The extension did not establish a healthy native heartbeat.');
 
-  await phase('verify extension settings blocker while protection is healthy');
+  await phase('verify policy never blocks protected-domain pages or extension settings');
+  await tauriInvoke(appMainPage, 'set_blocked_targets', {
+    targets: { appIds: [], domains: ['localhost', '127.0.0.1'] },
+    reasons: { domains: 'qa-domain-policy' },
+  });
+  await testPage.goto(testUrl);
+  await bringChromeToFront(testPage, profileDir);
+  await waitForTracker('extension owns configured local-domain blocking', value => value.current?.windowTitle?.includes('FocusLock Browser Protection QA'), 15_000);
+  let domainBlocker = await blockerState();
+  let domainStatus = await trackerStatus();
+  if (domainBlocker.visible || domainStatus.current?.blocked === true) {
+    throw new Error(`The desktop blocked a domain page that belongs to the extension: ${JSON.stringify({ domainBlocker, current: domainStatus.current })}`);
+  }
+  report.checks.extensionOwnsDomainBlocking = { domains: ['localhost', '127.0.0.1'], blocker: domainBlocker, current: domainStatus.current };
+  await tauriInvoke(appMainPage, 'set_blocked_targets', { targets: { appIds: [], domains: [] }, reasons: {} });
+
   await testPage.goto(`chrome://extensions/?id=${EXTENSION_ID}`);
   await bringChromeToFront(testPage, profileDir);
-  await waitForBlocker('extension_settings', 20_000);
   const healthySettingsBlocker = await blockerState();
-  report.checks.healthySettingsBlocker = healthySettingsBlocker;
-  const settingsScreenshot = await screenshotBlocker(path.join(outputDir, `blocker-extension-settings-${RUN_ID}.png`));
-  if (settingsScreenshot) report.checks.healthySettingsBlockerScreenshot = settingsScreenshot;
+  if (healthySettingsBlocker.visible) throw new Error(`Extension settings were blocked while the extension was healthy: ${JSON.stringify(healthySettingsBlocker)}`);
+  report.checks.healthySettingsAccessible = { blocker: healthySettingsBlocker, url: testPage.url() };
 
-  await phase('dismiss settings blocker and confirm normal browsing');
-  await tauriInvoke(appMainPage, 'blocker_action', { action: 'dismiss' });
-  await testPage.goto(testUrl);
-  await bringChromeToFront(testPage, profileDir);
-  healthyStatus = await waitForTracker('healthy status after returning to the QA site', value =>
-    value.browserProtection?.healthy === true, 15_000);
-  const returnedBlocker = await blockerState();
-  if (returnedBlocker.visible) throw new Error(`Blocker remained visible after returning to the site: ${JSON.stringify(returnedBlocker)}`);
-  report.checks.normalBrowsingAfterSettings = { browserProtection: healthyStatus.browserProtection, blocker: returnedBlocker };
-
-  await phase('disable extension through inspected settings UI while policy is off');
-  await tauriInvoke(appMainPage, 'set_browser_protection_policy', { required: false, lockedUntilMs: 0 });
-  await testPage.goto(`chrome://extensions/?id=${EXTENSION_ID}`);
-  const disabledState = await setExtensionToggle(testPage, false, { source: 'enable', test: /enable/i });
-  report.checks.extensionDisabledInUi = disabledState;
-
-  await phase('verify extension-missing blocker and stable grace across profile and focus switches');
+  await phase('disable extension under active policy and verify 60-second repair warning is non-modal');
   await tauriInvoke(appMainPage, 'set_browser_protection_policy', { required: true, lockedUntilMs: 0 });
-  const missingPolicyStartedAt = Date.now();
+  const primaryDisabled = await setExtensionToggle(testPage, false, { source: 'enable', test: /enable/i });
+  report.checks.extensionDisabledInUi = primaryDisabled;
   await testPage.goto(testUrl);
   await bringChromeToFront(testPage, profileDir);
-  const missingStart = await waitForTracker('first missing-extension browser observation', value =>
-    value.browserProtectionRequired && value.browserProtection?.healthy === false && /chrome/i.test(value.browserProtection?.browser || ''), 15_000);
-  const initialGrace = missingStart.browserProtection.graceRemainingSeconds;
-  if (initialGrace <= 0) throw new Error('Initial setup grace expired before the profile-switch acceptance test.');
-  report.checks.missingExtensionStarted = { at: new Date().toISOString(), graceRemainingSeconds: initialGrace };
+  const firstRepair = assertRepairState(await waitForRepairState('missing extension warning for primary profile', state => state !== null, 20_000), 'primary profile');
+  if (firstRepair.graceRemainingSeconds > 60 || firstRepair.graceRemainingSeconds < 35) {
+    throw new Error(`The extension recovery timer did not begin near 60 seconds: ${JSON.stringify(firstRepair)}`);
+  }
+  const repairWindow = await waitForRepairPage();
+  if (repairWindow.inspection.buttonBottom > repairWindow.inspection.height) {
+    throw new Error('The repair button is outside the compact warning window.');
+  }
+  const warningScreenshot = path.join(outputDir, `browser-repair-countdown-${RUN_ID}.png`);
+  await repairWindow.page.screenshot({ path: warningScreenshot, timeout: 5000 });
+  const blockerDuringRepair = await blockerState();
+  if (blockerDuringRepair.visible) throw new Error(`A native blocker appeared during extension repair: ${JSON.stringify(blockerDuringRepair)}`);
+  const browserRetainedFocus = await testPage.evaluate(() => document.hasFocus());
+  if (!browserRetainedFocus) throw new Error('The repair warning took focus away from the browser.');
+  report.checks.nonModalRepairWarning = {
+    state: firstRepair,
+    page: repairWindow.inspection,
+    screenshot: warningScreenshot,
+    browserRetainedFocus,
+    blocker: blockerDuringRepair,
+  };
 
+  await phase('confirm extension settings stay accessible and re-enable cancels repair');
+  const repairSettings = await setExtensionToggle(testPage, true, { source: 'enable', test: /enable/i });
+  report.checks.settingsAccessibleDuringRepair = { url: testPage.url(), reenabled: repairSettings };
+  await testPage.goto(testUrl);
+  await bringChromeToFront(testPage, profileDir);
+  await waitForTracker('healthy lease after re-enabling primary profile', value => value.browserProtection?.healthy === true, 30_000);
+  const repairCleared = await poll('repair warning clears after extension recovery', async () => {
+    const state = await repairState();
+    return state === null ? { done: true, value: state } : { done: false, state };
+  }, { timeoutMs: 15_000, log });
+  const recoveredBlocker = await blockerState();
+  if (recoveredBlocker.visible) throw new Error(`A native blocker appeared after extension recovery: ${JSON.stringify(recoveredBlocker)}`);
+  if (testPage.isClosed()) throw new Error('The browser closed after the extension was re-enabled before the deadline.');
+  report.checks.reenabledBeforeDeadline = { repairState: repairCleared, blocker: recoveredBlocker, browserStillOpen: true };
+
+  await phase('verify an unextended second profile has an independent, non-renewing deadline');
   const secondProfileDir = path.join(outputDir, `qa-profile-secondary-${RUN_ID}`);
   await fs.mkdir(secondProfileDir, { recursive: true });
   secondaryContext = await chromium.launchPersistentContext(secondProfileDir, {
@@ -721,60 +791,70 @@ try {
   await secondaryPage.goto(testUrl);
   await secondaryPage.evaluate(() => { document.title += ' Secondary profile'; });
   await bringChromeToFront(secondaryPage, secondProfileDir);
-  const secondProfileStatus = await waitForTracker('missing extension in the second disposable profile', value =>
-    value.browserProtection?.healthy === false && value.current?.windowTitle?.includes('Secondary profile'), 15_000);
-  const graceBeforeFocusSwitch = secondProfileStatus.browserProtection.graceRemainingSeconds;
-  if (graceBeforeFocusSwitch > initialGrace) throw new Error('Switching browser profiles restarted setup grace.');
+  const secondRepair = assertRepairState(await waitForRepairState('repair warning for unextended secondary profile', state => state !== null, 20_000), 'secondary profile');
+  if (secondRepair.graceRemainingSeconds > 60 || secondRepair.graceRemainingSeconds <= 0) {
+    throw new Error(`The secondary profile did not receive a fresh 60-second lease: ${JSON.stringify(secondRepair)}`);
+  }
+  const secondRepairObservedAt = Date.now();
+  const repairIdentity = secondRepair.appId;
+
+  // A fresh heartbeat from the healthy profile must not clear or renew the
+  // separate unextended profile's countdown.
+  const healthyProbe = await chromiumContext.newPage();
+  await healthyProbe.goto(`chrome-extension://${EXTENSION_ID}/popup/popup.html`);
+  const healthyHeartbeat = await healthyProbe.evaluate(async () => chrome.runtime.sendNativeMessage('com.focuslock.browser', {
+    type: 'heartbeat', version: 1, allUrls: true, incognitoAllowed: true, windows: [],
+  }));
+  await healthyProbe.close();
+  if (healthyHeartbeat?.ok !== true) throw new Error(`The healthy profile heartbeat failed during the independent repair timer: ${JSON.stringify(healthyHeartbeat)}`);
+  const afterHealthyHeartbeat = assertRepairState(await repairState(), 'secondary profile after healthy profile heartbeat');
+  if (afterHealthyHeartbeat.appId !== repairIdentity || afterHealthyHeartbeat.graceRemainingSeconds > secondRepair.graceRemainingSeconds) {
+    throw new Error(`The healthy profile renewed or replaced the other profile's repair timer: ${JSON.stringify({ secondRepair, afterHealthyHeartbeat })}`);
+  }
 
   await appMainPage.bringToFront();
-  await foregroundPid(qaPid);
-  await new Promise(resolve => setTimeout(resolve, 6000));
-  await bringChromeToFront(secondaryPage, secondProfileDir);
-  const graceAfterFocusSwitch = await poll('browser grace after returning from the QA app', async () => {
-    const current = await trackerStatus();
-    const browser = current.browserProtection;
-    if (browser?.healthy === false && /chrome/i.test(browser.browser || '')) return { done: true, value: browser };
-    return { done: false, current };
-  }, { timeoutMs: 15_000, intervalMs: 500, log });
-  if (graceAfterFocusSwitch.graceRemainingSeconds > graceBeforeFocusSwitch) {
-    throw new Error(`Browser focus/profile switching restarted setup grace (${graceBeforeFocusSwitch}s -> ${graceAfterFocusSwitch.graceRemainingSeconds}s).`);
+  if (!await foregroundPid(qaPid)) throw new Error('Could not bring the QA app foreground before the browser repair deadline.');
+  await new Promise(resolve => setTimeout(resolve, 7000));
+  const afterFocusSwitch = assertRepairState(await repairState(), 'secondary profile after focus switch');
+  if (afterFocusSwitch.appId !== repairIdentity || afterFocusSwitch.graceRemainingSeconds >= afterHealthyHeartbeat.graceRemainingSeconds) {
+    throw new Error(`Switching to the QA app renewed the secondary profile timer: ${JSON.stringify({ afterHealthyHeartbeat, afterFocusSwitch })}`);
   }
-  report.checks.graceAcrossProfileAndFocus = {
-    initialGraceSeconds: initialGrace,
-    secondProfileGraceSeconds: graceBeforeFocusSwitch,
-    afterFocusSwitchGraceSeconds: graceAfterFocusSwitch.graceRemainingSeconds,
-    verifiedNonIncreasing: true,
+  if (secondaryPage.isClosed() || testPage.isClosed()) {
+    throw new Error('A browser profile closed before the secondary profile repair deadline expired.');
+  }
+  report.checks.independentProfileCountdown = {
+    initial: secondRepair,
+    afterHealthyProfileHeartbeat: afterHealthyHeartbeat,
+    afterQaForeground: afterFocusSwitch,
+    sameAffectedAppId: true,
+    countdownDidNotRenew: true,
   };
 
-  const remainingAcceptanceMs = Math.max(1, 75_000 - (Date.now() - missingPolicyStartedAt));
-  const missingBlocker = await waitForBlocker('extension_missing', remainingAcceptanceMs);
-  report.checks.missingExtensionBlocker = missingBlocker;
-  const missingScreenshot = await screenshotBlocker(path.join(outputDir, `blocker-extension-missing-${RUN_ID}.png`));
-  if (missingScreenshot) report.checks.missingExtensionBlockerScreenshot = missingScreenshot;
-
-  await phase('recover from the allowed extension settings page');
-  await secondaryContext.close();
-  secondaryContext = null;
-  await testPage.goto(`chrome://extensions/?id=${EXTENSION_ID}`);
-  await bringChromeToFront(testPage, profileDir);
-  report.checks.recoverySettingsAccessible = await poll('extension settings available while the extension is missing', async () => {
-    const state = await blockerState();
-    const current = await trackerStatus();
-    if (!state.visible && current.current?.windowTitle?.startsWith('Extensions') && current.browserProtection?.healthy === false) {
-      return { done: true, value: { blocker: state, browserProtection: current.browserProtection } };
-    }
-    await bringChromeToFront(testPage, profileDir);
-    return { done: false, state };
-  }, { timeoutMs: 15000, log });
-  const recoveryState = await setExtensionToggle(testPage, true, { source: 'enable', test: /enable/i });
-  report.checks.extensionReenabledFromRecoveryPage = recoveryState;
-  await testPage.goto(testUrl);
-  await bringChromeToFront(testPage, profileDir);
-  const recoveredStatus = await waitForTracker('healthy browser lease after extension re-enable', value =>
-    value.browserProtection?.healthy === true && /chrome/i.test(value.browserProtection?.browser || ''), 30_000);
-  const recoveredBlocker = await blockerState();
-  if (recoveredBlocker.visible) throw new Error(`Blocker did not clear after extension recovery: ${JSON.stringify(recoveredBlocker)}`);
-  report.checks.recoveredBrowsing = { browserProtection: recoveredStatus.browserProtection, blocker: recoveredBlocker };
+  await phase('close only the unextended browser after its deadline without requiring browser foreground');
+  await poll('secondary browser window closes at repair deadline', async () => {
+    const closed = secondaryPage.isClosed() || !secondaryContext.pages().includes(secondaryPage);
+    return closed ? { done: true, value: { closed, elapsedMs: Date.now() - secondRepairObservedAt } } : { done: false, closed };
+  }, { timeoutMs: 75_000, intervalMs: 500, progressMs: 10_000, log });
+  const closureElapsedMs = Date.now() - secondRepairObservedAt;
+  const expectedRemainingMs = secondRepair.graceRemainingSeconds * 1000;
+  if (closureElapsedMs < expectedRemainingMs - 2000 || closureElapsedMs > expectedRemainingMs + 15_000) {
+    throw new Error(`The browser did not close near the observed countdown deadline (${closureElapsedMs}ms elapsed, ${expectedRemainingMs}ms remaining when observed).`);
+  }
+  if (!childIsRunning(qaChild)) throw new Error('FocusLock exited while closing the affected browser window.');
+  if (testPage.isClosed()) throw new Error('The healthy extension profile was closed with the unextended profile.');
+  const stateAfterClosure = await poll('repair notice clears on the next tracker sample after closure', async () => {
+    const state = await repairState();
+    return state === null ? { done: true, value: state } : { done: false, state };
+  }, { timeoutMs: 10_000, intervalMs: 300, log });
+  const blockerAfterClosure = await blockerState();
+  if (blockerAfterClosure.visible) throw new Error(`A native website blocker appeared after browser recovery enforcement: ${JSON.stringify(blockerAfterClosure)}`);
+  report.checks.browserClosedAtDeadline = {
+    elapsedMs: closureElapsedMs,
+    qaAppStillRunning: childIsRunning(qaChild),
+    healthyProfileStillOpen: !testPage.isClosed(),
+    repairState: stateAfterClosure,
+    blocker: blockerAfterClosure,
+  };
 
   await phase('restore neutral QA policy');
   await tauriInvoke(appMainPage, 'set_browser_protection_policy', { required: false, lockedUntilMs: 0 });
