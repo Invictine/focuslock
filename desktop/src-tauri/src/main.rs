@@ -3,6 +3,8 @@
 
 mod auth;
 mod blocker;
+mod browser_bridge;
+mod browser_guard;
 mod tracking;
 mod windows_capture;
 
@@ -10,11 +12,15 @@ use tauri::Manager;
 use tracking::TrackerRuntime;
 
 fn main() {
+    if browser_bridge::maybe_run_host() { return; }
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
+            if let Err(error) = browser_bridge::register_host(&data_dir) {
+                eprintln!("Could not register browser extension connection: {error}");
+            }
             let runtime = TrackerRuntime::load(data_dir.join("activity-v1.json"))
                 .map_err(Box::<dyn std::error::Error>::from)?;
             // The blocker window exists for the whole app lifetime, hidden.
@@ -30,6 +36,12 @@ fn main() {
         })
         .on_window_event(|window, event| match event {
             tauri::WindowEvent::CloseRequested { api, .. } => {
+                if window.label() == "main" && window.app_handle().try_state::<TrackerRuntime>()
+                    .is_some_and(|state| state.browser_protection_active()) {
+                    api.prevent_close();
+                    let _ = window.minimize();
+                    return;
+                }
                 if window.label() == blocker::BLOCKER_LABEL {
                     // The blocker is hidden, never destroyed, so the tracker can
                     // show it again on the next block. A permanent overlay must
@@ -71,6 +83,8 @@ fn main() {
             tracking::get_tracker_status,
             tracking::get_running_apps,
             tracking::set_tracker_config,
+            tracking::set_browser_protection_policy,
+            tracking::open_browser_extension_settings,
             tracking::set_blocked_targets,
             tracking::get_permanent_targets,
             tracking::add_permanent_targets,

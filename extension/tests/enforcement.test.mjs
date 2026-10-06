@@ -46,7 +46,10 @@ context.self.FocusLockStore = {
   async load() { return structuredClone(state); }, async save() {}, todayKey() { return '2026-09-27'; },
   defaultState() { return structuredClone(state); },
 };
-context.importScripts = () => {};
+const desktopBridge = await fs.readFile(new URL('../src/desktop-bridge.js', import.meta.url), 'utf8');
+context.importScripts = (...paths) => {
+  if (paths.includes('../src/desktop-bridge.js')) vm.runInContext(desktopBridge, context);
+};
 const sw = await fs.readFile(new URL('../background/service-worker.js', import.meta.url), 'utf8');
 vm.runInContext(sw, context);
 const engine = context.self.FocusLockEngine;

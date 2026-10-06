@@ -1,5 +1,6 @@
 /* FocusLock service worker — tracking + blocking engine (Cold Turkey core). */
-importScripts('../src/matcher.js', '../src/features.js', '../src/store.js', '../src/policy.js', '../dist/cloud-sync.js');
+importScripts('../src/matcher.js', '../src/features.js', '../src/store.js', '../src/policy.js', '../dist/cloud-sync.js', '../src/desktop-bridge.js');
+self.FocusLockDesktopBridge.start(chrome);
 
 const M = self.FocusLockMatcher;
 const Store = self.FocusLockStore;

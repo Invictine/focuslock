@@ -26,6 +26,7 @@ import { accountUsage, acknowledgeSync, enqueueSync, peekSync, unacknowledgedUsa
 import { accountClient, flushMutations, useDurableMutation, useMutationReplay } from "./durableSync";
 import { claimPermanentTargets, discoverPermanentTargets, permanentTargetsOwnedByAccount } from "./permanentSync";
 import { useFocusAuth } from "./auth";
+import { browserProtectionPolicy } from "./browserProtection";
 import FrogCard from "./FrogCard";
 import ApprovalUnlockPanel from "./ApprovalUnlockPanel";
 import { useStrictActive } from "./useStrictActive";
@@ -110,6 +111,8 @@ type NativeStatus = {
   enforcementActive: boolean;
   current?: NativeCurrent;
   lastError?: string | null;
+  browserProtectionRequired?: boolean;
+  browserProtection?: { browser: string; healthy: boolean; graceRemainingSeconds: number; reason?: string | null } | null;
 };
 
 function Icon({
@@ -1635,6 +1638,7 @@ function DesktopApp() {
     reasons: Record<string, string>;
   } | null>(null);
   const blockedInvokedJsonRef = useRef("");
+  const browserPolicyJsonRef = useRef("");
   const blockedTimerRef = useRef<number | null>(null);
   const flushBlockedTargets = useCallback(() => {
     blockedTimerRef.current = null;
@@ -1692,6 +1696,16 @@ function DesktopApp() {
     },
     [],
   );
+  useEffect(() => {
+    if (!tauriAvailable() || !dashboard) return;
+    const policy = browserProtectionPolicy(dashboard, groups || [], Boolean(frogLock?.locked));
+    const json = JSON.stringify(policy);
+    if (json === browserPolicyJsonRef.current) return;
+    browserPolicyJsonRef.current = json;
+    invoke("set_browser_protection_policy", policy).catch(() => {
+      if (browserPolicyJsonRef.current === json) browserPolicyJsonRef.current = "";
+    });
+  }, [dashboard, groups, frogLock]);
   // Main-window navigation from Rust: `focuslock://navigate` { view: "home" }
   // switches back to the Focus (Home) tab — used by the blocker's "Eat the frog
   // now" action.
@@ -5010,6 +5024,20 @@ function SettingsPage({
         >
           <span className="setting-value">
             {snapshot?.config?.captureBrowserDomains !== false ? "On" : "Off"}
+          </span>
+        </SettingRow>
+        <SettingRow
+          icon="shield"
+          title="Browser extension protection"
+          detail="Automatic with website boundaries, website limits, or Frog. Allow the extension on all websites and in incognito. A missing connection blocks browsing after the setup grace; extension settings stay available for repair. Closing this window minimizes FocusLock while protection is active."
+        >
+          <span className="setting-value" role="status">
+            {!status?.browserProtectionRequired ? "Waiting for website rules" :
+              !status.browserProtection ? "Waiting for browser" :
+              status.browserProtection.healthy ? `${status.browserProtection.browser} · Connected` :
+              status.browserProtection.reason === "browser_unsupported" ? "Use a supported browser" :
+              status.browserProtection.graceRemainingSeconds > 0 ? `Enable extension · ${status.browserProtection.graceRemainingSeconds}s` :
+              "Restore extension to browse"}
           </span>
         </SettingRow>
         <SettingRow

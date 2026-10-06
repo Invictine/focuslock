@@ -131,6 +131,7 @@ function AllowlistChips({ frog }: { frog: FrogTask }) {
 export default function BlockerPage() {
   const native = tauriAvailable();
   const [blocker, setBlocker] = useState<BlockerPayload | null>(null);
+  const [repairError, setRepairError] = useState<string | null>(null);
   const { state: frog } = useFrogState();
   const dismissSentRef = useRef(false);
 
@@ -200,6 +201,32 @@ export default function BlockerPage() {
             This page is the FocusLock blocker window. Open the installed desktop app to manage
             your boundaries.
           </p>
+        </section>
+      </main>
+    );
+  }
+
+  if (["extension_missing", "extension_settings", "browser_unsupported"].includes(reason)) {
+    const missing = reason === "extension_missing";
+    const unsupported = reason === "browser_unsupported";
+    return (
+      <main className="blocker-page" role="dialog" aria-modal="true" aria-labelledby="blocker-title">
+        <section className="blocker-card">
+          <p className="blocker-pill boundary">Browser protection</p>
+          <h1 id="blocker-title">{missing ? "Restore your extension" : unsupported ? "Use a supported browser" : "Extension settings are locked"}</h1>
+          <p className="blocker-copy">
+            {missing ? "FocusLock cannot verify the extension in this browser window. Enable it in this profile, allow access to all websites and incognito, then return to your tab. Browsing resumes when the connection returns."
+              : unsupported ? "Use Chrome, Edge, Brave, Vivaldi, Opera, or Arc with the FocusLock extension while your website rules are active. Firefox support is not available yet."
+              : "Your website rules require the FocusLock extension. Return to your browsing tab to continue; disabling or removing the extension will block browsing."}
+          </p>
+          {repairError && <p className="blocker-copy" role="alert">{repairError}</p>}
+          <div className="blocker-actions">
+            {missing && <button type="button" className="blocker-primary" onClick={() => {
+              setRepairError(null);
+              invoke("open_browser_extension_settings").catch(error => setRepairError(String(error)));
+            }}>Open extension settings</button>}
+            <button type="button" className="blocker-secondary" onClick={() => blockerAction("dismiss")}>Back to work</button>
+          </div>
         </section>
       </main>
     );

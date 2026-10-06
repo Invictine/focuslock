@@ -3,6 +3,10 @@ use url::Url;
 
 #[derive(Clone, Debug)]
 pub struct CapturedWindow {
+    pub window_handle: isize,
+    pub process_id: u32,
+    /// Committed address-bar value; never a focused omnibox edit.
+    pub browser_url: Option<String>,
     pub app_id: String,
     pub app_name: String,
     pub executable_path: Option<String>,
@@ -47,11 +51,11 @@ pub fn normalized_domain(value: &str) -> Option<String> {
 /// before navigation is committed. Do not turn that transient edit into a
 /// tracked domain; once the address bar loses keyboard focus, the committed
 /// page URL is still captured and normal website enforcement remains intact.
-fn browser_domain_value(value: &str, has_keyboard_focus: bool) -> Option<String> {
+fn committed_browser_url(value: &str, has_keyboard_focus: bool) -> Option<String> {
     if has_keyboard_focus {
         return None;
     }
-    normalized_domain(value)
+    (!value.trim().is_empty()).then(|| value.to_string())
 }
 
 pub fn is_supported_browser(app_id: &str) -> bool {
@@ -134,12 +138,20 @@ mod platform {
                 .and_then(|v| v.to_str())
                 .unwrap_or("unknown")
                 .to_ascii_lowercase();
-            let browser_domain = if capture_browser_domains && is_supported_browser(&app_id) {
-                browser_domain(hwnd).ok().flatten()
+            let browser_url = if is_supported_browser(&app_id) {
+                browser_url(hwnd).ok().flatten()
             } else {
                 None
             };
+            let browser_domain = if capture_browser_domains {
+                browser_url.as_deref().and_then(normalized_domain)
+            } else { None };
+            let mut process_id = 0;
+            GetWindowThreadProcessId(hwnd, Some(&mut process_id));
             Ok(Some(CapturedWindow {
+                window_handle: hwnd.0 as isize,
+                process_id,
+                browser_url,
                 app_name: friendly_app_name(&app_id),
                 app_id,
                 executable_path: path,
@@ -327,7 +339,7 @@ mod platform {
         }
     }
 
-    unsafe fn browser_domain(hwnd: HWND) -> windows::core::Result<Option<String>> {
+    unsafe fn browser_url(hwnd: HWND) -> windows::core::Result<Option<String>> {
         unsafe {
             let automation = cached_automation()?;
             let root: IUIAutomationElement = automation.ElementFromHandle(hwnd)?;
@@ -379,8 +391,8 @@ mod platform {
                     .CurrentValue()
                     .map(|v| v.to_string())
                     .unwrap_or_default();
-                if let Some(domain) = browser_domain_value(&value, has_keyboard_focus) {
-                    return Ok(Some(domain));
+                if let Some(url) = committed_browser_url(&value, has_keyboard_focus) {
+                    return Ok(Some(url));
                 }
             }
             Ok(None)
@@ -440,8 +452,10 @@ mod tests {
     }
     #[test]
     fn ignores_focused_address_bar_candidates_but_tracks_committed_values() {
-        assert_eq!(browser_domain_value("x.com", true), None);
-        assert_eq!(browser_domain_value("x.com", false), Some("x.com".into()));
+        assert_eq!(committed_browser_url("x.com", true), None);
+        assert_eq!(committed_browser_url("x.com", false).as_deref().and_then(normalized_domain), Some("x.com".into()));
+        assert_eq!(committed_browser_url("chrome://extensions/", true), None);
+        assert_eq!(committed_browser_url("chrome://extensions/", false), Some("chrome://extensions/".into()));
     }
     #[test]
     fn recognizes_browsers() {

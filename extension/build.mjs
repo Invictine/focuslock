@@ -96,7 +96,7 @@ for (const entry of ['manifest.json', 'background', 'content', 'blocked', 'popup
   await cp(path.join(root, entry), path.join(unpacked, entry), { recursive: true });
 }
 await mkdir(path.join(unpacked, 'src'), { recursive: true });
-for (const entry of ['matcher.js', 'features.js', 'store.js', 'policy.js']) {
+for (const entry of ['matcher.js', 'features.js', 'store.js', 'policy.js', 'desktop-bridge.js']) {
   await cp(path.join(root, 'src', entry), path.join(unpacked, 'src', entry));
 }
 console.log('Built scripts in extension/dist and loadable extension in build/extension-unpacked.');

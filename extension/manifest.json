@@ -45,7 +45,8 @@
     "alarms",
     "idle",
     "webNavigation",
-    "notifications"
+    "notifications",
+    "nativeMessaging"
   ],
   "host_permissions": ["http://*/*", "https://*/*"],
   "content_security_policy": {

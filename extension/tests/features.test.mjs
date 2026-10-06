@@ -6,7 +6,7 @@ let now = new Date(2026, 9, 3, 12).getTime();
 const storage = {}, sessionStorage = {}, uploads = new Map();
 let accountId = 'A', networkFailure = false, saves = 0;
 const sources = {};
-for (const file of ['src/matcher.js', 'src/features.js', 'src/store.js', 'src/policy.js', 'background/service-worker.js']) sources[file] = await readFile(new URL('../' + file, import.meta.url), 'utf8');
+for (const file of ['src/matcher.js', 'src/features.js', 'src/store.js', 'src/policy.js', 'src/desktop-bridge.js', 'background/service-worker.js']) sources[file] = await readFile(new URL('../' + file, import.meta.url), 'utf8');
 async function worker() {
   const handlers = {};
   const event = key => ({ addListener: listener => { handlers[key] = listener; } });
@@ -21,7 +21,10 @@ async function worker() {
       session: { get: async key => ({ [key]: structuredClone(sessionStorage[key]) }), set: async values => Object.assign(sessionStorage, structuredClone(values)) } },
     action: { setBadgeText: async () => {}, setBadgeBackgroundColor: async () => {} }, notifications: { create() {} },
   };
-  const context = { chrome, self: {}, URL, console, Date: Clock, structuredClone, importScripts() {} };
+  const context = { chrome, self: {}, URL, console, Date: Clock, structuredClone,
+    importScripts(...paths) {
+      if (paths.includes('../src/desktop-bridge.js')) vm.runInContext(sources['src/desktop-bridge.js'], context);
+    } };
   vm.createContext(context);
   for (const file of ['src/matcher.js', 'src/features.js', 'src/store.js', 'src/policy.js']) vm.runInContext(sources[file], context);
   context.self.FocusLockCloud = {

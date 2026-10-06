@@ -126,7 +126,9 @@ try {
   });
   await permanentWebsite.waitForURL(`chrome-extension://${id}/blocked/blocked.html**`, { timeout: 10000, waitUntil: 'commit' });
   assert.equal(new URL(permanentWebsite.url()).searchParams.get('mode'), 'permanent');
-  assert.match(await permanentWebsite.locator('h1').textContent(), /Permanent block/i);
+  // The navigation commit precedes the block-page script painting its mode pill.
+  await permanentWebsite.waitForFunction(() => /Permanent block/i.test(document.querySelector('#listPill')?.textContent || ''));
+  assert.match(await permanentWebsite.locator('#listPill').textContent(), /Permanent block/i);
   checks.push('A restored permanent website is saved by the packaged worker and blocked on navigation to its domain');
   await permanentWebsite.close();
   await page.evaluate(async () => {
