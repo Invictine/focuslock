@@ -22,7 +22,8 @@ const checks = [];
 try {
   context = await chromium.launchPersistentContext('', {
     channel: 'chromium', headless: true,
-    args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`],
+    args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`,
+      '--host-resolver-rules=MAP restored.test 127.0.0.1'],
   });
   const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker');
   const id = new URL(worker.url()).hostname;
@@ -104,6 +105,30 @@ try {
   assert.ok(spent >= 4 && spent < 10, `Expected a short persisted leisure slice, received ${spent}`);
   checks.push('The content guard spends earned time and redirects an already-open page when it is exhausted');
   await leisure.close();
+  await worker.evaluate(async () => {
+    const state = await ensureState();
+    state.cloudAccountId = 'browser-smoke-account';
+    state.lists = [];
+    state.cloudSites = [];
+    state.permanentSites = [];
+    state.cloudPolicy = { state: { creditBalanceSeconds: 60, lastResetDate: FocusLockStore.todayKey() },
+      groups: [], limits: [], schedules: [] };
+    await FocusLockStore.save(state);
+    await syncCloud('live', { ok: true, signedIn: true, userId: 'browser-smoke-account',
+      isCurrent: async () => true,
+      permanentBlocks: [{ targetKind: 'website', targetKey: 'restored.test', targetLabel: 'Restored test site' }],
+    });
+  });
+  assert.equal(await page.evaluate(async () => (await FocusLockStore.load()).permanentSites.includes('restored.test')), true);
+  const permanentWebsite = await context.newPage();
+  await permanentWebsite.goto(site.replace('127.0.0.1', 'restored.test')).catch(error => {
+    if (!/ERR_ABORTED|interrupted/.test(error.message)) throw error;
+  });
+  await permanentWebsite.waitForURL(`chrome-extension://${id}/blocked/blocked.html**`, { timeout: 10000, waitUntil: 'commit' });
+  assert.equal(new URL(permanentWebsite.url()).searchParams.get('mode'), 'permanent');
+  assert.match(await permanentWebsite.locator('h1').textContent(), /Permanent block/i);
+  checks.push('A restored permanent website is saved by the packaged worker and blocked on navigation to its domain');
+  await permanentWebsite.close();
   await page.evaluate(async () => {
     const state = await FocusLockStore.load();
     state.stats = {};
