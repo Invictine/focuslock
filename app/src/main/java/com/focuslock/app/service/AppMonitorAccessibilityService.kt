@@ -1,6 +1,7 @@
 package com.focuslock.app.service
 
 import android.accessibilityservice.AccessibilityService
+import android.app.ActivityOptions
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -12,6 +13,9 @@ import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.view.accessibility.AccessibilityWindowInfo
+import android.graphics.Rect
+import android.hardware.display.DisplayManager
 import android.os.SystemClock
 import com.focuslock.app.reminder.RemovalReminderController
 import com.focuslock.app.reminder.RemovalReminderStore
@@ -70,6 +74,13 @@ class AppMonitorAccessibilityService : AccessibilityService() {
 
     @Volatile
     private var foregroundWindowClass: String? = null
+
+    private var foregroundWindowId: Int? = null
+    private val windowClasses = mutableMapOf<Int, Pair<String, String?>>()
+    private val popupShield by lazy { PopupBlockShield(this) }
+    private var windowTickerJob: Job? = null
+    private var windowReconcileJob: Job? = null
+    private val popupDomains = mutableMapOf<Int, Pair<String, String>>()
 
     @Volatile
     private var lastPlayStoreWindowClass: String? = null
@@ -326,6 +337,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         out.println("  lastEvent package=${lastAccessibilityEventPackage ?: "unknown"} type=${eventTypeName(lastAccessibilityEventType)}($lastAccessibilityEventType) timeMs=${lastAccessibilityEventTimeMs.takeIf { it > 0L } ?: "unknown"}")
         out.println("  foregroundPackage=${currentForegroundPackage ?: "unknown"}")
         out.println("  foregroundWindowClass=${foregroundWindowClass ?: "unknown"}")
+        out.println("  foregroundWindowId=${foregroundWindowId ?: "unknown"} popupShieldRegions=${popupShield.activeRegionCount} popupShieldError=${popupShield.lastError ?: "none"}")
         out.println("  lastPlayStoreWindowClass=${lastPlayStoreWindowClass ?: "unknown"}")
         out.println("  frog locked=$frogLocked phase=${frogStateCache?.phase} toolsConfirmed=${frogStateCache?.toolsConfirmed} allowedTools=${frogStateCache?.allowedToolPackages?.size ?: 0}")
         out.println("  serviceScope active=${scopeJob?.isActive == true} cancelled=${scopeJob?.isCancelled == true}")
@@ -339,12 +351,20 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     private fun eventTypeName(type: Int): String = when (type) {
         AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED -> "WINDOW_STATE_CHANGED"
         AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> "WINDOW_CONTENT_CHANGED"
+        AccessibilityEvent.TYPE_WINDOWS_CHANGED -> "WINDOWS_CHANGED"
         0 -> "NONE"
         else -> "OTHER"
     }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        windowTickerJob?.cancel()
+        windowTickerJob = serviceScope.launch(Dispatchers.Main) {
+            while (isActive) {
+                requestWindowReconciliation()
+                delay(1_000L)
+            }
+        }
         homeLocationJob?.cancel()
         homeLocationJob = serviceScope.launch {
             var previouslyAllowed: Boolean? = null
@@ -538,7 +558,15 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         lastAccessibilityEventType = event.eventType
         lastAccessibilityEventTimeMs = System.currentTimeMillis()
 
-        // Cheapest possible gate first: only these two event types are ever consumed.
+        // Window layout/focus events can have no package (Samsung pop-up view/DeX).
+        // Resolve actual application windows before reading an event package.
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
+            refreshForegroundWindow(readInteractiveAppWindows())
+            requestWindowReconciliation()
+            return
+        }
+
+        // Cheapest possible gate first: only these event types are consumed.
         // Everything else (focus, text selection, scroll notifications from all apps)
         // is dropped before even reading the package name off the parcel.
         val eventType = event.eventType
@@ -547,6 +575,16 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         ) return
 
         val eventPackage = event.packageName?.toString() ?: return
+        if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            val observedClass = billingWindowTracker.observe(eventPackage, event.windowId, event.className?.toString())
+            if (event.windowId >= 0) windowClasses[event.windowId] = eventPackage to observedClass
+            val appWindows = readInteractiveAppWindows()
+            val foreground = InteractiveWindowPolicy.foreground(appWindows)
+            refreshForegroundWindow(appWindows)
+            requestWindowReconciliation()
+            // A background popup or Samsung caption event is not a foreground switch.
+            if (foreground != null && foreground.packageName != eventPackage) return
+        }
         val restored = restoredRedirect
         if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && restored != null &&
             eventPackage == restored.targetPackage &&
@@ -628,6 +666,204 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         // Re-evaluate here so its first event starts monitoring immediately.
         if (eventPackage in BROWSER_PACKAGES && eventPackage == currentForegroundPackage) {
             browserMonitor.watch(eventPackage)
+        }
+    }
+
+    /** Read immutable window metadata; every acquired framework object is released here. */
+    @Suppress("DEPRECATION")
+    private fun readInteractiveAppWindows(): List<InteractiveAppWindow> {
+        val appWindows = mutableListOf<InteractiveAppWindow>()
+        val windowList = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val displays = windowsOnAllDisplays
+                buildList { for (index in 0 until displays.size()) addAll(displays.valueAt(index)) }
+            } else windows
+        }.getOrDefault(emptyList())
+        for (window in windowList) {
+            try {
+                if (window.type != AccessibilityWindowInfo.TYPE_APPLICATION) continue
+                val root = window.root ?: continue
+                try {
+                    val pkg = root.packageName?.toString() ?: continue
+                    if (pkg == "android" || pkg == "com.android.systemui" || pkg == resolveDefaultImePackage()) continue
+                    val bounds = Rect()
+                    window.getBoundsInScreen(bounds)
+                    if (bounds.isEmpty) continue
+                    appWindows += InteractiveAppWindow(
+                        window.id, pkg, window.layer, window.isActive, window.isFocused,
+                        WindowBounds(bounds.left, bounds.top, bounds.right, bounds.bottom),
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) window.displayId else 0,
+                    )
+                } finally { if (canRecycleNodes) root.recycle() }
+            } catch (_: Exception) {
+                // A closed window can disappear between metadata and root reads.
+            } finally { if (canRecycleNodes) runCatching { window.recycle() } }
+        }
+        return appWindows
+    }
+
+    private fun refreshForegroundWindow(appWindows: List<InteractiveAppWindow>) {
+        val foreground = InteractiveWindowPolicy.foreground(appWindows) ?: return
+        val previous = currentForegroundPackage
+        val changedWindow = foregroundWindowId != foreground.id
+        foregroundWindowId = foreground.id
+        val windowClass = windowClasses[foreground.id]?.takeIf { it.first == foreground.packageName }?.second
+        if (previous == foreground.packageName && !changedWindow && windowClass == foregroundWindowClass) return
+        currentForegroundPackage = foreground.packageName
+        foregroundWindowClass = windowClass
+        if (previous != foreground.packageName) currentActiveWebsite = null
+        if (foreground.packageName == applicationContext.packageName) {
+            redirectCandidate = null
+            stopTrackingForPreviousPackage(previous)
+        } else {
+            handleForegroundPackageChanged(foreground.packageName, previous)
+            if (foreground.packageName in BROWSER_PACKAGES) browserMonitor.watch(foreground.packageName)
+        }
+    }
+
+    /** Owns the returned node. Window identity, rather than event package, chooses the root. */
+    @Suppress("DEPRECATION")
+    private fun rootForAppWindow(target: InteractiveAppWindow): AccessibilityNodeInfo? {
+        val windowList = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) windowsOnAllDisplays.get(target.displayId).orEmpty()
+            else windows
+        }.getOrDefault(emptyList())
+        var result: AccessibilityNodeInfo? = null
+        for (window in windowList) {
+            try {
+                if (result == null && window.id == target.id && window.type == AccessibilityWindowInfo.TYPE_APPLICATION) {
+                    val root = window.root
+                    if (root?.packageName?.toString() == target.packageName) result = root
+                    else if (canRecycleNodes) root?.recycle()
+                }
+            } finally { if (canRecycleNodes) runCatching { window.recycle() } }
+        }
+        return result
+    }
+
+    private fun rootForForegroundPackage(packageName: String): AccessibilityNodeInfo? {
+        val foreground = InteractiveWindowPolicy.foreground(readInteractiveAppWindows())
+        if (foreground != null) return if (foreground.packageName == packageName) rootForAppWindow(foreground) else null
+        val root = runCatching { rootInActiveWindow }.getOrNull() ?: return null
+        if (root.packageName?.toString() == packageName) return root
+        if (canRecycleNodes) root.recycle()
+        return null
+    }
+
+    private fun displayBounds(displayId: Int): WindowBounds {
+        val display = (getSystemService(Context.DISPLAY_SERVICE) as? DisplayManager)?.getDisplay(displayId)
+        val metrics = android.util.DisplayMetrics()
+        @Suppress("DEPRECATION")
+        if (display != null) display.getRealMetrics(metrics) else metrics.setTo(resources.displayMetrics)
+        return WindowBounds(0, 0, metrics.widthPixels, metrics.heightPixels)
+    }
+
+    private fun requestWindowReconciliation() {
+        if (windowReconcileJob?.isActive == true) return
+        windowReconcileJob = serviceScope.launch(Dispatchers.Main) {
+            try { reconcilePopupWindows() }
+            catch (error: kotlinx.coroutines.CancellationException) { throw error }
+            catch (error: Exception) { Log.w(TAG, "Popup reconciliation failed: ${error.javaClass.simpleName}") }
+        }
+    }
+
+    /** Browser URL belongs to this window, even when a different app has input focus. */
+    private fun popupDomain(window: InteractiveAppWindow): String? {
+        val root = rootForAppWindow(window)
+            ?: return popupDomains[window.id]?.takeIf { it.first == window.packageName }?.second
+        return try {
+            val url = extractBrowserUrlFromRoot(root, window.packageName)
+            val domain = SettingsRepository.cleanDomain(url).takeIf { it.isNotBlank() }
+            if (domain == null) popupDomains.remove(window.id)
+            else popupDomains[window.id] = window.packageName to domain
+            domain
+        } finally { if (canRecycleNodes) root.recycle() }
+    }
+
+    private suspend fun popupWebsiteReason(domain: String): String? {
+        val app = FocusLockApplication.instance
+        val settings = app.settingsRepository
+        val permanent = settings.isWebsitePermanent(domain)
+        if (permanent) return "permanent"
+        if (!app.homeLocationRepository.shouldEnforceNow()) return null
+        // Foreground launch enforces the same Frog tool/billing exemption.
+        if (isFrogLockActive()) return null
+        val blocked = settings.isWebsiteBlocked(domain)
+        return WebsiteBlockPolicy.blockReason(
+            blocked, false, isGroupLimitExceeded(app, "website", domain),
+            blocked && scheduleActiveNow(), isDomainSuppressed(domain), app.creditBankRepository.getBalanceSeconds(),
+        )
+    }
+
+    private suspend fun reconcilePopupWindows() {
+        val keyguard = getSystemService(Context.KEYGUARD_SERVICE) as? android.app.KeyguardManager
+        if (!isScreenInteractive() || keyguard?.isKeyguardLocked == true) {
+            popupShield.clear()
+            return
+        }
+        val snapshot = readInteractiveAppWindows()
+        refreshForegroundWindow(snapshot)
+        val ids = snapshot.map { it.id }.toSet()
+        popupDomains.keys.retainAll(ids)
+        windowClasses.keys.retainAll(ids)
+        val decisions = mutableMapOf<Int, String>()
+        for (window in snapshot) {
+            if (window.packageName == applicationContext.packageName || FrogAppPolicy.isHome(this, window.packageName)) continue
+            val screen = displayBounds(window.displayId)
+            if (!InteractiveWindowPolicy.isMultiWindow(window, snapshot, screen) ||
+                InteractiveWindowPolicy.exposedBounds(window, snapshot, screen).isEmpty()) continue
+            val windowClass = windowClasses[window.id]?.takeIf { it.first == window.packageName }?.second
+            val appDecision = withContext(Dispatchers.Default) { appWindowDecision(window.packageName, windowClass) }
+            var reason = blockReasonForDecision(appDecision)
+            var domain: String? = null
+            if (reason == null && window.packageName in BROWSER_PACKAGES) {
+                domain = popupDomain(window)
+                if (domain != null) reason = withContext(Dispatchers.Default) { popupWebsiteReason(domain) }
+            }
+            if (reason != null) decisions[window.id] = reason
+        }
+        if (!isScreenInteractive() || keyguard?.isKeyguardLocked == true) {
+            popupShield.clear()
+            return
+        }
+        // Policy reads suspend. Never shield a closed/moved window using stale geometry.
+        val current = readInteractiveAppWindows()
+        val targets = current.mapNotNull { window ->
+            val original = snapshot.firstOrNull { it.id == window.id && it.packageName == window.packageName && it.displayId == window.displayId }
+                ?: return@mapNotNull null
+            decisions[original.id] ?: return@mapNotNull null
+            val screen = displayBounds(window.displayId)
+            if (!InteractiveWindowPolicy.isMultiWindow(window, current, screen)) return@mapNotNull null
+            val rectangles = InteractiveWindowPolicy.exposedBounds(window, current, screen)
+            if (rectangles.isEmpty()) return@mapNotNull null
+            PopupShieldTarget(window, rectangles) { openPopupBlocker(window) }
+        }
+        if (!popupShield.update(targets)) Log.w(TAG, "Popup shield unavailable: ${popupShield.lastError}")
+    }
+
+    private fun openPopupBlocker(window: InteractiveAppWindow) {
+        serviceScope.launch(Dispatchers.Main) {
+            val current = readInteractiveAppWindows().firstOrNull {
+                it.id == window.id && it.packageName == window.packageName && it.displayId == window.displayId
+            } ?: return@launch
+            val windowClass = windowClasses[current.id]?.takeIf { it.first == current.packageName }?.second
+            val appReason = withContext(Dispatchers.Default) { blockReasonForDecision(appWindowDecision(current.packageName, windowClass)) }
+            val currentDomain = if (appReason == null && current.packageName in BROWSER_PACKAGES) popupDomain(current) else null
+            val currentReason = appReason ?: currentDomain?.let { withContext(Dispatchers.Default) { popupWebsiteReason(it) } }
+            if (currentReason == null || !isScreenInteractive()) {
+                requestWindowReconciliation()
+                return@launch
+            }
+            val activity = if (currentReason == "nuke") com.focuslock.app.ui.nuke.NukeActivity::class.java else BlockerActivity::class.java
+            val intent = Intent(this@AppMonitorAccessibilityService, activity).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                putExtra(BlockerActivity.EXTRA_BLOCKED_PACKAGE, current.packageName)
+                putExtra(EXTRA_BLOCK_REASON, currentReason)
+                if (currentDomain != null) putExtra(BlockerActivity.EXTRA_BLOCKED_WEBSITE, currentDomain)
+            }
+            val options = ActivityOptions.makeBasic().setLaunchDisplayId(current.displayId).toBundle()
+            try { startActivity(intent, options) }
+            catch (_: SecurityException) { startActivity(intent) }
         }
     }
 
@@ -720,140 +956,77 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         // DataStore work is launched off-thread by maybeArmFrogOnForeground.
         maybeArmFrogOnForeground()
 
-        stopTrackingForPreviousPackage(previousPackage)
+        if (previousPackage != packageName) stopTrackingForPreviousPackage(previousPackage)
 
         serviceScope.launch {
             val app = FocusLockApplication.instance
-            val settings = app.settingsRepository
-            val bank = app.creditBankRepository
-
             if (currentForegroundPackage != packageName) return@launch
-
-            // Permanent blocks do not depend on location or any normal enforcement
-            // policy. Preserve the protected-package recovery exemptions.
-            try { app.permanentBlocksRepository.warm() } catch (_: Exception) { }
-            val legacyPermanent = try { settings.isAppPermanent(packageName) } catch (_: Exception) { false }
-            val dedicatedPermanent = app.permanentBlocksRepository.isPermanentlyBlocked(packageName)
-            val protected = try {
-                PermanentBlocksRepository.isProtectedPackage(this@AppMonitorAccessibilityService, packageName)
-            } catch (_: Exception) { true }
-            if (PermanentBlockPolicy.shouldEnforce(dedicatedPermanent || legacyPermanent, protected)) {
-                latestAppCheckDecision = "permanent"
-                Log.w(TAG, "Permanently blocked app launched: $packageName")
-                recordBlock(packageName, "permanent")
-                triggerBlocker(packageName, website = null, reason = "permanent")
-                return@launch
-            }
-
-            if (!app.homeLocationRepository.shouldEnforceNow()) {
+            val decision = appWindowDecision(packageName, foregroundWindowClass)
+            if (currentForegroundPackage != packageName) return@launch
+            latestAppCheckDecision = decision
+            if (decision == "location_paused") {
                 BlockerActivity.discardSavedFrogTimer(applicationContext)
-                latestAppCheckDecision = "location_paused"
                 return@launch
             }
-
-            // This code runs off the accessibility callback. Refresh once on target
-            // transitions, then keep active policy targets on a bounded minute loop.
-            app.syncManager.requestPolicyRefresh()
-            updateAppPolicyActivity(app, packageName)
-
-            // 0. NUKE MODE — block everything except the Nuke lock screen itself.
-            // Phone + PC stay locked until 10-min reset + coach approval.
-            try {
-                if (settings.isNukeActive()) {
-                    latestAppCheckDecision = "nuke"
-                    recordBlock(packageName, "nuke")
+            if (decision != "permanent") {
+                app.syncManager.requestPolicyRefresh()
+                updateAppPolicyActivity(app, packageName)
+            }
+            when (val reason = blockReasonForDecision(decision)) {
+                "nuke" -> {
+                    recordBlock(packageName, reason)
                     triggerNuke()
-                    return@launch
                 }
-            } catch (_: Exception) { }
-
-            // 1. TickTick active time tracking. It remains exempt only when it has
-            // not itself been deliberately placed in the permanent store.
-            if (packageName == TICKTICK_PACKAGE) {
-                latestAppCheckDecision = "ticktick_exempt"
-                startTickTickActiveTracking()
-                return@launch
-            }
-
-            if (isFrogLockActive()) {
-                if (FrogBillingPolicy.isBillingWindow(packageName, foregroundWindowClass)) {
-                    latestAppCheckDecision = "frog_billing_allowed"
-                    return@launch
-                }
-                val state = frogStateCache
-                if (state != null && FrogAppPolicy.shouldShowFocusScreen(this@AppMonitorAccessibilityService, packageName, state)) {
-                    latestAppCheckDecision = "frog"
-                    Log.w(TAG, "Frog lock active — blocking $packageName")
-                    recordBlock(packageName, FrogCoordinator.REASON_FROG)
-                    triggerBlocker(packageName, website = null, reason = FrogCoordinator.REASON_FROG)
-                    return@launch
-                }
-                latestAppCheckDecision = "frog_allowed_or_state_unavailable"
-                return@launch
-            }
-
-            // 2. Per-app daily limit: applies to any app with an enabled limit,
-            // whether or not it is part of the blocked set. Runs off the main thread
-            // (UsageStats query is IO-safe/suspending).
-            val limitExceeded = try {
-                app.appLimitsRepository.isLimitExceeded(packageName)
-            } catch (_: Exception) {
-                false
-            }
-            if (limitExceeded) {
-                latestAppCheckDecision = "app_limit"
-                Log.w(TAG, "Daily limit reached for $packageName — blocking")
-                recordBlock(packageName, "limit")
-                triggerBlocker(packageName, website = null, reason = "limit")
-                return@launch
-            }
-
-            // 2b. Merged-group daily limit: the combined cross-device total of every
-            // member (app + website) counts against one cap. Applies to any group
-            // member, whether or not the app itself has its own limit or is blocked.
-            val groupLimitExceeded = try {
-                isGroupLimitExceeded(app, "app", packageName)
-            } catch (_: Exception) {
-                false
-            }
-            if (groupLimitExceeded) {
-                latestAppCheckDecision = "group_limit"
-                Log.w(TAG, "Group daily limit reached for $packageName — blocking")
-                recordBlock(packageName, "limit")
-                triggerBlocker(packageName, website = null, reason = "limit")
-                return@launch
-            }
-
-            // 3. Target doomscroll app check
-            val isBlocked = settings.isAppBlocked(packageName)
-            if (!isBlocked) {
-                latestAppCheckDecision = "not_selected"
-                return@launch
-            }
-
-            val balanceSec = bank.getBalanceSeconds()
-            Log.d(TAG, "Blocked app launched: $packageName, remaining balance: $balanceSec s")
-
-            // Strict Mode freezes boundary configuration only. Access follows the
-            // normal boundary, schedule, Frog, limit, and credit policies below.
-            when (val reason = AppBlockPolicy.blockReason(isBlocked, scheduleActiveNow(), balanceSec)) {
-                "schedule" -> {
-                    latestAppCheckDecision = "schedule"
-                    Log.w(TAG, "Active block schedule — blocking $packageName")
-                    recordBlock(packageName, reason)
-                    triggerBlocker(packageName, website = null, reason = reason)
-                }
-                "manual" -> {
-                    latestAppCheckDecision = "manual"
-                    recordBlock(packageName, reason)
-                    triggerBlocker(packageName, website = null, reason = reason)
+                null -> when (decision) {
+                    "ticktick_exempt" -> startTickTickActiveTracking()
+                    "countdown" -> if (countdownJob?.isActive != true) startDoomscrollCountdown(packageName, website = null)
                 }
                 else -> {
-                latestAppCheckDecision = "countdown"
-                startDoomscrollCountdown(packageName, website = null)
+                    Log.w(TAG, "Blocking $packageName (reason=$reason)")
+                    recordBlock(packageName, reason)
+                    triggerBlocker(packageName, website = null, reason = reason)
                 }
             }
         }
+    }
+
+    /** Shared access decision for foreground enforcement and every visible popup. */
+    private suspend fun appWindowDecision(packageName: String, windowClass: String?): String {
+        val app = FocusLockApplication.instance
+        val settings = app.settingsRepository
+        try { app.permanentBlocksRepository.warm() } catch (_: Exception) { }
+        val legacyPermanent = try { settings.isAppPermanent(packageName) } catch (_: Exception) { false }
+        val protected = try { PermanentBlocksRepository.isProtectedPackage(this, packageName) }
+            catch (_: Exception) { true }
+        if (PermanentBlockPolicy.shouldEnforce(
+                app.permanentBlocksRepository.isPermanentlyBlocked(packageName) || legacyPermanent, protected,
+            )) return "permanent"
+        if (!app.homeLocationRepository.shouldEnforceNow()) return "location_paused"
+        if (try { settings.isNukeActive() } catch (error: kotlinx.coroutines.CancellationException) { throw error }
+            catch (_: Exception) { false }) return "nuke"
+        if (packageName == TICKTICK_PACKAGE) return "ticktick_exempt"
+        if (isFrogLockActive()) {
+            if (FrogBillingPolicy.isBillingWindow(packageName, windowClass)) return "frog_billing_allowed"
+            val state = frogStateCache
+            return if (state != null && FrogAppPolicy.shouldShowFocusScreen(this, packageName, state)) "frog"
+                else "frog_allowed_or_state_unavailable"
+        }
+        if (try { app.appLimitsRepository.isLimitExceeded(packageName) }
+            catch (error: kotlinx.coroutines.CancellationException) { throw error }
+            catch (_: Exception) { false }) return "app_limit"
+        if (try { isGroupLimitExceeded(app, "app", packageName) }
+            catch (error: kotlinx.coroutines.CancellationException) { throw error }
+            catch (_: Exception) { false }) return "group_limit"
+        if (!settings.isAppBlocked(packageName)) return "not_selected"
+        // Strict freezes editing; it never contributes an access verdict.
+        return AppBlockPolicy.blockReason(true, scheduleActiveNow(), app.creditBankRepository.getBalanceSeconds())
+            ?: "countdown"
+    }
+
+    private fun blockReasonForDecision(decision: String): String? = when (decision) {
+        "app_limit", "group_limit" -> "limit"
+        "permanent", "nuke", "frog", "schedule", "manual" -> decision
+        else -> null
     }
 
     private suspend fun updateAppPolicyActivity(app: FocusLockApplication, packageName: String): Boolean {
@@ -1296,43 +1469,35 @@ class AppMonitorAccessibilityService : AccessibilityService() {
      */
     @Suppress("DEPRECATION")
     private fun extractBrowserUrl(browserPackage: String): String? {
-        val rootNode = rootInActiveWindow ?: return null
+        val rootNode = rootForForegroundPackage(browserPackage) ?: return null
         try {
             // A queued event may belong to a window that has already closed.
             if (rootNode.packageName?.toString() != browserPackage) return null
-            // Cheap first-hit pass over the well-known URL-bar view IDs only.
-            val quickUrl = try {
-                extractUrlFromViewIds(rootNode, browserPackage)
-            } catch (_: Exception) {
-                null
-            }
-            if (!quickUrl.isNullOrBlank()) return quickUrl
-
-            // Google search/Discover can contain many blocked-domain links. They are
-            // not evidence that the user opened any of those sites.
-            if (!BrowserUrlPolicy.allowsPageTextFallback(browserPackage)) return ""
-
-            // Fallback: server-side text search (1 binder call per pattern).
-            val textUrl = try {
-                findUrlByTextSearch(rootNode)
-            } catch (_: Exception) {
-                null
-            }
-            if (!textUrl.isNullOrBlank()) return textUrl
-
-            // Last resort only: bounded depth-first scan.
-            val deepUrl = try {
-                searchHierarchyForUrl(rootNode, depth = 0)
-            } catch (_: Exception) {
-                null
-            }
-            if (!deepUrl.isNullOrBlank()) return deepUrl
-            return ""
+            return extractBrowserUrlFromRoot(rootNode, browserPackage)
         } finally {
             if (canRecycleNodes) {
                 try { rootNode.recycle() } catch (_: Exception) { }
             }
         }
+    }
+
+    private fun extractBrowserUrlFromRoot(rootNode: AccessibilityNodeInfo, browserPackage: String): String {
+        // Cheap first-hit pass over the well-known URL-bar view IDs only.
+        val quickUrl = try {
+            extractUrlFromViewIds(rootNode, browserPackage)
+        } catch (_: Exception) {
+            null
+        }
+        if (!quickUrl.isNullOrBlank()) return quickUrl
+
+        // Google search/Discover links are not evidence that a site was opened.
+        if (!BrowserUrlPolicy.allowsPageTextFallback(browserPackage)) return ""
+
+        val textUrl = try { findUrlByTextSearch(rootNode) } catch (_: Exception) { null }
+        if (!textUrl.isNullOrBlank()) return textUrl
+
+        val deepUrl = try { searchHierarchyForUrl(rootNode, depth = 0) } catch (_: Exception) { null }
+        return deepUrl ?: ""
     }
 
     /**
@@ -1600,7 +1765,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                     latestAppCheckDecision = "frog_stale_policy"
                     return@withContext
                 }
-                val root = runCatching { rootInActiveWindow }.getOrNull() ?: run {
+                val root = rootForForegroundPackage(blockedPackage) ?: run {
                     latestAppCheckDecision = "frog_missing_window"
                     return@withContext
                 }
@@ -1686,6 +1851,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
 
     /** Main-thread check of the actual window, rather than a delayed event's package. */
     private fun activeWindowPackage(): String? {
+        InteractiveWindowPolicy.foreground(readInteractiveAppWindows())?.let { return it.packageName }
         val root = runCatching { rootInActiveWindow }.getOrNull() ?: return null
         return try { root.packageName?.toString() }
         finally { if (canRecycleNodes) root.recycle() }
@@ -1710,6 +1876,8 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
+        windowReconcileJob?.cancel()
+        popupShield.clear()
         browserMonitor.stop()
         stopPolicyActivityRefresh()
         policyBoundaryJob?.cancel()
@@ -1719,6 +1887,9 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        windowTickerJob?.cancel()
+        windowReconcileJob?.cancel()
+        popupShield.clear()
         super.onDestroy()
         homeLocationJob?.cancel()
         homeLocationJob = null
