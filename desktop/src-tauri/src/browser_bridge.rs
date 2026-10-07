@@ -4,7 +4,7 @@
 //! matched to visible top-level Windows HWNDs owned by the browser process.
 
 use serde::{Deserialize, Serialize};
-use std::{fs, path::Path};
+use std::{fs, path::{Path, PathBuf}};
 
 pub const EXTENSION_ID: &str = "fkkpmoiageeieaoplphafmhjkkdadcnf";
 const HOST_NAME: &str = "com.focuslock.browser";
@@ -12,7 +12,9 @@ const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_TITLE_CHARS: usize = 512;
 const MAX_WINDOWS: usize = 128;
 const MAX_LEASE_FILE_BYTES: u64 = 256 * 1024;
-const LEASE_TTL_MS: u64 = 10_000;
+// MV3 service workers can be suspended between alarms. Keep the lease alive
+// across the one-minute alarm interval used by the oldest supported browsers.
+const LEASE_TTL_MS: u64 = 65_000;
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 
 const CHROME_REGISTRY_BASE: &str = r"Software\Google\Chrome\NativeMessagingHosts";
@@ -55,6 +57,14 @@ struct BrowserLease {
     all_urls: bool,
     incognito_allowed: bool,
     window_handles: Vec<i64>,
+}
+
+struct LeaseFileGuard(PathBuf);
+
+impl Drop for LeaseFileGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -343,6 +353,7 @@ fn run_host() -> Result<(), String> {
     let lease_path = data_dir
         .join("browser-leases")
         .join(format!("host-{process_id}.json"));
+    let _lease_cleanup = LeaseFileGuard(lease_path.clone());
     let mut stdin = io::stdin().lock();
     let mut stdout = io::stdout().lock();
     loop {
@@ -379,7 +390,6 @@ fn run_host() -> Result<(), String> {
         }
         write_response(&mut stdout, true)?;
     }
-    let _ = fs::remove_file(lease_path);
     Ok(())
 }
 
@@ -519,7 +529,10 @@ fn bounds_match(
     native: (i32, i32, i32, i32),
     dpi_scale: f64,
 ) -> bool {
-    const TOLERANCE: i32 = 12;
+    // Chromium reports screen bounds in logical pixels; Win32 reports the
+    // outer frame in physical pixels. Allow for DPI rounding and invisible
+    // resize borders while retaining title and unique-candidate matching.
+    const TOLERANCE: i32 = 24;
     if !dpi_scale.is_finite() || !(1.0..=4.0).contains(&dpi_scale) {
         return false;
     }
@@ -735,6 +748,18 @@ mod tests {
     }
 
     #[test]
+    fn lease_file_guard_removes_lease_when_host_scope_exits() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("host-123.json");
+        fs::write(&path, b"active lease").unwrap();
+        {
+            let _guard = LeaseFileGuard(path.clone());
+            assert!(path.exists());
+        }
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn health_requires_fresh_exact_browser_window_and_all_urls_permission() {
         let temp = tempdir().unwrap();
         let dir = temp.path().join("browser-leases");
@@ -773,12 +798,19 @@ mod tests {
             "msedge.exe",
             10_000
         ));
+        assert!(read_window_health(
+            temp.path(),
+            44,
+            123,
+            "chrome.exe",
+            70_000
+        ));
         assert!(!read_window_health(
             temp.path(),
             44,
             123,
             "chrome.exe",
-            15_001
+            70_001
         ));
         fs::write(
             &path,
@@ -923,7 +955,12 @@ mod tests {
         assert!(!title_matches("Example", "Google Chrome - Example"));
         assert!(bounds_match(
             (100, 200, 800, 600),
-            (125, 250, 1000, 750),
+            (105, 230, 1018, 768),
+            1.25
+        ));
+        assert!(!bounds_match(
+            (100, 200, 800, 600),
+            (100, 200, 1000, 750),
             1.25
         ));
         assert!(!bounds_match(

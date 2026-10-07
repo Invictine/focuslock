@@ -3,6 +3,16 @@
 Windows companion that auto-syncs with the Android app. Same Clerk account = same
 credit balance, block lists, work history.
 
+## Windows background protection
+
+Closing the main window keeps FocusLock running in the system tray, with tracking, sync, and enforcement active. Reopen it from the tray or its normal shortcut. **Quit when protection is off** refuses to quit while native boundaries, permanent blocks, or the enabled browser checker are enforcing. Clear the applicable rules in FocusLock before quitting. Strict Mode continues to freeze boundary edits only.
+
+Installed release builds start in the background at Windows sign-in and run a small recovery companion. If the desktop process exits unexpectedly, the companion relaunches it in the background with its persisted native rules. Intentional tray Quit stops recovery for that run; repeated crashes back off. Development builds and binaries under `target/` do not register Windows startup. Recovery is user-level: an administrator, disabling startup, or terminating both processes can still stop protection. It does not install a service or change Windows permissions.
+
+The extension repair notice is 360×220 and moves by dragging its header. Native heartbeats require an exact browser PID and independently matched HWND, including all-sites permission and profile isolation. The bridge keeps a periodic alarm while connected and tolerates one alarm interval without discarding a healthy lease; disconnect removes that lease. Missing-extension windows still get their own repair deadline.
+
+These changes concern FocusLock's host and its browser bridge. Shared `windows/void/` launcher source is unchanged, so standalone Void has no equivalent integration to backport.
+
 ## Prereqs
 
 - Node 20+, npm 10+

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useEffect, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useCallback, useEffect, useState, type PointerEvent } from "react";
 import "./browser-repair.css";
 
 type BrowserRepairState = {
@@ -72,6 +73,17 @@ export default function BrowserRepairPage() {
     }
   };
 
+  const startMoving = (event: PointerEvent<HTMLElement>) => {
+    if (event.button !== 0 || !event.isPrimary) return;
+    event.preventDefault();
+    // Start on pointer-down, before the compatibility mouse event. Tauri's
+    // automatic drag region depends on mouse click detail and double-clicks
+    // maximize; this fixed-size notice only needs movement.
+    void getCurrentWindow().startDragging().catch(() => {
+      setActionError("Couldn’t move the notice. Try dragging the header again.");
+    });
+  };
+
   const name = repair ? browserName(repair) : "your browser";
   const unsupported = repair?.reason === "browser_unsupported";
   const seconds = Math.max(0, Math.ceil(repair?.graceRemainingSeconds ?? 0));
@@ -83,32 +95,22 @@ export default function BrowserRepairPage() {
   return (
     <main className="browser-repair-shell" aria-live="polite">
       <section className="browser-repair-card">
+        <header className="browser-repair-drag" onPointerDown={startMoving} title="Drag to move this notice">
+          <span>FocusLock</span>
+          <span className="browser-repair-drag-hint">Drag to move</span>
+        </header>
         {repair ? (
           <>
-            <p className="browser-repair-eyebrow">Browser extension</p>
             <h1>{unsupported ? "Use a supported browser" : "Reconnect FocusLock"}</h1>
             <p className="browser-repair-copy">
               {unsupported
                 ? `${name} is not supported for website boundaries. Switch to Chrome, Edge, Brave, Vivaldi, Opera, or Arc.`
-                : `FocusLock can’t confirm an extension connection in this ${name} profile. Check that the extension is installed, enabled, and allowed to access all websites.`}
+                : `Enable FocusLock in this ${name} profile with access to all websites. Incognito access is optional.`}
             </p>
-            {!unsupported && (
-              <>
-                <p className="browser-repair-guidance">
-                  Allow FocusLock on all websites. Incognito access is optional; turn it on only if you want protection there.
-                </p>
-                <div className="browser-repair-countdown" role="timer" aria-label={`${seconds} seconds until ${name} closes`}>
-                  <strong>{seconds}</strong>
-                  <span>{name} may close in {seconds} seconds if the connection stays unavailable</span>
-                </div>
-              </>
-            )}
-            {unsupported && (
-              <div className="browser-repair-countdown">
-                <strong>{seconds}</strong>
-                <span>{name} may close in {seconds} seconds if the connection stays unavailable</span>
-              </div>
-            )}
+            <div className="browser-repair-countdown" role="timer" aria-label={`${seconds} seconds until ${name} closes`}>
+              <strong>{seconds}<small>s</small></strong>
+              <span>{name} may close if the connection stays unavailable</span>
+            </div>
             {actionError && <p className="browser-repair-error" role="alert">{actionError}</p>}
             {!unsupported && (
               <button className="browser-repair-button" type="button" onClick={openSettings} disabled={openingSettings}>
@@ -118,7 +120,6 @@ export default function BrowserRepairPage() {
           </>
         ) : loadFailed ? (
           <>
-            <p className="browser-repair-eyebrow">Browser extension</p>
             <h1>Checking connection…</h1>
             <p className="browser-repair-copy">FocusLock is checking the extension status in your browser.</p>
           </>

@@ -153,11 +153,12 @@ test('missing native host or incomplete Chrome APIs are safe and use the retry a
   assert.doesNotThrow(() => context.self.FocusLockDesktopBridge.start({ runtime: {} }));
 });
 
-test('an unregistered host gets six quick attempts then waits for the minute alarm', async () => {
+test('an unregistered host gets six quick attempts then waits for the recovery alarm', async () => {
   const timerApi = fakeTimers();
   const state = harness({ connectThrows: true, timerApi });
   state.bridge.start(state.chrome);
   assert.equal(state.connectAttempts, 1);
+  assert.equal(state.chrome.alarm[1].periodInMinutes, 1);
   for (let attempt = 0; attempt < 6; attempt += 1) {
     timerApi.advance(5000);
     await tick();
@@ -169,6 +170,21 @@ test('an unregistered host gets six quick attempts then waits for the minute ala
   state.chrome.alarms.onAlarm.fire({ name: 'focuslock-desktop-bridge-reconnect' });
   assert.equal(state.connectAttempts, 8, 'the minute alarm provides a later recovery attempt');
   state.bridge.stop();
+});
+
+test('the recovery alarm refreshes an existing connection heartbeat', async () => {
+  const { bridge, chrome, ports } = harness();
+  bridge.start(chrome);
+  await tick();
+  const before = ports[0].messages.length;
+  assert.equal(chrome.alarm[0], 'focuslock-desktop-bridge-reconnect');
+  assert.equal(chrome.alarm[1].periodInMinutes, 1);
+  chrome.alarms.onAlarm.fire({ name: 'focuslock-desktop-bridge-reconnect' });
+  await tick();
+  assert.equal(ports.length, 1);
+  assert.ok(ports[0].messages.length > before);
+  bridge.stop();
+  assert.equal(chrome.clearedAlarm, 'focuslock-desktop-bridge-reconnect');
 });
 
 test('disconnect retries after five seconds and ignores stale port events', async () => {

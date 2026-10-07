@@ -4,6 +4,7 @@
   const HOST_NAME = 'com.focuslock.browser';
   const ALARM_NAME = 'focuslock-desktop-bridge-reconnect';
   const HEARTBEAT_MS = 2000;
+  const ALARM_PERIOD_MINUTES = 1;
   const RETRY_MS = 5000;
   const FAST_MISSING_HOST_ATTEMPTS = 6;
   const MAX_WINDOWS = 128;
@@ -121,7 +122,7 @@
     function ensureReconnectAlarm() {
       if (!api || !api.alarms || typeof api.alarms.create !== 'function') return;
       try {
-        api.alarms.create(ALARM_NAME, { periodInMinutes: 1 });
+        api.alarms.create(ALARM_NAME, { periodInMinutes: ALARM_PERIOD_MINUTES });
       } catch (_) {
         // Alarms are unavailable in some extension contexts.
       }
@@ -192,7 +193,7 @@
       connectedAt = Date.now();
       generation += 1;
       const ownGeneration = generation;
-      clearReconnectAlarm();
+      ensureReconnectAlarm();
       portListeners = [];
       const portListen = (event, handler) => {
         if (!event || typeof event.addListener !== 'function') return;
@@ -216,7 +217,9 @@
     }
 
     function onAlarm(alarm) {
-      if (alarm && alarm.name === ALARM_NAME && running && !port) connect();
+      if (!alarm || alarm.name !== ALARM_NAME || !running) return;
+      if (!port) connect();
+      else requestHeartbeat();
     }
 
     function start(chromeApi) {

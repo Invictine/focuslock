@@ -3,51 +3,64 @@
   inset: 0;
   display: grid;
   place-items: center;
-  padding: 14px;
+  padding: 0;
   overflow: auto;
   background: var(--fl-background, #0d0d0f);
   color: var(--fl-on-surface, #eee9e7);
 }
 
 .browser-repair-card {
-  width: min(100%, 384px);
+  width: 100%;
+  min-height: 100%;
   display: grid;
   justify-items: start;
   box-sizing: border-box;
-  gap: 8px;
-  padding: 18px;
+  align-content: start;
+  gap: 7px;
+  padding: 12px;
   border: 1px solid var(--fl-outline-variant, #353235);
-  border-radius: var(--fl-radius-large, 18px);
+  border-radius: 12px;
   background: var(--fl-surface, #1b1b1e);
-  box-shadow: 0 14px 40px #0005;
 }
 
-.browser-repair-eyebrow {
-  margin: 2px 0 0;
+.browser-repair-drag {
+  width: 100%;
+  min-height: 23px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: -2px 0 1px;
   color: var(--fl-primary, #dfbdb6);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
-  letter-spacing: .08em;
-  text-transform: uppercase;
+  cursor: move;
+  user-select: none;
+  touch-action: none;
+}
+
+.browser-repair-drag > span {
+  /* Keep the whole header a consistent pointer target for native movement. */
+  pointer-events: none;
+}
+
+.browser-repair-drag-hint {
+  color: var(--fl-on-surface-variant, #bbb4b1);
+  font-size: 10px;
+  font-weight: 400;
 }
 
 .browser-repair-card h1 {
   margin: 0;
-  font-size: 20px;
+  font-size: 18px;
   line-height: 1.15;
   letter-spacing: -.025em;
 }
 
-.browser-repair-copy,
-.browser-repair-guidance {
+.browser-repair-copy {
   margin: 0;
   color: var(--fl-on-surface-variant, #bbb4b1);
   font-size: 12px;
   line-height: 1.45;
-}
-
-.browser-repair-guidance {
-  color: var(--fl-on-surface, #eee9e7);
 }
 
 .browser-repair-countdown {
@@ -55,20 +68,25 @@
   box-sizing: border-box;
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-top: 2px;
-  padding: 10px 12px;
-  border-radius: 12px;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
   background: var(--fl-surface-container-high, #232326);
 }
 
 .browser-repair-countdown strong {
-  min-width: 42px;
+  min-width: 38px;
   color: var(--fl-primary, #dfbdb6);
-  font-size: 25px;
+  font-size: 22px;
   line-height: 1;
   font-variant-numeric: tabular-nums;
   text-align: center;
+}
+
+.browser-repair-countdown small {
+  margin-left: 2px;
+  font-size: 12px;
+  font-weight: 400;
 }
 
 .browser-repair-countdown span {
@@ -96,9 +114,15 @@
   cursor: wait;
 }
 
+.browser-repair-button:focus-visible {
+  outline: 2px solid var(--fl-on-surface, #eee9e7);
+  outline-offset: 2px;
+}
+
 .browser-repair-error {
   margin: 0;
   color: var(--fl-on-error-container, #ffdad6);
   font-size: 11px;
   line-height: 1.4;
+  overflow-wrap: anywhere;
 }

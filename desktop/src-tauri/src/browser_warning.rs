@@ -49,7 +49,7 @@ impl BrowserRepairRuntime {
 pub fn build_browser_warning_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     WebviewWindowBuilder::new(app, WINDOW_LABEL, WebviewUrl::App(WINDOW_URL.into()))
         .title("FocusLock browser protection")
-        .inner_size(440.0, 330.0)
+        .inner_size(360.0, 220.0)
         .decorations(false)
         .always_on_top(true)
         .skip_taskbar(true)

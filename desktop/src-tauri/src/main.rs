@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod auth;
+mod background;
 mod blocker;
 mod browser_bridge;
 mod browser_guard;
@@ -16,7 +17,13 @@ use tracking::TrackerRuntime;
 
 fn main() {
     if browser_bridge::maybe_run_host() { return; }
+    if background::maybe_run_watchdog() { return; }
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if !args.iter().any(|arg| arg == "--background") {
+                background::show_main(app);
+            }
+        }))
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(|app| {
@@ -34,6 +41,7 @@ fn main() {
             app.manage(blocker::BlockerRuntime::new());
             app.manage(browser_warning::BrowserRepairRuntime::default());
             app.manage(runtime);
+            app.manage(background::BackgroundRuntime::default());
             // The blocker window exists for the whole app lifetime, hidden.
             // If it cannot be created the tracker falls back to minimizing.
             if let Err(error) = blocker::build_blocker_window(app.handle()) {
@@ -47,8 +55,16 @@ fn main() {
             let main_window = app.config().app.windows.iter()
                 .find(|window| window.label == "main")
                 .ok_or("Missing main window configuration")?;
-            tauri::WebviewWindowBuilder::from_config(app.handle(), main_window)?.build()?;
+            tauri::WebviewWindowBuilder::from_config(app.handle(), main_window)?
+                .visible(!std::env::args().any(|arg| arg == "--background"))
+                .focused(!std::env::args().any(|arg| arg == "--background"))
+                .build()?;
+            background::install_tray(app.handle())?;
             app.state::<TrackerRuntime>().start(app.handle().clone());
+            if let Err(error) = background::start_recovery(app.handle()) {
+                eprintln!("FocusLock background recovery unavailable: {error}");
+                app.state::<TrackerRuntime>().note_control_error(error);
+            }
             Ok(())
         })
         .on_window_event(|window, event| match event {
@@ -58,10 +74,9 @@ fn main() {
                     browser_warning::sync_window(window.app_handle(), None);
                     return;
                 }
-                if window.label() == "main" && window.app_handle().try_state::<TrackerRuntime>()
-                    .is_some_and(|state| state.browser_protection_active()) {
+                if window.label() == "main" {
                     api.prevent_close();
-                    let _ = window.minimize();
+                    background::hide_main(window);
                     return;
                 }
                 if window.label() == blocker::BLOCKER_LABEL {
@@ -87,11 +102,6 @@ fn main() {
                 if let Some(state) = window.app_handle().try_state::<blocker::BlockerRuntime>() {
                     state.note_window_destroyed();
                 }
-            }
-            tauri::WindowEvent::Destroyed if window.label() == "main" => {
-                // The hidden blocker keeps the event loop alive, so closing the
-                // main window still has to quit FocusLock.
-                window.app_handle().exit(0);
             }
             _ => {}
         })
@@ -121,6 +131,12 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while running FocusLock desktop");
     app.run(|app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { api, .. } = &event {
+            if !app_handle.state::<background::BackgroundRuntime>().exiting() {
+                api.prevent_exit();
+                return;
+            }
+        }
         if matches!(
             event,
             tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit

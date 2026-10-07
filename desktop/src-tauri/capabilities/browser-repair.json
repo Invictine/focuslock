@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "browser-repair-movement",
+  "description": "Allow the compact browser repair notice to be moved by its header.",
+  "windows": ["browser-repair"],
+  "permissions": ["core:window:allow-start-dragging"]
+}

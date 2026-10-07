@@ -503,6 +503,7 @@ pub struct TrackerRuntime {
     store: Arc<Mutex<TrackingStore>>,
     current: Arc<Mutex<Option<ActivityObservation>>>,
     last_error: Arc<Mutex<Option<String>>>,
+    control_error: Mutex<Option<String>>,
     worker: Mutex<Option<JoinHandle<()>>>,
     store_path: PathBuf,
     /// Latest sorted usage vec, keyed by the store's usage generation so
@@ -514,6 +515,9 @@ pub struct TrackerRuntime {
 }
 
 impl TrackerRuntime {
+    pub(crate) fn note_control_error(&self, error: String) {
+        if let Ok(mut current) = self.control_error.lock() { *current = Some(error); }
+    }
     pub fn browser_protection_active(&self) -> bool {
         self.store.lock().map(|s| s.browser_protection_active()).unwrap_or(false)
     }
@@ -531,6 +535,7 @@ impl TrackerRuntime {
             store: Arc::new(Mutex::new(store)),
             current: Arc::new(Mutex::new(None)),
             last_error: Arc::new(Mutex::new(None)),
+            control_error: Mutex::new(None),
             worker: Mutex::new(None),
             store_path,
             usage_cache: Mutex::new(None),
@@ -806,7 +811,8 @@ impl TrackerRuntime {
             running: self.running.load(Ordering::SeqCst),
             enforcement_active,
             current: self.current.lock().ok().and_then(|v| v.clone()),
-            last_error: self.last_error.lock().ok().and_then(|v| v.clone()),
+            last_error: self.last_error.lock().ok().and_then(|v| v.clone())
+                .or_else(|| self.control_error.lock().ok().and_then(|v| v.clone())),
             browser_protection_required,
             browser_protection_enabled,
             browser_protection,
@@ -816,7 +822,7 @@ impl TrackerRuntime {
     /// exist. With tracking stopped nothing would show the blocker, so pausing
     /// would release every permanent block until the user manually restarted
     /// enforcement.
-    fn ensure_pause_allowed(&self) -> Result<(), String> {
+    pub(crate) fn ensure_pause_allowed(&self) -> Result<(), String> {
         let store = self
             .store
             .lock()
@@ -824,7 +830,11 @@ impl TrackerRuntime {
         if store.browser_protection_active() {
             return Err("Browser extension protection is active. Remove your website boundaries or wait for the commitment to end before pausing.".into());
         }
+        if !store.blocked_targets.app_ids.is_empty() || !store.blocked_targets.domains.is_empty() {
+            return Err("Active boundaries are being enforced. Protection cannot be paused or quit until those boundaries allow access.".into());
+        }
         if store.permanent_targets.is_empty() {
+            if let Ok(mut error) = self.control_error.lock() { *error = None; }
             Ok(())
         } else {
             Err("Permanent blocks are active. Tracking cannot be paused.".to_string())
@@ -1061,6 +1071,8 @@ pub fn add_permanent_targets(
         // Adding a permanent target never hides an active overlay.
         if empty {
             blocker.hide(&app);
+        } else {
+            state.start(app.clone());
         }
     }
     Ok(PermanentAddResult { added, rejected })
@@ -1097,6 +1109,9 @@ pub fn set_blocked_targets(
     // Nothing left to enforce: make sure a visible blocker is not stranded.
     if normalized.app_ids.is_empty() && normalized.domains.is_empty() {
         blocker.hide(&app);
+    } else {
+        // A pause made before adding rules must not create an enforcement bypass.
+        state.start(app.clone());
     }
     Ok(normalized)
 }
@@ -1520,6 +1535,23 @@ mod tests {
             .expect_err("pausing must be refused while a permanent block exists");
         assert!(error.contains("Permanent blocks are active"));
         runtime.store.lock().unwrap().permanent_targets.clear();
+        assert!(runtime.ensure_pause_allowed().is_ok());
+    }
+    #[test]
+    fn pause_and_quit_gate_survives_restart_until_active_boundaries_are_cleared() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("usage.json");
+        let mut store = TrackingStore::new();
+        store.blocked_targets.app_ids.push("steam.exe".into());
+        persist_store(&path, &store).unwrap();
+        let runtime = TrackerRuntime::load(path).unwrap();
+        assert!(runtime.ensure_pause_allowed().unwrap_err().contains("Active boundaries"));
+        let mut store = runtime.store.lock().unwrap();
+        store.blocked_targets.app_ids.clear();
+        store.blocked_targets.domains.push("example.com".into());
+        drop(store);
+        assert!(runtime.ensure_pause_allowed().is_err());
+        runtime.store.lock().unwrap().blocked_targets.domains.clear();
         assert!(runtime.ensure_pause_allowed().is_ok());
     }
     #[test]
