@@ -25,6 +25,16 @@ Use JDK 17 and an Android SDK with API 36. Run:
 
 APK: `app/build/outputs/apk/debug/app-debug.apk`.
 
+## Remote Android updates
+
+Run `npm run android:distribute` to check, build, and privately send a new APK
+through Firebase App Distribution. On your phone, accept the tester invitation
+and install updates through Firebase App Tester; no ADB connection is needed.
+See [Android distribution setup](docs/ANDROID_DISTRIBUTION.md) for the one-time
+sign-in and project configuration. `npm run android:distribute:check` validates
+local prerequisites without uploading. These builds keep the development signing
+key and receive a separate increasing Android build counter.
+
 ## Auth + auto-sync (Clerk + Convex)
 
 Sign in with the same Clerk account on phone + desktop and everything syncs:

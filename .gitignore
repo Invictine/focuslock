@@ -4,6 +4,9 @@ local.properties
 .env.local
 *.jks
 *.keystore
+firebase-distribution.local.json
+firebase-debug.log
+firebase-debug.*.log
 
 # Gradle / build outputs
 .gradle/

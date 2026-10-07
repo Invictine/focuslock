@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "test": "vitest run",
+    "android:distribute": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/distribute-android.ps1",
+    "android:distribute:check": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/distribute-android.ps1 -ValidateOnly",
     "typecheck": "tsc --noEmit -p convex/tsconfig.json",
     "sync:check-config": "node scripts/check-sync-config.mjs",
     "convex:capacity": "node scripts/estimate-convex-capacity.mjs",

@@ -23,7 +23,12 @@ android {
         applicationId = "com.focuslock.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 2
+        // Private distribution builds get a monotonic install/update counter while
+        // the visible product version continues to follow major.feature.fix.
+        versionCode = providers.gradleProperty("focuslockVersionCode")
+            .map { value ->
+                value.toInt().also { require(it in 2..2_100_000_000) { "focuslockVersionCode must be between 2 and 2100000000" } }
+            }.getOrElse(2)
         versionName = "0.6.15"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
