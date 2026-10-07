@@ -300,4 +300,15 @@ export default defineSchema({
     .index("by_token_hash", ["tokenHash"])
     .index("by_user_created", ["userId", "createdAt"])
     .index("by_user_session", ["userId", "strictSessionId"]),
+
+  // TickTick OAuth credentials are account-scoped and versioned so offline
+  // clients cannot restore a link after another device disconnects it.
+  ticktickConnections: defineTable({
+    userId: v.string(),
+    revision: v.number(),
+    accessToken: v.optional(v.string()),
+    refreshToken: v.optional(v.string()),
+    expiresAt: v.optional(v.number()),
+    userName: v.optional(v.string()),
+  }).index("by_user", ["userId"]),
 });

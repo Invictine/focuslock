@@ -4,11 +4,11 @@ Native Android focus and leisure-time app built with Kotlin, Jetpack Compose, an
 
 ## Release versions
 
-FocusLock currently uses **0.6.15**, following `major.feature.fix`:
+FocusLock currently uses **0.6.16**, following `major.feature.fix`:
 
 - Increase the first number only for an incredibly major release explicitly requested by the user. Do not automatically promote FocusLock to 1.0.
-- Increase the second number for feature additions and reset the third number to zero: `0.6.15` → `0.7.0`.
-- Increase the third number for fixes: `0.6.15` → `0.6.16`.
+- Increase the second number for feature additions and reset the third number to zero: `0.6.16` → `0.7.0`.
+- Increase the third number for fixes: `0.6.16` → `0.6.17`.
 - For a release containing features and fixes, use the feature increment. Bump once per coherent release, not per edit or build.
 
 Keep the release version aligned in the root, Chrome, and desktop package manifests and their root lockfile entries; Chrome's manifest; Android's `versionName`; desktop's Tauri configuration, Cargo package/lock entry, and sync heartbeat `appVersion`. Android's `versionCode` is a separate increasing build counter. This policy concerns FocusLock release metadata; standalone Void keeps its own release version.
@@ -66,6 +66,10 @@ Set `ticktick.clientId` and `ticktick.clientSecret` in the ignored `local.proper
 In FocusLock, open Settings and choose **Connect with TickTick**. Approve in the browser; it will land on `http://127.0.0.1:8080/?code=…` which can't load on the phone. Copy that full address, return to FocusLock, and paste it into **Pasted redirect address or code** → **Complete connection**. If the system routes the loopback URL back to the app automatically, the callback is handled without pasting.
 
 The authorization-code exchange uses HTTP Basic authentication. Each login has a persistent, one-use state with a ten-minute lifetime; unmatched and expired callbacks are rejected. A complete advanced credential pair takes precedence over build configuration. Token responses and credentials are not logged by the exchange.
+
+TickTick connections now belong to your signed-in FocusLock account. After connecting, keep FocusLock online until Account sync succeeds; subsequent sign-ins on an updated Android installation restore the saved access token, refresh token, expiry and account name automatically. Existing device connections are uploaded on the first account sync. Sign-out preserves the link, account switches restore only that account's link, and **Disconnect TickTick** removes it from the account on the next successful sync. Offline devices cannot restore an older link over a newer refresh or disconnect. Provider revocation or an expired token without a usable refresh token still requires reconnecting.
+
+TickTick credentials use a dedicated authenticated backend endpoint and are omitted from shared dashboard and policy snapshots. Advanced OAuth client overrides remain on the device; another installation needs compatible build credentials to refresh an OAuth token. The TickTick integration currently runs on Android.
 
 This is a personal build: BuildConfig credentials are embedded in the APK and can be extracted. A public distribution needs a server-side token exchange. Do not publish this configured APK or local.properties.
 

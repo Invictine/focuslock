@@ -2,6 +2,7 @@ package com.focuslock.app.sync
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import com.focuslock.app.data.model.TickTickConnection
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import okhttp3.ConnectionPool
@@ -231,6 +232,29 @@ class ConvexSyncClient(
             android.util.Log.w("ConvexSync", "$function network error: ${e.message}")
             null
         }
+    }
+
+    /** Credentials are fetched separately from dashboard/policy snapshots. */
+    suspend fun getTickTickConnection(): Pair<Long, TickTickConnection?>? {
+        val raw = post("/api/query", "ticktick:getConnection", JSONObject()) ?: return null
+        val connection = raw.optJSONObject("connection")?.let {
+            TickTickConnection(it.getString("accessToken"), it.optString("refreshToken", ""),
+                it.optLong("expiresAt", 0L), it.optString("userName", ""))
+        }
+        return raw.getLong("revision") to connection
+    }
+
+    suspend fun saveTickTickConnection(revision: Long, connection: TickTickConnection?): Pair<Boolean, Long>? {
+        val payload = connection?.let {
+            JSONObject().put("accessToken", it.accessToken).apply {
+                if (it.refreshToken.isNotBlank()) put("refreshToken", it.refreshToken)
+                if (it.expiresAt > 0L) put("expiresAt", it.expiresAt)
+                if (it.userName.isNotBlank()) put("userName", it.userName)
+            }
+        } ?: JSONObject.NULL
+        val raw = post("/api/mutation", "ticktick:saveConnection", JSONObject()
+            .put("expectedRevision", revision).put("connection", payload)) ?: return null
+        return raw.getBoolean("applied") to raw.getLong("revision")
     }
 
     suspend fun getSnapshot(

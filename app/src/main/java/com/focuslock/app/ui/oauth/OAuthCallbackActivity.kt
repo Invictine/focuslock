@@ -88,6 +88,7 @@ class OAuthCallbackActivity : ComponentActivity() {
     private fun handleAuthorizationCode(code: String, state: String?) {
         lifecycleScope.launch {
             val settings = FocusLockApplication.instance.settingsRepository
+            val accountAtRequest = settings.tickTickConnectionState().accountId
             val alreadyLoggedIn = settings.tickTickTokenFlow.first().isNotBlank()
             if (!settings.consumeTickTickState(state)) {
                 if (alreadyLoggedIn) {
@@ -125,12 +126,18 @@ class OAuthCallbackActivity : ComponentActivity() {
                 val profile = apiClient.fetchUserProfile(tokenResponse.accessToken)
                 val displayName = profile?.nickname ?: profile?.username ?: profile?.email ?: "TickTick User"
 
-                settings.setTickTickAuthSuccess(
+                val saved = settings.setTickTickAuthSuccess(
                     tokenResponse.accessToken,
                     displayName,
                     refreshToken = tokenResponse.refreshToken,
-                    expiresInSec = tokenResponse.expiresIn
+                    expiresInSec = tokenResponse.expiresIn,
+                    expectedAccountId = accountAtRequest
                 )
+                if (!saved) {
+                    Toast.makeText(this@OAuthCallbackActivity, "Account changed. Connect TickTick again.", Toast.LENGTH_LONG).show()
+                    finish()
+                    return@launch
+                }
                 Toast.makeText(
                     this@OAuthCallbackActivity,
                     "Connected successfully as $displayName!",

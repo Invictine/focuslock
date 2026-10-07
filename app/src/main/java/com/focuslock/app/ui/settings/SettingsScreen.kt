@@ -146,10 +146,15 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
                     TickTickOAuthLoopbackServer.awaitCode { code, stateParam ->
                         scope.launch {
                             try {
+                                val accountAtRequest = settings.tickTickConnectionState().accountId
                                 val stateOk = if (stateParam != null) {
                                     settings.consumeTickTickState(stateParam)
                                 } else {
                                     settings.consumePendingTickTickLogin()
+                                }
+                                if (!stateOk) {
+                                    syncMessage = "Login expired or account changed. Connect again."
+                                    return@launch
                                 }
                                 val clientId = TickTickAuthConfig.effectiveClientId(settings)
                                 val clientSecret = TickTickAuthConfig.effectiveClientSecret(settings)
@@ -160,12 +165,17 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
                                     if (tokenResp != null && tokenResp.accessToken.isNotBlank()) {
                                         val profile = api.fetchUserProfile(tokenResp.accessToken)
                                         val name = profile?.nickname ?: profile?.username ?: profile?.email ?: "TickTick User"
-                                        settings.setTickTickAuthSuccess(
+                                        val saved = settings.setTickTickAuthSuccess(
                                             tokenResp.accessToken,
                                             name,
                                             refreshToken = tokenResp.refreshToken,
-                                            expiresInSec = tokenResp.expiresIn ?: 0L
+                                            expiresInSec = tokenResp.expiresIn ?: 0L,
+                                            expectedAccountId = accountAtRequest
                                         )
+                                        if (!saved) {
+                                            syncMessage = "Account changed. Connect TickTick again."
+                                            return@launch
+                                        }
                                         syncMessage = "Connected to TickTick as $name!"
                                         showManualCallback = false
                                         refreshTick++
@@ -196,6 +206,7 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
         isCompletingManual = true
         scope.launch {
             try {
+                val accountAtRequest = settings.tickTickConnectionState().accountId
                 val parsed = TickTickApiClient.parseManualCallback(editManualCallback)
                 if (parsed == null) {
                     syncMessage = "Paste the full redirect address (…?code=…) or the code itself."
@@ -226,12 +237,17 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
                 if (tokenResponse != null && tokenResponse.accessToken.isNotBlank()) {
                     val profile = api.fetchUserProfile(tokenResponse.accessToken)
                     val name = profile?.nickname ?: profile?.username ?: profile?.email ?: "TickTick User"
-                    settings.setTickTickAuthSuccess(
+                    val saved = settings.setTickTickAuthSuccess(
                         tokenResponse.accessToken,
                         name,
                         refreshToken = tokenResponse.refreshToken,
-                        expiresInSec = tokenResponse.expiresIn
+                        expiresInSec = tokenResponse.expiresIn,
+                        expectedAccountId = accountAtRequest
                     )
+                    if (!saved) {
+                        syncMessage = "Account changed. Connect TickTick again."
+                        return@launch
+                    }
                     editManualCallback = ""
                     showManualCallback = false
                     syncMessage = "Connected as $name!"
@@ -725,11 +741,18 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
                                             isVerifying = false
                                             return@launch
                                         }
+                                        val accountAtRequest = settings.tickTickConnectionState().accountId
                                         val valid = TickTickApiClient().verifyToken(token)
                                         if (valid) {
                                             val profile = TickTickApiClient().fetchUserProfile(token)
                                             val name = profile?.nickname ?: profile?.username ?: "TickTick User"
-                                            settings.setTickTickAuthSuccess(token, name)
+                                            val saved = settings.setTickTickAuthSuccess(token, name,
+                                                expectedAccountId = accountAtRequest)
+                                            if (!saved) {
+                                                Toast.makeText(context, "Account changed. Connect TickTick again.", Toast.LENGTH_LONG).show()
+                                                isVerifying = false
+                                                return@launch
+                                            }
                                             Toast.makeText(context, "Connected as $name!", Toast.LENGTH_LONG).show()
                                             showTokenField = false
                                             refreshTick++

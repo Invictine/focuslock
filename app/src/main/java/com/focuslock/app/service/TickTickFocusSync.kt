@@ -26,6 +26,7 @@ class TickTickFocusSync(
     suspend fun sync(): TickTickFocusSyncResult? = mutex.withLock {
         val api = TickTickApiClient()
         val token = TickTickAuthConfig.getValidAccessToken(settings, api) ?: return@withLock null
+        val connection = settings.tickTickConnectionState()
         // Re-read an overlap window: a session may reach TickTick after our last
         // request, or FocusLock may have been offline through midnight. Stable
         // provider IDs make retries safe without a cursor that skips late uploads.
@@ -34,7 +35,10 @@ class TickTickFocusSync(
             .atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli()
         val records = api.fetchFocusSessions(token, completedSince, now)
         // Do not bank a response from a TickTick account disconnected during the request.
-        if (settings.tickTickTokenFlow.first().trim() != token) return@withLock null
+        val latestConnection = settings.tickTickConnectionState()
+        if (latestConnection.accountId != connection.accountId ||
+            latestConnection.generation != connection.generation ||
+            settings.tickTickTokenFlow.first().trim() != token) return@withLock null
         val (count, earned) = bank.recordWorkCreditsDeduped(
             records, settings.workRatioFlow.first(), taskBonusMinutes = 0,
         )

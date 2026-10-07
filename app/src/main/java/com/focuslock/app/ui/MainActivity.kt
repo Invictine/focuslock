@@ -178,8 +178,10 @@ class MainActivity : ComponentActivity() {
                 // clears the persisted offline choice so a later sign-out shows the gate;
                 // Loading/SignedOut never clear it (doing so resurrected the gate on every
                 // cold start of an offline user).
-                LaunchedEffect(authState) {
+                val focusAccountId by authViewModel.accountId.collectAsStateWithLifecycle()
+                LaunchedEffect(authState, focusAccountId) {
                     if (authState == FocusAuthState.SignedIn) {
+                        focusAccountId?.let { app.settingsRepository.bindTickTickAccount(it) }
                         offlineOverride = false
                         app.settingsRepository.setOfflineMode(false)
                         app.syncManager.startAutoSync(authViewModel)
@@ -187,6 +189,9 @@ class MainActivity : ComponentActivity() {
                     } else {
                         app.syncManager.onSignedOut()
                         app.syncManager.stopAutoSync()
+                        if (authState == FocusAuthState.SignedOut) {
+                            app.settingsRepository.bindTickTickAccount("")
+                        }
                     }
                 }
 

@@ -2,6 +2,7 @@ package com.focuslock.app.data.repository
 
 import android.content.Context
 import android.util.Log
+import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
@@ -13,6 +14,8 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.focuslock.app.data.model.BlockedApp
 import com.focuslock.app.data.model.BlockedWebsite
+import com.focuslock.app.data.model.TickTickConnection
+import com.focuslock.app.data.model.TickTickConnectionState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -32,7 +35,11 @@ private val Context.dataStore by preferencesDataStore(name = "focuslock_settings
 class SettingsRepository(
     private val context: Context,
     private val strictAutomationActive: suspend () -> Boolean = { false },
+    settingsStore: DataStore<Preferences>? = null,
 ) {
+
+    private val hasInjectedSettingsStore = settingsStore != null
+    private val store = settingsStore ?: context.dataStore
 
     private val json = Json { ignoreUnknownKeys = true }
     /** Shared, continuously warm mirror for permanent checks on the browser/app hot paths. */
@@ -46,7 +53,7 @@ class SettingsRepository(
     // are skipped with a log so callers keep running until the file recovers.
     private suspend fun readSettingsPrefs(): Preferences =
         try {
-            context.dataStore.data.first()
+            store.data.first()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -57,7 +64,7 @@ class SettingsRepository(
     /** Returns true when the edit committed; false means it was skipped (failure logged). */
     private suspend fun editSettings(transform: (MutablePreferences) -> Unit): Boolean =
         try {
-            context.dataStore.edit(transform)
+            store.edit(transform)
             true
         } catch (e: CancellationException) {
             throw e
@@ -112,6 +119,7 @@ class SettingsRepository(
 
         val OAUTH_STATE = stringPreferencesKey("oauth_state")
         val OAUTH_STARTED_AT = longPreferencesKey("oauth_started_at")
+        val OAUTH_TICKTICK_OWNER = stringPreferencesKey("oauth_ticktick_owner")
 
         // TickTick OAuth & API
         val TICKTICK_ACCESS_TOKEN = stringPreferencesKey("ticktick_access_token")
@@ -120,6 +128,12 @@ class SettingsRepository(
         val TICKTICK_CLIENT_ID = stringPreferencesKey("ticktick_client_id")
         val TICKTICK_CLIENT_SECRET = stringPreferencesKey("ticktick_client_secret")
         val TICKTICK_USER_NAME = stringPreferencesKey("ticktick_user_name")
+        val TICKTICK_OWNER = stringPreferencesKey("ticktick_owner")
+        val TICKTICK_REVISION = longPreferencesKey("ticktick_revision")
+        val TICKTICK_GENERATION = longPreferencesKey("ticktick_generation")
+        val TICKTICK_DIRTY = booleanPreferencesKey("ticktick_dirty")
+        val TICKTICK_ACCOUNT_ARCHIVE = stringPreferencesKey("ticktick_account_archive")
+        val TICKTICK_HAS_BOUND_ACCOUNT = booleanPreferencesKey("ticktick_has_bound_account")
         val TICKTICK_NOTIFICATION_ENABLED = booleanPreferencesKey("ticktick_notification_enabled")
 
         // Daily dashboard goals
@@ -138,7 +152,7 @@ class SettingsRepository(
     }
 
     // Apps Flow
-    val blockedAppsFlow: Flow<List<BlockedApp>> = context.dataStore.data
+    val blockedAppsFlow: Flow<List<BlockedApp>> = store.data
         .map { preferences -> decodeBlockedApps(preferences[PreferencesKeys.BLOCKED_APPS_JSON]) }
         .onEach { apps ->
             _blockedApps.value = apps
@@ -155,7 +169,7 @@ class SettingsRepository(
         }
 
     // Websites Flow
-    val blockedWebsitesFlow: Flow<List<BlockedWebsite>> = context.dataStore.data
+    val blockedWebsitesFlow: Flow<List<BlockedWebsite>> = store.data
         .map { preferences -> decodeBlockedWebsites(preferences[PreferencesKeys.BLOCKED_WEBSITES_JSON]) }
         .onEach { websites ->
             _blockedWebsites.value = websites
@@ -301,22 +315,22 @@ class SettingsRepository(
         emit(fallback)
     }
 
-    val workRatioFlow: Flow<Int> = context.dataStore.data.map { preferences ->
+    val workRatioFlow: Flow<Int> = store.data.map { preferences ->
         preferences[PreferencesKeys.WORK_RATIO] ?: 4
     }.catchInt(4)
 
-    val taskBonusFlow: Flow<Int> = context.dataStore.data.map { preferences ->
+    val taskBonusFlow: Flow<Int> = store.data.map { preferences ->
         preferences[PreferencesKeys.TASK_COMPLETION_BONUS] ?: 5
     }.catchInt(5)
 
     /** Daily focus goal (minutes) driving the dashboard Focus ring. */
-    val focusGoalMinutesFlow: Flow<Int> = context.dataStore.data.map { preferences ->
+    val focusGoalMinutesFlow: Flow<Int> = store.data.map { preferences ->
         (preferences[PreferencesKeys.FOCUS_GOAL_MINUTES] ?: DEFAULT_FOCUS_GOAL_MINUTES)
             .coerceIn(MIN_FOCUS_GOAL_MINUTES, MAX_FOCUS_GOAL_MINUTES)
     }.catchInt(DEFAULT_FOCUS_GOAL_MINUTES)
 
     /** Daily completed-tasks goal driving the dashboard Tasks ring. */
-    val dailyTasksGoalFlow: Flow<Int> = context.dataStore.data.map { preferences ->
+    val dailyTasksGoalFlow: Flow<Int> = store.data.map { preferences ->
         (preferences[PreferencesKeys.DAILY_TASKS_GOAL] ?: DEFAULT_DAILY_TASKS_GOAL)
             .coerceIn(MIN_DAILY_TASKS_GOAL, MAX_DAILY_TASKS_GOAL)
     }.catchInt(DEFAULT_DAILY_TASKS_GOAL)
@@ -325,57 +339,66 @@ class SettingsRepository(
      * Focus-tab home variation key (see FocusHomeStyle). Unknown/blank values are
      * tolerated here; the UI maps anything unrecognized back to Balance.
      */
-    val focusHomeStyleFlow: Flow<String> = context.dataStore.data.map { preferences ->
+    val focusHomeStyleFlow: Flow<String> = store.data.map { preferences ->
         preferences[PreferencesKeys.FOCUS_HOME_STYLE] ?: DEFAULT_FOCUS_HOME_STYLE
     }.catchString(DEFAULT_FOCUS_HOME_STYLE)
 
-    val tickTickTokenFlow: Flow<String> = context.dataStore.data.map { preferences ->
+    val tickTickTokenFlow: Flow<String> = store.data.map { preferences ->
         preferences[PreferencesKeys.TICKTICK_ACCESS_TOKEN] ?: ""
     }.catchString("")
 
-    val tickTickRefreshTokenFlow: Flow<String> = context.dataStore.data.map { preferences ->
+    val tickTickRefreshTokenFlow: Flow<String> = store.data.map { preferences ->
         preferences[PreferencesKeys.TICKTICK_REFRESH_TOKEN] ?: ""
     }.catchString("")
 
     /** Epoch millis when the OAuth access token expires. 0/negative = unknown (personal token or legacy). */
-    val tickTickTokenExpiryFlow: Flow<Long> = context.dataStore.data.map { preferences ->
+    val tickTickTokenExpiryFlow: Flow<Long> = store.data.map { preferences ->
         preferences[PreferencesKeys.TICKTICK_TOKEN_EXPIRES_AT] ?: 0L
     }.catchLong(0L)
 
-    val tickTickClientIdFlow: Flow<String> = context.dataStore.data.map { preferences ->
+    val tickTickClientIdFlow: Flow<String> = store.data.map { preferences ->
         preferences[PreferencesKeys.TICKTICK_CLIENT_ID] ?: ""
     }.catchString("")
 
-    val tickTickClientSecretFlow: Flow<String> = context.dataStore.data.map { preferences ->
+    val tickTickClientSecretFlow: Flow<String> = store.data.map { preferences ->
         preferences[PreferencesKeys.TICKTICK_CLIENT_SECRET] ?: ""
     }.catchString("")
 
-    val tickTickUserNameFlow: Flow<String> = context.dataStore.data.map { preferences ->
+    val tickTickUserNameFlow: Flow<String> = store.data.map { preferences ->
         preferences[PreferencesKeys.TICKTICK_USER_NAME] ?: ""
     }.catchString("")
 
-    val tickTickNotificationEnabledFlow: Flow<Boolean> = context.dataStore.data.map { preferences ->
+    /** Whole-preferences observation so credentials and sync metadata are one snapshot. */
+    val tickTickConnectionChanges: Flow<TickTickConnectionState> = store.data
+        .map(::tickTickStateFromPrefs)
+        .catch { e ->
+            if (e is CancellationException) throw e
+            Log.w("SettingsRepo", "TickTick connection flow failed; using an empty state", e)
+            emit(TickTickConnectionState("", 0L, 0L, false, null))
+        }
+
+    val tickTickNotificationEnabledFlow: Flow<Boolean> = store.data.map { preferences ->
         preferences[PreferencesKeys.TICKTICK_NOTIFICATION_ENABLED] ?: true
     }.catchBoolean(true)
 
     /** Daily "log your focus work" reminder toggle. Off by default. */
-    val dailyReminderEnabledFlow: Flow<Boolean> = context.dataStore.data.map { preferences ->
+    val dailyReminderEnabledFlow: Flow<Boolean> = store.data.map { preferences ->
         preferences[PreferencesKeys.DAILY_REMINDER_ENABLED] ?: false
     }.catchBoolean(false)
 
     /** Local wall-clock minute-of-day (0..1439) for the daily reminder. Defaults to 09:00. */
-    val dailyReminderMinuteOfDayFlow: Flow<Int> = context.dataStore.data.map { preferences ->
+    val dailyReminderMinuteOfDayFlow: Flow<Int> = store.data.map { preferences ->
         (preferences[PreferencesKeys.DAILY_REMINDER_MINUTE_OF_DAY] ?: DEFAULT_DAILY_REMINDER_MINUTE_OF_DAY)
             .coerceIn(0, 1439)
     }.catchInt(DEFAULT_DAILY_REMINDER_MINUTE_OF_DAY)
 
     /** Persisted "Continue in Offline Mode" choice; true skips the sign-in gate on startup. */
-    val offlineModeFlow: Flow<Boolean> = context.dataStore.data.map { preferences ->
+    val offlineModeFlow: Flow<Boolean> = store.data.map { preferences ->
         preferences[PreferencesKeys.OFFLINE_MODE] ?: false
     }.catchBoolean(false)
 
     /** Canonical lockdown flag. Reads `lockdown_mode`, falling back to legacy `strict_mode` pre-migration. */
-    val lockdownModeFlow: Flow<Boolean> = context.dataStore.data
+    val lockdownModeFlow: Flow<Boolean> = store.data
         .map { preferences ->
             if (preferences.contains(PreferencesKeys.LOCKDOWN_MODE)) {
                 preferences[PreferencesKeys.LOCKDOWN_MODE] ?: false
@@ -396,19 +419,19 @@ class SettingsRepository(
             emit(false)
         }
 
-    val lockdownEndsAtFlow: Flow<Long> = context.dataStore.data.map { preferences ->
+    val lockdownEndsAtFlow: Flow<Long> = store.data.map { preferences ->
         preferences[PreferencesKeys.LOCKDOWN_ENDS_AT] ?: 0L
     }
 
-    val lockdownAttemptCountFlow: Flow<Int> = context.dataStore.data.map { preferences ->
+    val lockdownAttemptCountFlow: Flow<Int> = store.data.map { preferences ->
         preferences[PreferencesKeys.LOCKDOWN_ATTEMPT_COUNT] ?: 0
     }
 
-    val lockdownNukeAfterFiveFlow: Flow<Boolean> = context.dataStore.data.map { preferences ->
+    val lockdownNukeAfterFiveFlow: Flow<Boolean> = store.data.map { preferences ->
         preferences[PreferencesKeys.LOCKDOWN_NUKE_AFTER_FIVE] ?: false
     }
 
-    val lockdownPresetFlow: Flow<String> = context.dataStore.data.map { preferences ->
+    val lockdownPresetFlow: Flow<String> = store.data.map { preferences ->
         preferences[PreferencesKeys.LOCKDOWN_PRESET] ?: "Custom"
     }
 
@@ -425,7 +448,7 @@ class SettingsRepository(
     fun isLockdownNow(): Boolean = _lockdownMode.value
 
     /** When true, Boundaries UI must not allow removing blocked apps/websites. No cooldown. */
-    val boundariesLockFlow: Flow<Boolean> = context.dataStore.data.map { preferences ->
+    val boundariesLockFlow: Flow<Boolean> = store.data.map { preferences ->
         preferences[PreferencesKeys.BOUNDARIES_LOCK] ?: false
     }.catchBoolean(false)
 
@@ -459,7 +482,7 @@ class SettingsRepository(
         return lockdown
     }
 
-    val nukeActiveFlow: Flow<Boolean> = context.dataStore.data
+    val nukeActiveFlow: Flow<Boolean> = store.data
         .map { preferences -> preferences[PreferencesKeys.NUKE_ACTIVE] ?: false }
         .onEach { active ->
             _nukeActive.value = active
@@ -473,11 +496,11 @@ class SettingsRepository(
             emit(false)
         }
 
-    val nukeStartedAtFlow: Flow<Long> = context.dataStore.data.map { preferences ->
+    val nukeStartedAtFlow: Flow<Long> = store.data.map { preferences ->
         preferences[PreferencesKeys.NUKE_STARTED_AT] ?: 0L
     }.catchLong(0L)
 
-    val nukeMeditationDoneAtFlow: Flow<Long> = context.dataStore.data.map { preferences ->
+    val nukeMeditationDoneAtFlow: Flow<Long> = store.data.map { preferences ->
         preferences[PreferencesKeys.NUKE_MEDITATION_DONE_AT] ?: 0L
     }.catchLong(0L)
 
@@ -1178,12 +1201,206 @@ class SettingsRepository(
         }
     }
 
+    private fun tickTickStateFromPrefs(preferences: Preferences): TickTickConnectionState {
+        val token = preferences[PreferencesKeys.TICKTICK_ACCESS_TOKEN].orEmpty()
+        val connection = token.takeIf(String::isNotBlank)?.let {
+            TickTickConnection(
+                accessToken = it,
+                refreshToken = preferences[PreferencesKeys.TICKTICK_REFRESH_TOKEN].orEmpty(),
+                expiresAt = preferences[PreferencesKeys.TICKTICK_TOKEN_EXPIRES_AT] ?: 0L,
+                userName = preferences[PreferencesKeys.TICKTICK_USER_NAME].orEmpty(),
+            )
+        }
+        return TickTickConnectionState(
+            accountId = preferences[PreferencesKeys.TICKTICK_OWNER].orEmpty(),
+            revision = preferences[PreferencesKeys.TICKTICK_REVISION] ?: 0L,
+            generation = preferences[PreferencesKeys.TICKTICK_GENERATION] ?: 0L,
+            dirty = preferences[PreferencesKeys.TICKTICK_DIRTY] ?: false,
+            connection = connection,
+        )
+    }
+
+    private fun readTickTickArchive(preferences: Preferences): JSONObject = try {
+        JSONObject(preferences[PreferencesKeys.TICKTICK_ACCOUNT_ARCHIVE] ?: "{}")
+    } catch (e: Exception) {
+        Log.w("SettingsRepo", "TickTick local account archive is unreadable", e)
+        JSONObject()
+    }
+
+    private fun archivedTickTickState(archive: JSONObject, accountId: String): TickTickConnectionState? {
+        val item = archive.optJSONObject(accountId) ?: return null
+        val accessToken = item.optString("accessToken", "")
+        val connection = accessToken.takeIf(String::isNotBlank)?.let {
+            TickTickConnection(
+                accessToken = it,
+                refreshToken = item.optString("refreshToken", ""),
+                expiresAt = item.optLong("expiresAt", 0L),
+                userName = item.optString("userName", ""),
+            )
+        }
+        return TickTickConnectionState(
+            accountId = accountId,
+            revision = item.optLong("revision", 0L).coerceAtLeast(0L),
+            generation = item.optLong("generation", 0L).coerceAtLeast(0L),
+            dirty = item.optBoolean("dirty", false),
+            connection = connection,
+        )
+    }
+
+    private fun archiveTickTickState(preferences: MutablePreferences, state: TickTickConnectionState) {
+        if (state.accountId.isBlank()) return
+        val archive = readTickTickArchive(preferences)
+        val connection = state.connection
+        archive.put(state.accountId, JSONObject().apply {
+            put("revision", state.revision)
+            put("generation", state.generation)
+            put("dirty", state.dirty)
+            put("accessToken", connection?.accessToken.orEmpty())
+            put("refreshToken", connection?.refreshToken.orEmpty())
+            put("expiresAt", connection?.expiresAt ?: 0L)
+            put("userName", connection?.userName.orEmpty())
+        })
+        preferences[PreferencesKeys.TICKTICK_ACCOUNT_ARCHIVE] = archive.toString()
+    }
+
+    private fun writeTickTickConnection(preferences: MutablePreferences, connection: TickTickConnection?) {
+        preferences[PreferencesKeys.TICKTICK_ACCESS_TOKEN] = connection?.accessToken.orEmpty()
+        preferences[PreferencesKeys.TICKTICK_REFRESH_TOKEN] = connection?.refreshToken.orEmpty()
+        preferences[PreferencesKeys.TICKTICK_TOKEN_EXPIRES_AT] = connection?.expiresAt ?: 0L
+        preferences[PreferencesKeys.TICKTICK_USER_NAME] = connection?.userName.orEmpty()
+    }
+
+    private fun writeTickTickStateMetadata(
+        preferences: MutablePreferences,
+        revision: Long,
+        generation: Long,
+        dirty: Boolean,
+    ) {
+        preferences[PreferencesKeys.TICKTICK_REVISION] = revision.coerceAtLeast(0L)
+        preferences[PreferencesKeys.TICKTICK_GENERATION] = generation.coerceAtLeast(0L)
+        preferences[PreferencesKeys.TICKTICK_DIRTY] = dirty
+    }
+
+    /**
+     * Binds TickTick credentials to the signed-in FocusLock account. Switching or
+     * signing out archives the old account locally and restores the target account.
+     * An unowned legacy token is adopted only on the first-ever account bind.
+     */
+    suspend fun bindTickTickAccount(accountId: String) {
+        val target = accountId.trim()
+        editSettings { preferences ->
+            val storedOwner = preferences[PreferencesKeys.TICKTICK_OWNER].orEmpty()
+            val firstBinding = preferences[PreferencesKeys.TICKTICK_HAS_BOUND_ACCOUNT] != true
+            val legacyOwner = if (storedOwner.isBlank() && firstBinding && !hasInjectedSettingsStore) {
+                context.getSharedPreferences("focuslock_device", Context.MODE_PRIVATE)
+                    .getString("sync_account_id", null)?.trim()?.takeIf(String::isNotBlank)
+            } else null
+            val oldOwner = storedOwner.ifBlank { legacyOwner.orEmpty() }
+            if (storedOwner == target && (storedOwner.isNotBlank() || target.isBlank())) return@editSettings
+
+            val activeState = tickTickStateFromPrefs(preferences)
+            val oldState = activeState.copy(
+                accountId = oldOwner,
+                dirty = activeState.dirty ||
+                    (firstBinding && storedOwner.isBlank() &&
+                        preferences[PreferencesKeys.TICKTICK_ACCESS_TOKEN].orEmpty().isNotBlank()),
+            )
+            archiveTickTickState(preferences, oldState)
+            preferences.remove(PreferencesKeys.OAUTH_STATE)
+            preferences.remove(PreferencesKeys.OAUTH_STARTED_AT)
+            preferences.remove(PreferencesKeys.OAUTH_TICKTICK_OWNER)
+
+            val currentGeneration = preferences[PreferencesKeys.TICKTICK_GENERATION] ?: 0L
+            val archive = readTickTickArchive(preferences)
+            val legacyConnection = if (firstBinding && oldOwner.isBlank()) {
+                val token = preferences[PreferencesKeys.TICKTICK_ACCESS_TOKEN].orEmpty()
+                token.takeIf(String::isNotBlank)?.let {
+                    TickTickConnection(
+                        accessToken = it,
+                        refreshToken = preferences[PreferencesKeys.TICKTICK_REFRESH_TOKEN].orEmpty(),
+                        expiresAt = preferences[PreferencesKeys.TICKTICK_TOKEN_EXPIRES_AT] ?: 0L,
+                        userName = preferences[PreferencesKeys.TICKTICK_USER_NAME].orEmpty(),
+                    )
+                }
+            } else null
+
+            preferences[PreferencesKeys.TICKTICK_OWNER] = target
+            preferences[PreferencesKeys.TICKTICK_HAS_BOUND_ACCOUNT] = true
+            if (target.isBlank()) {
+                writeTickTickConnection(preferences, null)
+                writeTickTickStateMetadata(preferences, 0L, currentGeneration + 1L, false)
+                return@editSettings
+            }
+
+            val restored = archivedTickTickState(archive, target)
+            val generation = maxOf(currentGeneration, restored?.generation ?: 0L) + 1L
+            if (restored != null) {
+                writeTickTickConnection(preferences, restored.connection)
+                writeTickTickStateMetadata(preferences, restored.revision, generation, restored.dirty)
+            } else if (legacyConnection != null && (legacyOwner == null || legacyOwner == target)) {
+                writeTickTickConnection(preferences, legacyConnection)
+                writeTickTickStateMetadata(preferences, 0L, generation, true)
+            } else {
+                writeTickTickConnection(preferences, null)
+                writeTickTickStateMetadata(preferences, 0L, generation, false)
+            }
+        }
+    }
+
+    suspend fun tickTickConnectionState(): TickTickConnectionState =
+        tickTickStateFromPrefs(readSettingsPrefs())
+
+    /** Installs a server snapshot only if the local account snapshot has not changed. */
+    suspend fun applyTickTickRemote(
+        expected: TickTickConnectionState,
+        revision: Long,
+        connection: TickTickConnection?,
+    ): Boolean {
+        var matched = false
+        val committed = editSettings { preferences ->
+            val current = tickTickStateFromPrefs(preferences)
+            if (current.accountId != expected.accountId || current.generation != expected.generation ||
+                current.revision != expected.revision
+            ) return@editSettings
+            writeTickTickConnection(preferences, connection)
+            writeTickTickStateMetadata(preferences, revision, current.generation + 1L, false)
+            matched = true
+        }
+        return committed && matched
+    }
+
+    /** Marks a just-uploaded snapshot clean only while its source generation is current. */
+    suspend fun acknowledgeTickTickUpload(
+        expected: TickTickConnectionState,
+        revision: Long,
+    ): Boolean {
+        var matched = false
+        val committed = editSettings { preferences ->
+            val current = tickTickStateFromPrefs(preferences)
+            if (current.accountId != expected.accountId || current.revision != expected.revision) {
+                return@editSettings
+            }
+            // A credential edit during the upload must survive. Advance the server
+            // revision while leaving that newer local generation dirty for retry.
+            val generationChanged = current.generation != expected.generation
+            writeTickTickStateMetadata(
+                preferences,
+                revision,
+                current.generation + 1L,
+                dirty = generationChanged,
+            )
+            matched = true
+        }
+        return committed && matched
+    }
+
     // TickTick OAuth Operations
     suspend fun beginTickTickLogin(): String {
         val state = java.util.UUID.randomUUID().toString()
         editSettings {
             it[PreferencesKeys.OAUTH_STATE] = state
             it[PreferencesKeys.OAUTH_STARTED_AT] = System.currentTimeMillis()
+            it[PreferencesKeys.OAUTH_TICKTICK_OWNER] = it[PreferencesKeys.TICKTICK_OWNER].orEmpty()
         }
         return state
     }
@@ -1194,10 +1411,12 @@ class SettingsRepository(
             valid = com.focuslock.app.service.OAuthStateValidator.isValid(
                 it[PreferencesKeys.OAUTH_STATE], state,
                 it[PreferencesKeys.OAUTH_STARTED_AT] ?: 0L, System.currentTimeMillis()
-            )
+            ) && it[PreferencesKeys.OAUTH_TICKTICK_OWNER].orEmpty() ==
+                it[PreferencesKeys.TICKTICK_OWNER].orEmpty()
             if (valid) {
                 it.remove(PreferencesKeys.OAUTH_STATE)
                 it.remove(PreferencesKeys.OAUTH_STARTED_AT)
+                it.remove(PreferencesKeys.OAUTH_TICKTICK_OWNER)
             }
         }
         return valid
@@ -1214,10 +1433,12 @@ class SettingsRepository(
             val state = it[PreferencesKeys.OAUTH_STATE]
             val startedAt = it[PreferencesKeys.OAUTH_STARTED_AT] ?: 0L
             val now = System.currentTimeMillis()
-            valid = !state.isNullOrBlank() && startedAt > 0 && now - startedAt in 0..600_000L
+            valid = !state.isNullOrBlank() && startedAt > 0 && now - startedAt in 0..600_000L &&
+                it[PreferencesKeys.OAUTH_TICKTICK_OWNER].orEmpty() == it[PreferencesKeys.TICKTICK_OWNER].orEmpty()
             if (valid) {
                 it.remove(PreferencesKeys.OAUTH_STATE)
                 it.remove(PreferencesKeys.OAUTH_STARTED_AT)
+                it.remove(PreferencesKeys.OAUTH_TICKTICK_OWNER)
             }
         }
         return valid
@@ -1234,9 +1455,17 @@ class SettingsRepository(
         token: String,
         userName: String = "",
         refreshToken: String? = null,
-        expiresInSec: Long? = null
-    ) {
-        editSettings { preferences ->
+        expiresInSec: Long? = null,
+        expectedToken: String? = null,
+        expectedAccountId: String? = null,
+    ): Boolean {
+        var matched = false
+        val committed = editSettings { preferences ->
+            val currentToken = preferences[PreferencesKeys.TICKTICK_ACCESS_TOKEN].orEmpty()
+            if (expectedToken != null && currentToken != expectedToken) return@editSettings
+            if (expectedAccountId != null && preferences[PreferencesKeys.TICKTICK_OWNER].orEmpty() != expectedAccountId) {
+                return@editSettings
+            }
             preferences[PreferencesKeys.TICKTICK_ACCESS_TOKEN] = token.trim()
             if (userName.isNotBlank()) {
                 preferences[PreferencesKeys.TICKTICK_USER_NAME] = userName.trim()
@@ -1257,16 +1486,38 @@ class SettingsRepository(
             } else {
                 preferences.remove(PreferencesKeys.TICKTICK_TOKEN_EXPIRES_AT)
             }
+            val generation = preferences[PreferencesKeys.TICKTICK_GENERATION] ?: 0L
+            writeTickTickStateMetadata(
+                preferences,
+                preferences[PreferencesKeys.TICKTICK_REVISION] ?: 0L,
+                generation + 1L,
+                true,
+            )
+            matched = true
         }
+        return committed && matched
     }
 
-    suspend fun clearTickTickAuth() {
-        editSettings { preferences ->
+    suspend fun clearTickTickAuth(expectedAccountId: String? = null): Boolean {
+        var matched = false
+        val committed = editSettings { preferences ->
+            if (expectedAccountId != null && preferences[PreferencesKeys.TICKTICK_OWNER].orEmpty() != expectedAccountId) {
+                return@editSettings
+            }
             preferences[PreferencesKeys.TICKTICK_ACCESS_TOKEN] = ""
             preferences[PreferencesKeys.TICKTICK_USER_NAME] = ""
             preferences.remove(PreferencesKeys.TICKTICK_REFRESH_TOKEN)
             preferences.remove(PreferencesKeys.TICKTICK_TOKEN_EXPIRES_AT)
+            val generation = preferences[PreferencesKeys.TICKTICK_GENERATION] ?: 0L
+            writeTickTickStateMetadata(
+                preferences,
+                preferences[PreferencesKeys.TICKTICK_REVISION] ?: 0L,
+                generation + 1L,
+                true,
+            )
+            matched = true
         }
+        return committed && matched
     }
 
     suspend fun setTickTickNotificationEnabled(enabled: Boolean) {

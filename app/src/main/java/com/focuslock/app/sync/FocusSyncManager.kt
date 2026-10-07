@@ -213,6 +213,11 @@ class FocusSyncManager(
             val dirty = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
             val strictDirty = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
             launch {
+                settings.tickTickConnectionChanges.distinctUntilChanged().collect {
+                    if (it.dirty) strictDirty.tryEmit(Unit)
+                }
+            }
+            launch {
                 settings.blockedWebsitesFlow.drop(1).distinctUntilChanged().collect { dirty.tryEmit(Unit) }
             }
             launch {
@@ -431,6 +436,7 @@ class FocusSyncManager(
 
         _status.value = SyncStatus.Syncing
         try {
+            syncTickTickConnection(convex, auth, accountId)
             val startedAt = System.currentTimeMillis()
             val usageDate = today()
             val lastSuccessfulSync = bank.getLastSyncTimestamp()
@@ -839,6 +845,7 @@ class FocusSyncManager(
      * can read or push it. The cloud snapshot then becomes the source of truth.
      */
     private suspend fun prepareAccount(accountId: String) {
+        settings.bindTickTickAccount(accountId)
         val stored = identityPrefs.getString(KEY_SYNC_ACCOUNT_ID, null)?.trim().orEmpty()
         permanentBlocks.warm()
         // On upgrade, device commitments predate the ownership ledger. Claim
@@ -894,6 +901,32 @@ class FocusSyncManager(
         _knownTargets.value = emptyList()
         knownTargetIndex = emptyMap()
         cachedSnapshot = null
+    }
+
+    /** Pull first, then conditionally upload local changes against the observed revision. */
+    private suspend fun syncTickTickConnection(convex: ConvexSyncClient, auth: AuthViewModel, accountId: String) {
+        val local = settings.tickTickConnectionState()
+        if (local.accountId != accountId) return
+        var remote = convex.getTickTickConnection()
+            ?: throw IllegalStateException("Could not restore the account's TickTick connection")
+        if (currentAccountId != accountId || auth.getAccountId() != accountId) return
+        if (local.dirty && local.revision == remote.first) {
+            val saved = convex.saveTickTickConnection(local.revision, local.connection)
+                ?: throw IllegalStateException("Could not save the account's TickTick connection")
+            if (currentAccountId != accountId || auth.getAccountId() != accountId) return
+            if (saved.first) {
+                settings.acknowledgeTickTickUpload(local, saved.second)
+                return
+            }
+            remote = convex.getTickTickConnection()
+                ?: throw IllegalStateException("Could not reload the account's TickTick connection")
+            if (currentAccountId != accountId || auth.getAccountId() != accountId) return
+        }
+        // A tombstone or newer refresh wins over an offline stale copy. Applying is
+        // conditional so a connect/disconnect during the HTTP request survives.
+        if (local.dirty || local.revision != remote.first || local.connection != remote.second) {
+            settings.applyTickTickRemote(local, remote.first, remote.second)
+        }
     }
 
     private suspend fun exportAccount(accountId: String): String {

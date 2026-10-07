@@ -26,6 +26,8 @@ sealed interface FocusAuthState {
 class AuthViewModel : ViewModel() {
     private val _state = MutableStateFlow<FocusAuthState>(FocusAuthState.Loading)
     val state = _state.asStateFlow()
+    private val _accountId = MutableStateFlow<String?>(null)
+    val accountId = _accountId.asStateFlow()
 
     private val configured: Boolean = try {
         com.focuslock.app.BuildConfig.CLERK_PUBLISHABLE_KEY.trim().startsWith("pk_")
@@ -37,6 +39,7 @@ class AuthViewModel : ViewModel() {
         } else {
             viewModelScope.launch {
                 combine(Clerk.isInitialized, Clerk.userFlow) { initialized, user ->
+                    _accountId.value = user?.id
                     when {
                         !initialized -> FocusAuthState.Loading
                         user != null -> FocusAuthState.SignedIn

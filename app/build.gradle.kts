@@ -29,7 +29,7 @@ android {
             .map { value ->
                 value.toInt().also { require(it in 2..2_100_000_000) { "focuslockVersionCode must be between 2 and 2100000000" } }
             }.getOrElse(2)
-        versionName = "0.6.15"
+        versionName = "0.6.16"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

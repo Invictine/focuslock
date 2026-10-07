@@ -60,6 +60,7 @@ object TickTickAuthConfig {
         // re-checked inside the lock: by the time this caller enters, a racing
         // caller may have already stored a fresh token — just use it.
         return refreshMutex.withLock {
+            val connectionState = settings.tickTickConnectionState()
             val current = settings.tickTickTokenFlow.first().trim()
             if (current.isBlank()) return@withLock null
             if (current.startsWith("tp_")) return@withLock current
@@ -79,12 +80,14 @@ object TickTickAuthConfig {
 
             val refreshed = api.refreshAccessToken(clientId, clientSecret, refreshToken) ?: return@withLock null
             if (refreshed.accessToken.isBlank()) return@withLock null
-            settings.setTickTickAuthSuccess(
+            val saved = settings.setTickTickAuthSuccess(
                 token = refreshed.accessToken,
                 refreshToken = refreshed.refreshToken?.takeIf { it.isNotBlank() } ?: refreshToken,
-                expiresInSec = refreshed.expiresIn
+                expiresInSec = refreshed.expiresIn,
+                expectedToken = current,
+                expectedAccountId = connectionState.accountId
             )
-            refreshed.accessToken
+            if (saved) refreshed.accessToken else null
         }
     }
 }
