@@ -19,6 +19,15 @@ current policy and opens the appropriate blocker, using the target display where
 the platform permits it. This needs the connected accessibility service; it does
 not require a new overlay permission prompt.
 
+The shield shares FocusLock's light/dark and dynamic theme palette. A centered lock,
+headline, supporting text, and rounded action adapt to the available rectangle and
+font size; short regions use a compact action and tiny strips remain opaque and
+touchable. Firebase App Tester (`dev.firebase.appdistribution`, verified from the
+installed APK manifest) remains available as an update recovery path. This exact
+package bypasses app boundaries, Frog, limits, Nuke redirection, popup shielding, and
+notification cancellation; it cannot receive a new permanent block. Other installer,
+browser, and Firebase SDK packages receive no blanket exemption.
+
 Browser popups are read by their individual window identity, including when another
 app has focus. Foreground credit tracking still has one owner. Switching between
 windows of the same app does not restart the spending countdown; changing website
@@ -50,6 +59,20 @@ and disables cloud use. Never run that fixture on personal hardware. Check:
 4. Moving/resizing Chrome moves/resizes the shield, with no rectangle over a higher
    allowed application window. Closing Chrome removes its shield.
 5. Accessibility remains bound with no crashed services or uncaught coroutine error.
+
+`PopupShieldLayoutTest` covers narrow popup layout, 2x text scaling, compact/tiny
+opaque regions, minimum action size, and callback replacement. `FrogEssentialPolicyTest`
+and `AppUpdateAccessPolicyTest` verify App Tester's exact recovery exemption. For a
+native locked-Frog check, `AppTesterRecoveryFixtureTest` is gated by
+`-e appTesterFixture true` and emulator identity; back up and restore its stores.
+
+The styling/update-access follow-up passed 203 JVM tests, nine Android instrumentation
+tests, debug/instrumentation APK assembly, and lint with zero errors in a clean
+checkout. Native light/dark popup shields and Open FocusLock were checked. The real
+App Tester APK remained foreground in fullscreen and freeform during locked PICK_FROG,
+with `update_access_exempt`, no coroutine errors, and no shield over its window;
+Chrome remained shielded separately. App Tester sign-in/download installation and
+Samsung-specific behavior were not exercised.
 
 On 2026-10-07 the integrated checkout passed 201 JVM tests, debug APK assembly, and
 debug lint. The isolated fix passed 191 JVM tests plus debug/instrumentation APK

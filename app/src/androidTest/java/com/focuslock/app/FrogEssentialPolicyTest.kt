@@ -15,6 +15,16 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class FrogEssentialPolicyTest {
+    @Test fun appTesterRemainsAnUpdateRecoveryPathDuringFrog(): Unit = kotlinx.coroutines.runBlocking {
+        val context = ApplicationProvider.getApplicationContext<Context>()
+        val packageName = com.focuslock.app.service.AppUpdateAccessPolicy.APP_TESTER_PACKAGE
+        val locked = frogState(phase = FrogPhase.PICK_FROG, locked = true)
+        assertTrue(FrogAppPolicy.isSafetyEssential(context, packageName))
+        assertFalse(FrogAppPolicy.shouldShowFocusScreen(context, packageName, locked))
+        assertTrue(com.focuslock.app.data.repository.PermanentBlocksRepository.isProtectedPackage(context, packageName))
+        assertFalse(com.focuslock.app.service.BlockedNotificationPolicy.shouldCancel(context, packageName, locked))
+    }
+
     private val context: Context = ApplicationProvider.getApplicationContext()
 
     @Test

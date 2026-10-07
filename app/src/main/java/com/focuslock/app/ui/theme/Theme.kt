@@ -1,9 +1,12 @@
 package com.focuslock.app.ui.theme
 
 import android.os.Build
+import android.content.Context
+import android.content.res.Configuration
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
@@ -54,7 +57,27 @@ fun FocusLockTheme(
     content: @Composable () -> Unit
 ) {
     val context = LocalContext.current
-    val colorScheme = when {
+    val colorScheme = resolveFocusLockColorScheme(context, darkTheme, dynamicColor)
+
+    MaterialTheme(
+        colorScheme = colorScheme,
+        typography = Typography,
+        // Radii mirror design/theme.json{"small":8,"medium":12,"large":20,"extraLarge":24}
+        // so token-driven corners and M3 large surfaces agree. Keep in sync with that file.
+        shapes = Shapes(
+            small = RoundedCornerShape(8.dp), medium = RoundedCornerShape(12.dp),
+            large = RoundedCornerShape(20.dp), extraLarge = RoundedCornerShape(24.dp)
+        ),
+        content = { ProvideMotionPreferences(content) }
+    )
+}
+
+/** The same semantic palette for Compose screens and service-owned native overlays. */
+internal fun resolveFocusLockColorScheme(
+    context: Context,
+    darkTheme: Boolean = (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES,
+    dynamicColor: Boolean = true,
+): ColorScheme = when {
         dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
             if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
         }
@@ -68,17 +91,4 @@ fun FocusLockTheme(
             surfaceContainer = Color(0xFFEEF0E9), surfaceContainerHigh = Color(0xFFE8EAE3),
             surfaceContainerHighest = Color(0xFFE2E4DD), onSurfaceVariant = Color(0xFF444B43)
         )
-    }
-
-    MaterialTheme(
-        colorScheme = colorScheme,
-        typography = Typography,
-        // Radii mirror design/theme.json{"small":8,"medium":12,"large":20,"extraLarge":24}
-        // so token-driven corners and M3 large surfaces agree. Keep in sync with that file.
-        shapes = Shapes(
-            small = RoundedCornerShape(8.dp), medium = RoundedCornerShape(12.dp),
-            large = RoundedCornerShape(20.dp), extraLarge = RoundedCornerShape(24.dp)
-        ),
-        content = { ProvideMotionPreferences(content) }
-    )
 }

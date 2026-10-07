@@ -1,8 +1,6 @@
 package com.focuslock.app.service
 
 import android.content.Context
-import android.graphics.Color
-import android.graphics.Typeface
 import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Looper
@@ -10,8 +8,6 @@ import android.view.Display
 import android.view.Gravity
 import android.view.WindowManager
 import android.widget.FrameLayout
-import android.widget.LinearLayout
-import android.widget.TextView
 
 data class PopupShieldTarget(
     val window: InteractiveAppWindow,
@@ -80,7 +76,7 @@ class PopupBlockShield(context: Context) {
                 ?: return fail("display_unavailable")
             val windowManager = displayContext.getSystemService(Context.WINDOW_SERVICE) as WindowManager
             val params = layoutParams(key.bounds)
-            val view = createShieldView(displayContext, target.onOpen)
+            val view = PopupShieldView(displayContext, target.onOpen)
             windowManager.addView(view, params)
             entries[key] = Entry(windowManager, view, params)
             true
@@ -118,49 +114,8 @@ class PopupBlockShield(context: Context) {
         }
     }
 
-    private fun createShieldView(displayContext: Context, onOpen: () -> Unit): FrameLayout {
-        val root = FrameLayout(displayContext).apply {
-            setBackgroundColor(Color.rgb(15, 20, 29))
-            isClickable = true
-            isFocusable = false
-            setOnTouchListener { _, _ -> true }
-            contentDescription = "Blocked by FocusLock"
-        }
-        val content = LinearLayout(displayContext).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setPadding(dp(displayContext, 6), dp(displayContext, 4), dp(displayContext, 6), dp(displayContext, 4))
-        }
-        val caption = TextView(displayContext).apply {
-            text = "Blocked by FocusLock"
-            setTextColor(Color.WHITE)
-            textSize = 11f
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            maxLines = 2
-            isClickable = false
-        }
-        val button = TextView(displayContext).apply {
-            text = "Open FocusLock"
-            setTextColor(Color.rgb(15, 20, 29))
-            textSize = 11f
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
-            setPadding(dp(displayContext, 6), dp(displayContext, 3), dp(displayContext, 6), dp(displayContext, 3))
-            setBackgroundColor(Color.WHITE)
-            isClickable = true
-            isFocusable = false
-            setOnClickListener { runCatching { onOpen() } }
-        }
-        content.addView(caption, LinearLayout.LayoutParams(-1, 0, 1f))
-        content.addView(button, LinearLayout.LayoutParams(-1, -2))
-        root.addView(content, FrameLayout.LayoutParams(-1, -1))
-        return root
-    }
-
     private fun updateContent(view: FrameLayout, onOpen: () -> Unit) {
-        val button = (view.getChildAt(0) as? LinearLayout)?.getChildAt(1)
-        button?.setOnClickListener { runCatching { onOpen() } }
+        (view as? PopupShieldView)?.updateAction(onOpen)
     }
 
     private fun contextForDisplay(displayId: Int): Context? {
@@ -187,9 +142,6 @@ class PopupBlockShield(context: Context) {
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) setFitInsetsTypes(0)
     }
-
-    private fun dp(context: Context, value: Int): Int =
-        (value * context.resources.displayMetrics.density).toInt()
 
     private fun onMainThread() = Looper.myLooper() == Looper.getMainLooper()
 

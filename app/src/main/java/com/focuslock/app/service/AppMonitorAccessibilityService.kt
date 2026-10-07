@@ -964,6 +964,10 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             val decision = appWindowDecision(packageName, foregroundWindowClass)
             if (currentForegroundPackage != packageName) return@launch
             latestAppCheckDecision = decision
+            if (decision == "update_access_exempt") {
+                stopPolicyActivityRefresh()
+                return@launch
+            }
             if (decision == "location_paused") {
                 BlockerActivity.discardSavedFrogTimer(applicationContext)
                 return@launch
@@ -992,6 +996,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
 
     /** Shared access decision for foreground enforcement and every visible popup. */
     private suspend fun appWindowDecision(packageName: String, windowClass: String?): String {
+        if (AppUpdateAccessPolicy.isUpdateApp(packageName)) return "update_access_exempt"
         val app = FocusLockApplication.instance
         val settings = app.settingsRepository
         try { app.permanentBlocksRepository.warm() } catch (_: Exception) { }
@@ -1728,6 +1733,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     }
 
     private suspend fun triggerBlocker(blockedPackage: String, website: String? = null, reason: String? = null) {
+        if (AppUpdateAccessPolicy.isUpdateApp(blockedPackage)) return
         if (!FocusLockApplication.instance.homeLocationRepository.shouldEnforceNow(permanent = reason == "permanent")) return
         if (currentForegroundPackage != blockedPackage || !isScreenInteractive()) return
         val candidate = redirectCandidate?.takeIf {
@@ -1858,6 +1864,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     }
 
     private suspend fun triggerNuke() {
+        if (AppUpdateAccessPolicy.isUpdateApp(currentForegroundPackage)) return
         if (!FocusLockApplication.instance.homeLocationRepository.shouldEnforceNow()) return
         if (!isScreenInteractive()) return
         Log.w(TAG, "NUKE active — forcing reset screen")
@@ -1868,6 +1875,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
             }
             withContext(Dispatchers.Main) {
+                if (AppUpdateAccessPolicy.isUpdateApp(currentForegroundPackage)) return@withContext
                 startActivity(intent)
             }
         } catch (e: Exception) {

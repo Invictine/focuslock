@@ -23,7 +23,7 @@ object FrogAppPolicy {
         toolsConfirmed: Boolean,
         allowedTools: Set<String>,
         essentials: Set<String>,
-    ): Boolean = locked && packageName !in essentials &&
+    ): Boolean = locked && !AppUpdateAccessPolicy.isUpdateApp(packageName) && packageName !in essentials &&
         (!toolsConfirmed || packageName !in allowedTools)
 
     /** The mandatory, pinned Frog shortcuts (TickTick, Phone, Clock and Messages). */
@@ -95,6 +95,7 @@ object FrogAppPolicy {
 
     /** Safety/recovery exemptions that apply outside Frog as well. */
     fun isSafetyEssential(context: Context, packageName: String): Boolean {
+        if (AppUpdateAccessPolicy.isUpdateApp(packageName)) return true
         if (packageName == context.packageName || packageName in corePackages) return true
         if (isHome(context, packageName)) return true
         if (packageName in defaultLaunchPackages(context).take(4)) return true

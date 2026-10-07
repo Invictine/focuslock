@@ -221,6 +221,7 @@ class PermanentBlocksRepository(private val context: Context) {
     companion object {
         /** Packages which must never be permanently blocked because they are recovery paths. */
         fun isProtectedPackage(context: Context, packageName: String): Boolean {
+            if (com.focuslock.app.service.AppUpdateAccessPolicy.isUpdateApp(packageName)) return true
             val own = context.packageName
             if (packageName == own || packageName == "android" || packageName == "com.android.systemui" ||
                 packageName == "com.android.settings" || packageName == "com.android.dialer" ||
