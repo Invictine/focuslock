@@ -229,10 +229,14 @@ class TickTickApiClient(private val focusHttpClient: OkHttpClient = sharedHttpCl
          *  - entries with a blank or missing `id` are skipped (cannot be identified/picked)
          *  - blank or missing `title` → "TickTick Task"
          *  - blank or missing `projectId` → enclosing `project.id`, else ""
-         *  - missing/unparseable `status` → 0; `status == 2` (completed) entries are skipped
+         *  - missing/unparseable `status` → 0; `status == 2` (completed) entries are
+         *    skipped unless [includeCompleted] is true
          *  - absent `dueDate` / `startDate` / `completedTime` stay null
          */
-        internal fun parseProjectTasksJson(body: String): List<TickTickTaskItem> {
+        internal fun parseProjectTasksJson(
+            body: String,
+            includeCompleted: Boolean = false
+        ): List<TickTickTaskItem> {
             if (body.isBlank()) return emptyList()
             val root = try {
                 parserJson.parseToJsonElement(body) as? JsonObject
@@ -249,7 +253,7 @@ class TickTickApiClient(private val focusHttpClient: OkHttpClient = sharedHttpCl
                 val id = obj.stringField("id")
                 if (id.isNullOrBlank()) continue
                 val status = obj.intField("status") ?: 0
-                if (status == 2) continue // Completed: not open, not actionable.
+                if (status == 2 && !includeCompleted) continue // Completed: not open, not actionable.
                 parsed.add(
                     TickTickTaskItem(
                         id = id,
@@ -471,9 +475,19 @@ class TickTickApiClient(private val focusHttpClient: OkHttpClient = sharedHttpCl
      */
     suspend fun fetchCompletedTaskTitlesToday(
         token: String,
-        bypassCache: Boolean = false
+        bypassCache: Boolean = false,
+        strict: Boolean = false
     ): List<Pair<String, String>> = withContext(Dispatchers.IO) {
-        if (token.isBlank()) return@withContext emptyList()
+        if (token.isBlank()) {
+            if (strict) throw IllegalArgumentException("Blank TickTick token")
+            return@withContext emptyList()
+        }
+        // UI refreshes must not mistake an API failure for a successful empty account.
+        // Strict reads also bypass the display cache so the caller gets a live result.
+        if (strict) {
+            return@withContext fetchCompletedTaskTitlesTodayUncached(token, strict = true)
+                ?: throw IllegalStateException("Unable to load completed TickTick tasks")
+        }
         val cacheKey = completedTodayCacheKey(token)
         if (!bypassCache) {
             val cached = completedTodayCache
@@ -605,7 +619,10 @@ class TickTickApiClient(private val focusHttpClient: OkHttpClient = sharedHttpCl
      * per-project failures are tolerated and yield a valid partial result, exactly as
      * the previous sequential loop did.
      */
-    private suspend fun fetchCompletedTaskTitlesTodayUncached(token: String): List<Pair<String, String>>? =
+    private suspend fun fetchCompletedTaskTitlesTodayUncached(
+        token: String,
+        strict: Boolean = false
+    ): List<Pair<String, String>>? =
         withContext(Dispatchers.IO) {
             try {
                 // Device-TZ day boundary; must agree with CreditBankRepository.startOfTodayMillis().
@@ -617,10 +634,14 @@ class TickTickApiClient(private val focusHttpClient: OkHttpClient = sharedHttpCl
                 }.timeInMillis
                 val now = System.currentTimeMillis()
 
-                val projectBodies = fetchProjectDataBodies(token) ?: return@withContext null
+                val projectBodies = if (strict) {
+                    fetchProjectDataBodiesStrict(token)
+                } else {
+                    fetchProjectDataBodies(token) ?: return@withContext null
+                }
                 val results = mutableListOf<PendingCompletedTask>()
                 for ((project, body) in projectBodies) {
-                    for (task in parseProjectTasksJson(body)) {
+                    for (task in parseProjectTasksJson(body, includeCompleted = true)) {
                         // Guard: dueDate/startDate are never consulted; only completedTime counts.
                         if (task.status != 2) continue
                         val completedMillis = parseCompletedMillis(task.completedTime) ?: continue
@@ -639,6 +660,7 @@ class TickTickApiClient(private val focusHttpClient: OkHttpClient = sharedHttpCl
                 results.sortedByDescending { it.completedMillis }.map { it.title to it.project }
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
+                if (strict) throw e
                 Log.e(TAG, "Error syncing TickTick tasks", e)
                 null
             }

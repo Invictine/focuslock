@@ -35,6 +35,26 @@ class TickTickOpenTasksTest {
     }
 
     @Test
+    fun completedTasksAreIncludedOnlyWhenRequested() {
+        val body = """
+            {
+              "project": { "id": "p1", "name": "Work" },
+              "tasks": [
+                { "id": "open", "projectId": "p1", "title": "Still open", "status": 0 },
+                { "id": "done", "projectId": "p1", "title": "Finished", "status": 2 }
+              ]
+            }
+        """.trimIndent()
+
+        val defaultTasks = TickTickApiClient.parseProjectTasksJson(body)
+        val includingCompleted = TickTickApiClient.parseProjectTasksJson(body, includeCompleted = true)
+
+        assertEquals(listOf("open"), defaultTasks.map { it.id })
+        assertEquals(listOf("open", "done"), includingCompleted.map { it.id })
+        assertEquals(2, includingCompleted.last().status)
+    }
+
+    @Test
     fun malformedEntriesAreSkippedWithoutThrowing() {
         val body = """
             {

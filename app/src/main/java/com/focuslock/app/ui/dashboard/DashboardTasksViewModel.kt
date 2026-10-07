@@ -3,6 +3,7 @@ package com.focuslock.app.ui.dashboard
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.focuslock.app.FocusLockApplication
+import com.focuslock.app.data.model.FrogTask
 import com.focuslock.app.service.TickTickApiClient
 import com.focuslock.app.service.TickTickAuthConfig
 import com.focuslock.app.service.TickTickTaskItem
@@ -27,6 +28,7 @@ internal data class DashboardTasks(
     val completed: Int = 0,
     val nextTitle: String? = null,
     val nextDetail: String? = null,
+    val openTasks: List<TickTickTaskItem> = emptyList(),
 )
 
 /** Activity-owned display data survives tab changes; explicit refresh always reloads. */
@@ -36,6 +38,18 @@ internal class DashboardTasksViewModel(
     },
     private val taskLoader: suspend (token: String, bypassCache: Boolean) -> DashboardTasks =
         ::fetchDashboardTasks,
+    private val openTaskCacheWriter: suspend (List<TickTickTaskItem>) -> Unit = { tasks ->
+        FocusLockApplication.instance.frogRepository.setOpenTaskCache(tasks.map { item ->
+            FrogTask(
+                id = item.id,
+                title = item.title,
+                projectId = item.projectId,
+                projectName = "",
+                dueDate = item.dueDate.orEmpty(),
+                source = FrogTask.SOURCE_TICKTICK,
+            )
+        })
+    },
     private val todayProvider: () -> LocalDate = LocalDate::now,
     private val monotonicNanos: () -> Long = System::nanoTime,
 ) : ViewModel() {
@@ -62,6 +76,7 @@ internal class DashboardTasksViewModel(
                 if (firstToken.isNullOrBlank()) {
                     if (generation != requestGeneration) return@launch
                     clearCachedAccount()
+                    openTaskCacheWriter(emptyList())
                     snapshot.value = DashboardTasks(status = TickTickTasksState.NoAccount)
                     return@launch
                 }
@@ -92,10 +107,39 @@ internal class DashboardTasksViewModel(
                         today = latestDay
                         if (latestToken.isNullOrBlank()) {
                             clearCachedAccount()
+                            openTaskCacheWriter(emptyList())
                             snapshot.value = DashboardTasks(status = TickTickTasksState.NoAccount)
                             return@launch
                         }
                         token = latestToken
+                        forceFetch = false
+                        snapshot.value = DashboardTasks()
+                        continue
+                    }
+
+                    // Keep the Frog picker cache aligned with the same live response as
+                    // the dashboard. Recheck after this suspend point before publishing.
+                    openTaskCacheWriter(result.openTasks)
+                    if (generation != requestGeneration) return@launch
+                    val tokenAfterCacheWrite = tokenProvider()
+                    val dayAfterCacheWrite = todayProvider()
+                    if (generation != requestGeneration) return@launch
+                    if (tokenAfterCacheWrite != token || dayAfterCacheWrite != today) {
+                        today = dayAfterCacheWrite
+                        if (tokenAfterCacheWrite.isNullOrBlank()) {
+                            clearCachedAccount()
+                            // The write may have committed after sign-out began. Remove
+                            // that account's options before the disconnected state settles.
+                            openTaskCacheWriter(emptyList())
+                            snapshot.value = DashboardTasks(status = TickTickTasksState.NoAccount)
+                            return@launch
+                        }
+                        if (tokenAfterCacheWrite != token) {
+                            // Do not leave the previous account's picker options visible
+                            // while the replacement account's fresh list is loading.
+                            openTaskCacheWriter(emptyList())
+                        }
+                        token = tokenAfterCacheWrite
                         forceFetch = false
                         snapshot.value = DashboardTasks()
                         continue
@@ -136,6 +180,23 @@ internal class DashboardTasksViewModel(
         }.also { fetchJob = it }
     }
 
+    suspend fun refreshAndAwait(bypassCache: Boolean = false): DashboardTasks {
+        var awaitedJob = refresh(bypassCache)
+        while (true) {
+            awaitedJob.join()
+            val latestJob = synchronized(this) { fetchJob }
+            if (latestJob !== awaitedJob) {
+                if (latestJob == null) return snapshot.value
+                awaitedJob = latestJob
+                continue
+            }
+            if (awaitedJob.isCancelled) {
+                throw CancellationException("Dashboard task refresh was cancelled")
+            }
+            return snapshot.value
+        }
+    }
+
     private fun clearCachedAccount() {
         cachedToken = null
         cachedDay = null
@@ -151,16 +212,18 @@ private suspend fun fetchDashboardTasks(token: String, bypassCache: Boolean): Da
     val client = TickTickApiClient()
     return coroutineScope {
         val completed = async {
-            client.fetchCompletedTaskTitlesToday(token, bypassCache = bypassCache).size
+            client.fetchCompletedTaskTitlesToday(token, bypassCache = bypassCache, strict = true).size
         }
         val open = async { client.fetchOpenTasksStrict(token) }
-        val next = open.await().minWithOrNull(
+        val openTasks = open.await()
+        val next = openTasks.minWithOrNull(
             compareBy<TickTickTaskItem> { it.dueDate.isNullOrBlank() && it.startDate.isNullOrBlank() }
                 .thenBy { it.dueDate?.takeIf(String::isNotBlank) ?: it.startDate.orEmpty() }
         )
         DashboardTasks(
             status = TickTickTasksState.Loaded,
             completed = completed.await(),
+            openTasks = openTasks,
             nextTitle = next?.title,
             nextDetail = next?.dueDate?.takeIf(String::isNotBlank)?.let { "Due ${formatTaskDate(it)}" }
                 ?: next?.startDate?.takeIf(String::isNotBlank)?.let { "Starts ${formatTaskDate(it)}" }

@@ -436,7 +436,7 @@ class FocusSyncManager(
             val lastSuccessfulSync = bank.getLastSyncTimestamp()
             val summaryDue = forceUsageRefresh || _todayUsageSnapshot.value?.date != usageDate ||
                 startedAt - lastUsageSummaryFetchAt >= usageSummaryIntervalMs()
-            val knownTargetsDue = startedAt - lastKnownTargetsFetchAt >= KNOWN_TARGETS_INTERVAL_MS
+            val knownTargetsDue = forceUsageRefresh || startedAt - lastKnownTargetsFetchAt >= KNOWN_TARGETS_INTERVAL_MS
             val snapshot = convex.getSnapshot(
                 cached = cachedSnapshot,
                 usageDate = if (summaryDue) usageDate else null,
@@ -693,7 +693,7 @@ class FocusSyncManager(
             // Strict / Lockdown mode: independent LWW clock. Current backends return prefs
             // in getSnapshot; older ones fall back to a throttled getDashboard fetch.
             val effectivePrefs = if (snapshot.prefsIncluded) remotePrefs
-                else fetchRemotePrefsThrottled(convex)
+                else fetchRemotePrefsThrottled(convex, bypassCache = forceUsageRefresh)
             if (effectivePrefs?.strictMode == false && (effectivePrefs.strictApprovedAt ?: 0L) > 0L) {
                 settings.applyRemoteApprovedUnlock(
                     expectedEndsAt = effectivePrefs.strictApprovedEndsAt ?: 0L,
@@ -1389,12 +1389,16 @@ class FocusSyncManager(
 
     /**
      * Throttled fallback fetch for user prefs when the snapshot payload does not carry
-     * them. Uses `focus:getDashboard` at most once per [PREFS_FETCH_INTERVAL_MS].
+     * them. Routine sync uses `focus:getDashboard` at most once per
+     * [PREFS_FETCH_INTERVAL_MS]; an explicit refresh bypasses that cache.
      */
-    private suspend fun fetchRemotePrefsThrottled(convex: ConvexSyncClient): ConvexSyncClient.Prefs? {
+    private suspend fun fetchRemotePrefsThrottled(
+        convex: ConvexSyncClient,
+        bypassCache: Boolean = false,
+    ): ConvexSyncClient.Prefs? {
         val now = System.currentTimeMillis()
         val cached = cachedRemotePrefs
-        if (cached != null && now - lastPrefsFetchAt < PREFS_FETCH_INTERVAL_MS) return cached
+        if (!bypassCache && cached != null && now - lastPrefsFetchAt < PREFS_FETCH_INTERVAL_MS) return cached
         val fetched = try {
             convex.getPrefs()
         } catch (e: Exception) {

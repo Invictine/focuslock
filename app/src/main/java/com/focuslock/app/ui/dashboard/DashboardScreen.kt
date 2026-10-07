@@ -556,21 +556,33 @@ fun DashboardScreen(
                     try {
                         UsageStatsRepository.invalidatePackageUsage()
                         permissionTick++
-                        // Wait for real work, without a fixed spinner delay.
-                        startTickTickFetch(bypassCache = true).join()
-                        try {
-                            app.tickTickFocusSync.sync()
-                        } catch (e: kotlinx.coroutines.CancellationException) {
-                            throw e
-                        } catch (_: Exception) {
-                            Toast.makeText(context, "TickTick focus sync failed. Try again in Settings.", Toast.LENGTH_LONG).show()
-                        }
-                        try {
-                            app.syncManager.syncNow(authViewModel, forceUsageRefresh = true)
-                        } catch (e: kotlinx.coroutines.CancellationException) {
-                            throw e
-                        } catch (_: Exception) {
-                            Toast.makeText(context, "Usage sync failed. Try again shortly.", Toast.LENGTH_LONG).show()
+                        // Fetch providers together, then sync the account so newly
+                        // imported focus credits can reach the other devices.
+                        val failures = refreshDashboardSources(
+                            refreshTasks = {
+                                tasksViewModel.refreshAndAwait(bypassCache = true).status.let {
+                                    it == TickTickTasksState.Loaded || it == TickTickTasksState.NoAccount
+                                }
+                            },
+                            refreshFocus = {
+                                if (settings.tickTickTokenFlow.first().isBlank()) true
+                                else app.tickTickFocusSync.sync() != null
+                            },
+                            refreshAccount = {
+                                if (authViewModel.getAccountId() == null) true
+                                else {
+                                    app.syncManager.syncNow(authViewModel, forceUsageRefresh = true)
+                                    app.syncManager.status.value is SyncStatus.Done
+                                }
+                            },
+                        )
+                        usageRefreshTick++
+                        if (failures.isNotEmpty()) {
+                            Toast.makeText(
+                                context,
+                                "Couldn't refresh ${failures.joinToString(", ")}. Try swiping down again.",
+                                Toast.LENGTH_LONG,
+                            ).show()
                         }
                     } finally {
                         isRefreshing = false
