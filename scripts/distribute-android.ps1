@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$ConfigPath,
+    [string]$StatePath,
     [switch]$ValidateOnly,
     [string]$Notes,
     [ValidateRange(2, 2100000000)]
@@ -12,7 +13,8 @@ if (-not $ConfigPath) { $ConfigPath = Join-Path $PSScriptRoot '..\firebase-distr
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $gradleWrapper = Join-Path $repoRoot 'gradlew.bat'
 $packageName = 'com.focuslock.app'
-$statePath = Join-Path $repoRoot 'artifacts\firebase-distribution-state.json'
+$statePath = if ($StatePath) { [IO.Path]::GetFullPath($StatePath) } else { Join-Path $repoRoot 'artifacts\firebase-distribution-state.json' }
+$distributionLock = $null
 
 function Stop-WithError([string]$Message) {
     throw $Message
@@ -158,6 +160,19 @@ if ($registeredPackage -ne $packageName) { Stop-WithError "Configured Firebase a
 # The generated code is monotonic across repeated runs, including runs in the same second.
 $stateDir = Split-Path -Parent $statePath
 if (-not (Test-Path -LiteralPath $stateDir)) { New-Item -ItemType Directory -Path $stateDir -Force | Out-Null }
+# Share the update counter with isolated post-commit builds. Hold this lock
+# through upload so manual and automatic distributions cannot reuse a counter.
+$lockDeadline = [DateTime]::UtcNow.AddHours(1)
+$printedWait = $false
+while ($null -eq $distributionLock) {
+    try {
+        $distributionLock = [IO.File]::Open("$statePath.lock", [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    } catch [IO.IOException] {
+        if ([DateTime]::UtcNow -ge $lockDeadline) { Stop-WithError 'Timed out waiting for another Android distribution to finish.' }
+        if (-not $printedWait) { Write-Output 'Waiting for the active Android distribution to finish.'; $printedWait = $true }
+        Start-Sleep -Seconds 1
+    }
+}
 $epoch = [DateTime]::new(2020, 1, 1, 0, 0, 0, [DateTimeKind]::Utc)
 $calculated = [int64][Math]::Floor(([DateTime]::UtcNow - $epoch).TotalSeconds)
 $last = 1
@@ -204,5 +219,6 @@ try {
     [Console]::Error.WriteLine("ERROR: $($_.Exception.Message)")
     exit 1
 } finally {
+    if ($distributionLock) { $distributionLock.Dispose() }
     Pop-Location
 }

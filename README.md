@@ -27,6 +27,11 @@ APK: `app/build/outputs/apk/debug/app-debug.apk`.
 
 ## Remote Android updates
 
+Automatic distribution can be enabled for each local Git commit with
+`npm run android:distribute:auto:install`. The post-commit hook queues an isolated
+build of the committed source and uploads it in the background after tests and
+lint pass. Builds run one at a time; commits return without waiting for uploads.
+
 Run `npm run android:distribute` to check, build, and privately send a new APK
 through Firebase App Distribution. On your phone, accept the tester invitation
 and install updates through Firebase App Tester; no ADB connection is needed.

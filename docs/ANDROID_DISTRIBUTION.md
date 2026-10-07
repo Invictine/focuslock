@@ -33,3 +33,39 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/distribute-android.p
 ```
 
 Omit `-VersionCode` to use the persisted automatic counter. A supplied code must exceed the last persisted code. `-ValidateOnly` checks the config and local tools without contacting Firebase, building, or uploading.
+
+## Automatic uploads after commits
+
+Enable the local Git post-commit hook once per clone:
+
+```powershell
+npm run android:distribute:auto:install
+```
+
+Each subsequent local commit queues a background Firebase distribution. The hook
+returns promptly and preserves any existing post-commit hook. It does not change
+other Git hooks or the repository's `core.hooksPath` setting.
+
+The worker builds an archive of the exact commit, copies the checkout's ignored
+Firebase configuration and Android local properties, and uses the same Android
+debug signing key. It runs tests, lint, APK checks, and upload in that isolated
+snapshot. Uncommitted edits and builds in the working checkout do not enter the
+queued release. Jobs run one at a time and share the checkout's version counter
+with manual distribution. Repeated requests for a commit with a recorded result
+are deduplicated.
+
+Queue state lives in `focuslock-distribution` under the shared Git directory
+(normally `.git/focuslock-distribution`). `jobs/` holds pending commits,
+`results/<commit>.json` reports `completed` or `failed`, and `logs/<commit>.log`
+contains the build/upload output. A failed check prevents upload and leaves the
+commit intact; fix it and commit again to produce a new release.
+
+To resume queued jobs after restarting the computer or a worker interruption:
+
+```powershell
+npm run android:distribute:auto:run
+```
+
+The checkout needs this Windows machine's JDK, Android SDK, Firebase CLI login,
+local config, and signing key. Commits made elsewhere require the same setup and
+hook installation there. Phone installation still uses Firebase App Tester.

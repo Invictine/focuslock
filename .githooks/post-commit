@@ -1,0 +1,7 @@
+#!/bin/sh
+# FocusLock Android distribution hook
+# Git has already created the commit. Distribution failures are reported in
+# the queue log and must never make the completed commit appear to fail.
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$repo_root/scripts/auto-distribute-android.ps1" -Enqueue
+exit 0
