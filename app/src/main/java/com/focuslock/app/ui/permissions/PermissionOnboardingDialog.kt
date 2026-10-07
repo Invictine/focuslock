@@ -1,5 +1,6 @@
 package com.focuslock.app.ui.permissions
 
+import android.os.Build
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -17,6 +18,8 @@ import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -136,6 +139,29 @@ fun permissionCopy(kind: PermissionKind): PermissionCopy = when (kind) {
     )
 }
 
+@Composable
+fun RestrictedSettingsHelp(kind: PermissionKind, granted: Boolean) {
+    if (granted || Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+        (kind != PermissionKind.ACCESSIBILITY && kind != PermissionKind.NOTIFICATION_LISTENER)) return
+    val context = LocalContext.current
+    var expanded by remember(kind) { mutableStateOf(false) }
+    val permissionName = if (kind == PermissionKind.ACCESSIBILITY) "Accessibility" else "Notification access"
+    TextButton(onClick = { expanded = !expanded }, modifier = Modifier.fillMaxWidth()) {
+        Text(if (expanded) "Hide access help" else "Access restricted?")
+    }
+    if (expanded) {
+        Text(
+            "App Tester or APK installs may require App info > ⋮ > Allow restricted settings. Approve the Android prompt, then return to FocusLock and open $permissionName to enable it. If the menu is missing, try enabling the permission once, dismiss the restricted-settings message, and check App info again. Menu names vary by phone.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.fillMaxWidth()
+        )
+        TextButton(onClick = { PermissionHelper.openAppInfoSettings(context) }, modifier = Modifier.fillMaxWidth()) {
+            Text("Open App info")
+        }
+    }
+}
+
 /**
  * One permission step. The call site (DashboardScreen) passes the current missing list and
  * callbacks; all state here is internal, so the signature stays backwards-compatible.
@@ -216,6 +242,8 @@ fun PermissionOnboardingDialog(
                 modifier = Modifier
                     .fillMaxWidth(0.92f)
                     .widthIn(max = 440.dp)
+                    .heightIn(max = 760.dp)
+                    .verticalScroll(rememberScrollState())
                     // Consume taps on the card so they don't fall through to the dismiss overlay.
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
@@ -279,6 +307,7 @@ fun PermissionOnboardingDialog(
                             )
                         }
                     }
+                    RestrictedSettingsHelp(kind = kind, granted = granted)
                     // ---- Actions ----
 
                     Spacer(modifier = Modifier.height(16.dp))

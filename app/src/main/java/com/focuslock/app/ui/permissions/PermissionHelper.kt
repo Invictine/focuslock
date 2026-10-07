@@ -225,6 +225,10 @@ object PermissionHelper {
         launchFirstResolvable(context, appDetailsIntent(context))
     }
 
+    fun openAppInfoSettings(context: Context) {
+        launchFirstResolvable(context, appDetailsIntent(context))
+    }
+
     fun openDeviceAdminSettings(context: Context) {
         val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
             putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, deviceAdminComponent(context))

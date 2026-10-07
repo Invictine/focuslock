@@ -69,3 +69,9 @@ npm run android:distribute:auto:run
 The checkout needs this Windows machine's JDK, Android SDK, Firebase CLI login,
 local config, and signing key. Commits made elsewhere require the same setup and
 hook installation there. Phone installation still uses Firebase App Tester.
+
+## Android 13+ restricted-settings recovery
+
+Some Android 13+ phones restrict Accessibility or Notification access after App Tester or APK installation. Expand **Access restricted?** in FocusLock, tap **Open App info**, then choose **⋮ > Allow restricted settings** and approve the Android prompt. You can also reach this page through **Settings > Apps > FocusLock**. Return to FocusLock and open the Accessibility or Notification access settings to enable the permission.
+
+If the menu is missing, try enabling the permission once, dismiss the restricted-settings message, and revisit App info. Menu names and availability vary by manufacturer. See [Google's official guidance](https://support.google.com/android/answer/12623953).

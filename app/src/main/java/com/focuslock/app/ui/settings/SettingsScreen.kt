@@ -4,6 +4,7 @@ import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
 import com.focuslock.app.ui.components.rememberDecorativePulse
+import com.focuslock.app.ui.permissions.RestrictedSettingsHelp
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.clickable
@@ -859,6 +860,9 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
                     highlighted = effectiveHighlight == PermissionKind.ACCESSIBILITY,
                     onClick = { PermissionHelper.openAccessibilitySettings(context) }
                 )
+                if (isAccessibilityOn == false) {
+                    RestrictedSettingsHelp(PermissionKind.ACCESSIBILITY, granted = false)
+                }
 
                 HorizontalDivider(color = MaterialTheme.colorScheme.surfaceContainerHighest)
 
@@ -879,6 +883,9 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
                     highlighted = effectiveHighlight == PermissionKind.NOTIFICATION_LISTENER,
                     onClick = { PermissionHelper.openNotificationListenerSettings(context) }
                 )
+                if (isNotifOn == false) {
+                    RestrictedSettingsHelp(PermissionKind.NOTIFICATION_LISTENER, granted = false)
+                }
 
                 HorizontalDivider(color = MaterialTheme.colorScheme.surfaceContainerHighest)
 
