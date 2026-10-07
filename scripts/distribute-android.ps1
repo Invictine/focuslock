@@ -137,7 +137,7 @@ if ($ValidateOnly) {
 }
 
 # Verify the selected Firebase app belongs to this project and is the Android package used by this build.
-$appsRaw = Invoke-Native $firebase.Source @('apps:list', '--project', $config.projectId, '--non-interactive', '--json') 'Firebase app listing' -JsonOutput
+$appsRaw = Invoke-Native $firebase.Source @('apps:list', 'ANDROID', '--project', $config.projectId, '--non-interactive', '--json') 'Firebase app listing' -JsonOutput
 $appsText = $appsRaw -join "`n"
 try {
     $parsed = $appsText | ConvertFrom-Json
@@ -148,6 +148,7 @@ $selected = $appRows | Where-Object { $_.appId -eq $config.appId -or $_.app_id -
 if (-not $selected) { Stop-WithError 'Configured Firebase app ID was not found in the selected Firebase project. Check firebase apps:list.' }
 $registeredPackage = $selected.packageName
 if (-not $registeredPackage) { $registeredPackage = $selected.package_name }
+if (-not $registeredPackage) { $registeredPackage = $selected.namespace }
 if ($registeredPackage -ne $packageName) { Stop-WithError "Configured Firebase app package does not match expected $packageName." }
 
 # The generated code is monotonic across repeated runs, including runs in the same second.
