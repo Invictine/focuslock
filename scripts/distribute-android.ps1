@@ -21,7 +21,11 @@ function Stop-WithError([string]$Message) {
 function Get-SafeOutput([object[]]$Lines) {
     foreach ($line in $Lines) {
         $safe = [string]$line
+        # This is a short-lived bearer download URL. The stable console/tester
+        # links are enough for users and safe to retain in command output.
+        if ($safe -match 'app-binary-downloads/') { continue }
         $safe = $safe -replace '(?i)(access[_ -]?token|refresh[_ -]?token|authorization|password|secret)(\s*[:=]\s*)([^\s,;]+)', '$1$2[redacted]'
+        $safe = $safe -replace '(?i)([?&](?:token|access_token|refresh_token)=)[^&\s]+', '$1[redacted]'
         $safe = $safe -replace '(?i)(Bearer\s+)[A-Za-z0-9._~+/-]+=*', '$1[redacted]'
         if ($safe.Trim()) { $safe }
     }
