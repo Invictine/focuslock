@@ -23,6 +23,7 @@ import {
   type UserPrefs,
 } from "./sync";
 import { accountUsage, acknowledgeSync, enqueueSync, peekSync, unacknowledgedUsage } from "./offlineQueue";
+import { boundaryLeisureSeconds, formatTimeDuration, mergeLiveTodayUsage, timeRatio, todayWorkSeconds } from "./timeMetrics";
 import { accountClient, flushMutations, useDurableMutation, useMutationReplay } from "./durableSync";
 import { claimPermanentTargets, discoverPermanentTargets, permanentTargetsOwnedByAccount } from "./permanentSync";
 import { useFocusAuth } from "./auth";
@@ -250,10 +251,7 @@ function Icon({
 }
 
 function fmt(seconds: number) {
-  const mins = Math.max(0, Math.round(seconds / 60));
-  const h = Math.floor(mins / 60);
-  const m = mins % 60;
-  return h ? `${h}h ${m}m` : `${m}m`;
+  return formatTimeDuration(seconds);
 }
 function formatBank(seconds: number) {
   const total = Math.max(0, Math.floor(seconds || 0));
@@ -1355,6 +1353,17 @@ function DesktopApp() {
     tab === "focus" || tab === "account" ? EMPTY_ARGS : "skip",
   );
   const accountKey = auth.user?.id || null;
+  const [localTime, setLocalTime] = useState<{ account: string; device: string; buckets: UsageBucket[] } | null>(null);
+  useEffect(() => {
+    if (!accountKey || !deviceId || !snapshot) { setLocalTime(null); return; }
+    try {
+      const buckets = accountUsage(accountKey, deviceId, snapshot.usage.map(entry => ({
+        date: entry.date, ...usageTargetFor(entry), targetLabel: entry.browserDomain || entry.appName,
+        trackedSeconds: entry.activeSeconds, updatedAt: Date.now(),
+      })));
+      setLocalTime({ account: accountKey, device: deviceId, buckets });
+    } catch { setLocalTime(null); }
+  }, [accountKey, deviceId, snapshot]);
   const permanentTargetsSignature = useMemo(
     () => [...new Set(permanentTargets.map((target) => targetKeyFor("app", target)).filter(Boolean))]
       .sort()
@@ -1825,6 +1834,14 @@ function DesktopApp() {
           <FocusPage
             dashboard={dashboard}
             usage={usage}
+            todayUsage={todayUsage}
+            todayKey={todayKey}
+            localUsage={localTime?.account === accountKey && localTime.device === deviceId ? localTime.buckets : undefined}
+            localDeviceId={deviceId}
+            syncing={syncing}
+            syncError={syncError}
+            lastSyncAt={lastSyncAt}
+            onSyncNow={syncNow}
             devices={devices || EMPTY_DEVICES}
             historyLoading={history === undefined}
             historyWarning={syncWarning}
@@ -2182,7 +2199,15 @@ const PermalockPage = memo(function PermalockPage({
 // unrelated DesktopApp state updates skip re-rendering the whole page.
 const FocusPage = memo(function FocusPage({
   dashboard,
-  usage,
+  usage: syncedUsage,
+  todayUsage,
+  todayKey,
+  localUsage,
+  localDeviceId,
+  syncing,
+  syncError,
+  lastSyncAt,
+  onSyncNow,
   devices,
   historyLoading,
   historyWarning,
@@ -2196,6 +2221,9 @@ const FocusPage = memo(function FocusPage({
   onUsageRangeChange,
   onMerge,
 }: any) {
+  const usage = useMemo(() => usageRange === "today"
+    ? mergeLiveTodayUsage(syncedUsage, localUsage, localDeviceId, snapshot?.device.name || "Windows PC", todayKey)
+    : syncedUsage, [syncedUsage, localUsage, localDeviceId, snapshot?.device.name, todayKey, usageRange]);
   const state = dashboard?.state || {};
   const records: WorkRecord[] = dashboard?.records || [];
   const total = usage?.totalTrackedSeconds || 0;
@@ -2298,8 +2326,10 @@ const FocusPage = memo(function FocusPage({
     nodes.forEach((node) => observer.observe(node));
     return () => observer.disconnect();
   }, []);
-  const focusMinutes = Math.round((state.totalWorkSecondsToday || 0) / 60);
-  const tasksDone = state.tasksCompletedToday || 0;
+  const focusSeconds = todayWorkSeconds(dashboard?.state, todayKey);
+  const focusMinutes = Math.floor(focusSeconds / 60);
+  const leisureSeconds = boundaryLeisureSeconds(todayUsage, localUsage, localDeviceId, todayKey, dashboard);
+  const tasksDone = state.lastResetDate === todayKey ? state.tasksCompletedToday || 0 : 0;
   const visibleRecords = showAllHistory ? records : records.slice(0, 3);
   function jumpToSection(index: number) {
     const node = [ringsRef.current, graphRef.current, historyRef.current][index];
@@ -2324,9 +2354,35 @@ const FocusPage = memo(function FocusPage({
         devices={devices}
       />
       {DESKTOP_FROG_ENABLED && <FrogCard catalog={frogCatalog} />}
+      <section className="today-time" aria-label="Today's time">
+        <div className="section-heading">
+          <h2>Today's time</h2>
+          <button className="secondary-button" onClick={onSyncNow} disabled={syncing}>
+            {syncing ? "Syncing…" : "Sync now"}
+          </button>
+        </div>
+        <div className="time-pair">
+          <article>
+            <p>Focused work</p><strong>{fmt(focusSeconds)}</strong>
+            <small>Logged work across devices</small>
+          </article>
+          <article>
+            <p>Leisure</p><strong>{leisureSeconds === null ? "—" : fmt(leisureSeconds)}</strong>
+            <small>Time in Boundary apps and websites</small>
+          </article>
+        </div>
+        <p className="time-ratio">{timeRatio(focusSeconds, leisureSeconds, workRatio)}</p>
+        <p className={`time-sync ${syncError ? "error" : ""}`} role="status">
+          {syncing ? "Syncing your time across devices…" : syncError ? `Sync failed · ${syncError}`
+            : todayUsage === undefined ? "Loading synced leisure · Showing available time from this PC"
+            : !todayUsage.deviceTargets ? "Available measurements · Leisure is a minimum until all device measurements are available"
+            : lastSyncAt ? `Synced time + current PC activity · PC uploaded ${new Date(lastSyncAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+            : "Synced time + current PC activity · Sync now to send the latest PC time"}
+        </p>
+      </section>
       <section className="hero-balance">
         <div>
-          <p className="section-label">Time to unwind</p>
+          <p className="section-label">Available leisure credits</p>
           <div className="balance">{fmt(state.creditBalanceSeconds || 0)}</div>
           <p className="balance-caption">
             {(state.creditBalanceSeconds || 0) > 0
@@ -2408,7 +2464,8 @@ const FocusPage = memo(function FocusPage({
           ))}
         </div>
         <p className="usage-range-note">
-          Cumulative time is summed across every device, not just this PC.
+          {usageRange === "today" && usage?.deviceTargets ? "Synced screen time plus current PC activity."
+            : "Synced screen time across devices. Sync now to include the latest PC activity."}
         </p>
         <div className="device-split">
           <DeviceMetric
@@ -2455,16 +2512,12 @@ const FocusPage = memo(function FocusPage({
       </section>
       <section className="stats-row">
         <Metric
-          label="Focused work"
-          value={fmt(state.totalWorkSecondsToday || 0)}
-        />
-        <Metric
           label="Tasks finished"
-          value={String(state.tasksCompletedToday || 0)}
+          value={String(tasksDone)}
         />
         <Metric
-          label="Leisure used"
-          value={fmt(state.totalScrollSecondsToday || 0)}
+          label="Credits spent today"
+          value={fmt(state.lastResetDate === todayKey ? state.totalScrollSecondsToday || 0 : 0)}
         />
       </section>
       <section className="content-section day-graph-section" ref={graphRef}>

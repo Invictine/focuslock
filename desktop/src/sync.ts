@@ -105,6 +105,7 @@ export type UsageDeviceSummary = {
 };
 
 export type UsageSummary = {
+  deviceTargets?: { deviceId: string; targetKind: "app" | "website"; targetKey: string; trackedSeconds: number }[];
   totalTrackedSeconds: number;
   days: UsageDaySummary[];
   devices: UsageDeviceSummary[];

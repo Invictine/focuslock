@@ -82,6 +82,19 @@ object UsageStatsRepository {
         )
     }
 
+    /** Exact local-midnight foreground seconds by package; null means unavailable. */
+    suspend fun getTodayForegroundSeconds(context: Context): Map<String, Long>? = withContext(Dispatchers.IO) {
+        if (!UsageTrackerHelper.hasUsageStatsPermission(context)) return@withContext null
+        val aggregate = try {
+            getSummaryAggregate(context)
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            null
+        } ?: return@withContext null
+        if (!aggregate.available || !aggregate.permissionGranted) return@withContext null
+        aggregate.rawPerPackageMillis.mapValues { (_, usage) -> usage.foregroundMillis.coerceAtLeast(0L) / 1_000L }
+    }
+
     /** Today's foreground time for boundary-selected apps, in raw milliseconds. */
     suspend fun getTodayBoundaryForegroundMillis(
         context: Context,

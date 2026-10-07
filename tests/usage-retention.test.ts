@@ -116,14 +116,17 @@ describe("usage retention", () => {
   it("backfills catalog markers once and reconciles a newer live counter", async () => {
     const t = convexTest(schema, modules);
     const alice = t.withIdentity({ subject: "alice" });
+    // Keep the live-counter fixture inside retention as the calendar advances.
+    const recentDate = new Date().toISOString().slice(0, 10);
+    const previousDate = new Date(Date.now() - 24 * 60 * 60_000).toISOString().slice(0, 10);
     await t.run(async (ctx) => {
       await ctx.db.insert("usageCatalogState", { userId: "alice", ready: false });
       await ctx.db.insert("deviceUsage", {
-        userId: "alice", deviceId: "phone", date: "2026-09-05", targetKind: "app",
+        userId: "alice", deviceId: "phone", date: previousDate, targetKind: "app",
         targetKey: "com.study", targetLabel: "Study", trackedSeconds: 120, updatedAt: 10,
       });
       await ctx.db.insert("deviceUsage", {
-        userId: "alice", deviceId: "phone", date: "2026-09-06", targetKind: "app",
+        userId: "alice", deviceId: "phone", date: recentDate, targetKind: "app",
         targetKey: "com.study", targetLabel: "Study", trackedSeconds: 80, updatedAt: 10,
       });
     });
@@ -137,7 +140,7 @@ describe("usage retention", () => {
 
     await alice.mutation(api.usage.recordUsageBatch, {
       deviceId: "phone",
-      buckets: [{ date: "2026-09-05", targetKind: "app", targetKey: "com.study",
+      buckets: [{ date: previousDate, targetKind: "app", targetKey: "com.study",
         targetLabel: "Study", trackedSeconds: 200, updatedAt: 20 }],
     });
     expect(await t.run((ctx) => ctx.db.query("usageCatalog").collect()))
@@ -148,7 +151,7 @@ describe("usage retention", () => {
     expect(await t.run((ctx) => ctx.db.query("usageCatalog").collect()))
       .toEqual([expect.objectContaining({ trackedSeconds: 280 })]);
     const rows = await t.run((ctx) => ctx.db.query("deviceUsage").collect());
-    expect(rows.find((row) => row.date === "2026-09-05"))
+    expect(rows.find((row) => row.date === previousDate))
       .toMatchObject({ trackedSeconds: 200, catalogedTrackedSeconds: 200 });
   });
 });

@@ -135,19 +135,20 @@ private fun HomeBalanceHero(state: FocusHomeState) {
     val largeText = LocalDensity.current.fontScale > 1.15f
     Card(colors = CardDefaults.cardColors(MaterialTheme.colorScheme.surfaceContainer), shape = MaterialTheme.shapes.extraLarge) {
         Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            Text("Today's balance", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text("Today's time", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 if (maxWidth < 260.dp || largeText) Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MetricValue("Focus", if (state.focusMinutesLoaded) formatHomeDuration(metrics.focusSeconds) else "Loading…", MaterialTheme.colorScheme.primary, Modifier.fillMaxWidth())
-                    MetricValue("Leisure", metrics.leisureSeconds?.let(::formatHomeDuration) ?: "Loading…", MaterialTheme.colorScheme.tertiary, Modifier.fillMaxWidth())
+                    MetricValue("Focus", if (state.focusMinutesLoaded) formatHomeDuration(metrics.focusSeconds) else "Loading…", MaterialTheme.colorScheme.primary, Modifier.fillMaxWidth(), state.focusMetricCaption)
+                    MetricValue("Boundary leisure", leisureDisplay(state, metrics), MaterialTheme.colorScheme.tertiary, Modifier.fillMaxWidth(), state.leisureMetricCaption)
                 } else Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    MetricValue("Focus", if (state.focusMinutesLoaded) formatHomeDuration(metrics.focusSeconds) else "Loading…", MaterialTheme.colorScheme.primary, Modifier.weight(1f))
-                    MetricValue("Leisure", metrics.leisureSeconds?.let(::formatHomeDuration) ?: "Loading…", MaterialTheme.colorScheme.tertiary, Modifier.weight(1f))
+                    MetricValue("Focus", if (state.focusMinutesLoaded) formatHomeDuration(metrics.focusSeconds) else "Loading…", MaterialTheme.colorScheme.primary, Modifier.weight(1f), state.focusMetricCaption)
+                    MetricValue("Boundary leisure", leisureDisplay(state, metrics), MaterialTheme.colorScheme.tertiary, Modifier.weight(1f), state.leisureMetricCaption)
                 }
             }
             val measured = state.focusMinutesLoaded && metrics.leisureSeconds != null
             ProportionBar(if (measured) state.focusMinutes.toFloat() else 0f, if (measured) metrics.leisureSeconds!!.div(60f) else 0f)
             RatioVerdict(metrics.ratio)
+            UsageSyncCaption(state.usageStatusCaption)
         }
     }
 }
@@ -156,19 +157,20 @@ private fun HomeBalanceHero(state: FocusHomeState) {
 private fun HomeMomentumHero(state: FocusHomeState) {
     val metrics = homeMetrics(state)
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Text("Keep the day moving", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-        MomentumRow("Focus", if (state.focusMinutesLoaded) formatHomeDuration(metrics.focusSeconds) else "Loading…", state.focusProgress, MaterialTheme.colorScheme.primary, "goal ${state.focusGoalMinutes}m")
+        Text("Today's time", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        MomentumRow("Focus", if (state.focusMinutesLoaded) formatHomeDuration(metrics.focusSeconds) else "Loading…", state.focusProgress, MaterialTheme.colorScheme.primary, "${state.focusMetricCaption} · goal ${state.focusGoalMinutes}m")
         val leisureProgress = if (metrics.leisureSeconds != null) {
             val focus = metrics.focusSeconds.coerceAtLeast(1L)
             (metrics.leisureSeconds / 60f / (focus / 60f + metrics.leisureSeconds / 60f)).coerceIn(0f, 1f)
         } else 0f
-        MomentumRow("Leisure", metrics.leisureSeconds?.let(::formatHomeDuration) ?: "Loading…", leisureProgress, MaterialTheme.colorScheme.tertiary, "of tracked time")
+        MomentumRow("Boundary leisure", leisureDisplay(state, metrics), leisureProgress, MaterialTheme.colorScheme.tertiary, state.leisureMetricCaption)
         Surface(modifier = Modifier.fillMaxWidth(), color = if (metrics.ratio.behind) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.large) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(metrics.ratio.ratioLabel, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = if (metrics.ratio.behind) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer)
                 RatioVerdict(metrics.ratio, titleColor = if (metrics.ratio.behind) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer, detailColor = if (metrics.ratio.behind) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.onPrimaryContainer, showRatioLabel = false)
             }
         }
+        UsageSyncCaption(state.usageStatusCaption)
     }
 }
 
@@ -176,10 +178,13 @@ private fun HomeMomentumHero(state: FocusHomeState) {
 private fun HomeTodayHero(state: FocusHomeState) {
     val metrics = homeMetrics(state)
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text("A clear record of where your time went.", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("Today's time", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.padding(top = 6.dp))
         LedgerRow("Focus", state.focusMinutesLoaded.then(metrics.focusSeconds)?.let(::formatHomeDuration) ?: "Loading…", MaterialTheme.colorScheme.primary)
-        LedgerRow("Leisure", metrics.leisureSeconds?.let(::formatHomeDuration) ?: "Loading…", MaterialTheme.colorScheme.tertiary)
+        Text(state.focusMetricCaption, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        LedgerRow("Boundary leisure", leisureDisplay(state, metrics), MaterialTheme.colorScheme.tertiary)
+        Text(state.leisureMetricCaption, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        UsageSyncCaption(state.usageStatusCaption)
         Text(metrics.ratio.ratioLabel, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 10.dp))
         Text(metrics.ratio.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Text(metrics.ratio.detail, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -189,10 +194,25 @@ private fun HomeTodayHero(state: FocusHomeState) {
 private fun Boolean.then(value: Long): Long? = if (this) value else null
 
 @Composable
-private fun MetricValue(label: String, value: String, color: androidx.compose.ui.graphics.Color, modifier: Modifier) {
+private fun leisureDisplay(state: FocusHomeState, metrics: HomeMetrics): String =
+    metrics.leisureSeconds?.let(::formatHomeDuration)
+        ?: when {
+            state.usageAccessGranted == false -> "Usage Access needed"
+            state.localUsageDataAvailable == false -> "Unavailable"
+            else -> "Loading…"
+        }
+
+@Composable
+private fun UsageSyncCaption(text: String) {
+    if (text.isNotBlank()) Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+}
+
+@Composable
+private fun MetricValue(label: String, value: String, color: androidx.compose.ui.graphics.Color, modifier: Modifier, caption: String) {
     Column(modifier) {
         Text(label, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Text(value, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = color)
+        Text(caption, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 

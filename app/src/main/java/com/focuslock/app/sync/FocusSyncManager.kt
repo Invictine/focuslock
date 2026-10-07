@@ -134,6 +134,35 @@ class FocusSyncManager(
     private val _groupUsageTodaySeconds = MutableStateFlow<Map<String, Long>>(emptyMap())
     val groupUsageTodaySeconds: StateFlow<Map<String, Long>> = _groupUsageTodaySeconds.asStateFlow()
 
+    /** Latest dated, account-wide target summary for the Focus dashboard. */
+    private val _todayUsageSnapshot = MutableStateFlow<TodayUsageSnapshot?>(null)
+    val todayUsageSnapshot: StateFlow<TodayUsageSnapshot?> = _todayUsageSnapshot.asStateFlow()
+    private val _accountPermanentTargets = MutableStateFlow<AccountPermanentTargetsSnapshot?>(null)
+    val accountPermanentTargets: StateFlow<AccountPermanentTargetsSnapshot?> = _accountPermanentTargets.asStateFlow()
+
+    /** Today's Android app counters after subtracting this account's ownership baseline. */
+    suspend fun getTodayAccountLocalUsageBuckets(expectedAccountId: String? = currentAccountId): List<UsageBucket>? {
+        val accountId = expectedAccountId?.takeIf { it == currentAccountId }
+        if (expectedAccountId != null && accountId == null) return null
+        val secondsByPackage = UsageStatsRepository.getTodayForegroundSeconds(appContext) ?: return null
+        val labels = UsageStatsRepository.getTodaySummary(appContext, maxApps = 100)
+            .topApps.associate { it.packageName to it.appName }
+        if (expectedAccountId != null && currentAccountId != expectedAccountId) return null
+        val date = today()
+        val updatedAt = System.currentTimeMillis()
+        return secondsByPackage.mapNotNull { (packageName, totalSeconds) ->
+            val seconds = (totalSeconds -
+                (accountId?.let { usageBaseline(it, packageName) } ?: 0L)).coerceAtLeast(0L)
+            if (seconds <= 0L) null else UsageBucket(
+                date = date, targetKind = "app", targetKey = packageName,
+                targetLabel = labels[packageName] ?: packageName,
+                trackedSeconds = seconds, updatedAt = updatedAt,
+            )
+        }
+    }
+
+    fun currentDeviceIdForUsage(): String = getOrCreateDeviceId()
+
     /**
      * All-time, all-device target catalog (`usage:listKnownTargets`), refreshed on the
      * four-hour window. The merge picker unions this with its local app/website sources so a
@@ -320,16 +349,23 @@ class FocusSyncManager(
         withTimeoutOrNull(delayMs) { appVisible.first { it != visibleAtStart } }
     }
 
-    fun syncNowAsync(auth: AuthViewModel) = scope.launch { syncNow(auth) }
+    fun syncNowAsync(auth: AuthViewModel, forceUsageRefresh: Boolean = true) =
+        scope.launch { syncNow(auth, forceUsageRefresh) }
 
     /** UI entry point. Never runs concurrently with the auto-sync loop (audit item 8). */
-    suspend fun syncNow(auth: AuthViewModel) {
+    suspend fun syncNow(auth: AuthViewModel, forceUsageRefresh: Boolean = true) {
+        if (forceUsageRefresh) {
+            // Explicit refresh must wait behind an automatic cycle instead of being
+            // discarded, otherwise pull-to-refresh can finish without refreshing usage.
+            syncMutex.withLock { performSync(auth, forceUsageRefresh = true) }
+            return
+        }
         if (!syncMutex.tryLock()) {
             _status.value = SyncStatus.Skipped("Already syncing")
             return
         }
         try {
-            performSync(auth)
+            performSync(auth, forceUsageRefresh)
         } finally {
             syncMutex.unlock()
         }
@@ -351,6 +387,8 @@ class FocusSyncManager(
         lastUsageSummaryFetchAt = 0L
         _groupUsageTodaySeconds.value = emptyMap()
         totalTrackedSecondsToday = 0L
+        _todayUsageSnapshot.value = null
+        _accountPermanentTargets.value = null
         _knownTargets.value = emptyList()
         knownTargetIndex = emptyMap()
         cachedSnapshot = null
@@ -361,7 +399,7 @@ class FocusSyncManager(
      * Runs one full sync cycle. Must only be called while holding [syncMutex].
      * Returns true when no step failed (used to reset the backoff).
      */
-    private suspend fun performSync(auth: AuthViewModel): Boolean {
+    private suspend fun performSync(auth: AuthViewModel, forceUsageRefresh: Boolean = false): Boolean {
         if (!auth.isConfigured()) {
             _status.value = SyncStatus.Skipped("Clerk not configured — offline mode")
             return true
@@ -394,12 +432,14 @@ class FocusSyncManager(
         _status.value = SyncStatus.Syncing
         try {
             val startedAt = System.currentTimeMillis()
+            val usageDate = today()
             val lastSuccessfulSync = bank.getLastSyncTimestamp()
-            val summaryDue = startedAt - lastUsageSummaryFetchAt >= usageSummaryIntervalMs()
+            val summaryDue = forceUsageRefresh || _todayUsageSnapshot.value?.date != usageDate ||
+                startedAt - lastUsageSummaryFetchAt >= usageSummaryIntervalMs()
             val knownTargetsDue = startedAt - lastKnownTargetsFetchAt >= KNOWN_TARGETS_INTERVAL_MS
             val snapshot = convex.getSnapshot(
                 cached = cachedSnapshot,
-                usageDate = if (summaryDue) today() else null,
+                usageDate = if (summaryDue) usageDate else null,
                 includeKnownTargets = knownTargetsDue,
             )
                 ?: throw IllegalStateException("Could not load the server snapshot")
@@ -409,6 +449,7 @@ class FocusSyncManager(
                 _status.value = SyncStatus.Skipped("Account changed — discarding stale sync")
                 return true
             }
+            _accountPermanentTargets.value = AccountPermanentTargetsSnapshot(accountId, snapshot.permanentBlocks)
             cachedSnapshot = snapshot.copy(
                 usageSummary = null,
                 usageSummaryIncluded = false,
@@ -602,7 +643,7 @@ class FocusSyncManager(
                 // the per-group usage cache for the accessibility enforcement fast path.
                 val groupsOutcome = syncTargetGroups(
                     convex, startedAt, snapshot.groupsState,
-                    snapshot.usageSummary, snapshot.usageSummaryIncluded,
+                    snapshot.usageSummary, snapshot.usageSummaryIncluded, forceUsageRefresh, usageDate, accountId,
                 )
                 pulled += groupsOutcome.pulled
                 pushed += groupsOutcome.pushed
@@ -744,7 +785,7 @@ class FocusSyncManager(
             }
 
             try {
-                expiredUsageSkipped += syncDeviceAndUsage(convex, startedAt)
+                expiredUsageSkipped += syncDeviceAndUsage(convex, startedAt, forceUsageRefresh)
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 android.util.Log.w("FocusSyncManager", "device/usage sync step failed", e)
@@ -826,9 +867,8 @@ class FocusSyncManager(
             bank.resetForAccountSwitch()
             settings.resetForAccountSwitch()
             targetGroups.resetForAccountSwitch()
-            // Android UsageStats is device-global. Start the destination account at
-            // the current counter so time observed while another account was active
-            // can never be attributed to this account.
+            // UsageStats is device-global. Capture the current counter so foreground
+            // time observed under the previous account cannot be uploaded to this one.
             captureUsageBaseline(accountId)
         }
         restoreAccount(accountId)
@@ -849,6 +889,8 @@ class FocusSyncManager(
         lastUsageSummaryFetchAt = 0L
         _groupUsageTodaySeconds.value = emptyMap()
         totalTrackedSecondsToday = 0L
+        _todayUsageSnapshot.value = null
+        _accountPermanentTargets.value = null
         _knownTargets.value = emptyList()
         knownTargetIndex = emptyMap()
         cachedSnapshot = null
@@ -877,11 +919,13 @@ class FocusSyncManager(
 
     private suspend fun captureUsageBaseline(accountId: String) {
         try {
-            val summary = UsageStatsRepository.getTodaySummary(appContext, maxApps = 100)
+            val secondsByPackage = UsageStatsRepository.getTodayForegroundSeconds(appContext) ?: return
             val baseline = JSONObject().apply {
-                summary.topApps.forEach { put(it.packageName, it.foregroundMinutes * 60L) }
+                secondsByPackage.forEach { (packageName, seconds) -> put(packageName, seconds) }
             }
-            identityPrefs.edit().putString("usage_baseline_$accountId", baseline.toString()).commit()
+            identityPrefs.edit()
+                .putString("usage_baseline_$accountId", baseline.toString())
+                .commit()
         } catch (e: Exception) {
             android.util.Log.w("FocusSyncManager", "usage baseline capture failed", e)
         }
@@ -1032,6 +1076,9 @@ class FocusSyncManager(
         snapshotGroupsState: GroupsState?,
         snapshotUsageSummary: UsageSummary?,
         snapshotUsageSummaryIncluded: Boolean,
+        forceUsageRefresh: Boolean,
+        usageDate: String,
+        accountId: String,
     ): GroupsSyncOutcome {
         var pulled = 0
         var pushed = 0
@@ -1109,9 +1156,11 @@ class FocusSyncManager(
         }
 
         val summaryNow = System.currentTimeMillis()
-        if (summaryNow - lastUsageSummaryFetchAt >= usageSummaryIntervalMs()) try {
-            val summary = if (snapshotUsageSummaryIncluded) snapshotUsageSummary
-                else convex.getUsageSummary(fromDate = today(), toDate = today())
+        if (forceUsageRefresh || snapshotUsageSummaryIncluded ||
+            _todayUsageSnapshot.value?.date != usageDate ||
+            summaryNow - lastUsageSummaryFetchAt >= usageSummaryIntervalMs()) try {
+                val summary = if (snapshotUsageSummaryIncluded) snapshotUsageSummary
+                else convex.getUsageSummary(fromDate = usageDate, toDate = usageDate)
             if (summary != null) {
                 val byGroup = HashMap<String, Long>(summary.groups.size * 2)
                 for (group in summary.groups) {
@@ -1121,9 +1170,12 @@ class FocusSyncManager(
                     val groupId = target.groupId ?: continue
                     byGroup.putIfAbsent(groupId, target.trackedSeconds.coerceAtLeast(0L))
                 }
-                _groupUsageTodaySeconds.value = byGroup
-                totalTrackedSecondsToday = summary.totalTrackedSeconds.coerceAtLeast(0L)
-                lastUsageSummaryFetchAt = summaryNow
+                if (currentAccountId == accountId) {
+                    _groupUsageTodaySeconds.value = byGroup
+                    totalTrackedSecondsToday = summary.totalTrackedSeconds.coerceAtLeast(0L)
+                    _todayUsageSnapshot.value = TodayUsageSnapshot(usageDate, accountId, summary)
+                    lastUsageSummaryFetchAt = summaryNow
+                }
             } else if (snapshotUsageSummaryIncluded) {
                 // The bundled field was present but malformed/null: keep the previous
                 // enforcement cache and wait for the next scheduled refresh.
@@ -1200,7 +1252,7 @@ class FocusSyncManager(
         lastKnownTargetsFetchAt = now
     }
 
-    private suspend fun syncDeviceAndUsage(convex: ConvexSyncClient, updatedAt: Long): Int {
+    private suspend fun syncDeviceAndUsage(convex: ConvexSyncClient, updatedAt: Long, forceUsageRefresh: Boolean = false): Int {
         val deviceId = getOrCreateDeviceId()
         val usageAccess = UsageTrackerHelper.hasUsageStatsPermission(appContext)
         val trackingStatus = if (usageAccess) "active" else "permission_required"
@@ -1259,7 +1311,7 @@ class FocusSyncManager(
             } else BACKGROUND_TARGET_USAGE_INTERVAL_MS
             bucket.trackedSeconds > previous.optLong(bucket.targetKey, -1L) &&
                 !expiredSkips.has(bucket.targetKey) &&
-                (lastUpload == 0L || updatedAt - lastUpload >= cadence)
+                (forceUsageRefresh || lastUpload == 0L || updatedAt - lastUpload >= cadence)
         }
         var newlyExpired = 0
         if (changed.isNotEmpty()) {

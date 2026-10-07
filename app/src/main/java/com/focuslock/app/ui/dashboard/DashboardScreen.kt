@@ -48,12 +48,17 @@ import com.focuslock.app.ui.components.UiTokens
 import com.focuslock.app.auth.AuthViewModel
 import com.focuslock.app.data.model.TickTickWorkRecord
 import com.focuslock.app.data.model.BlockedApp
+import com.focuslock.app.data.model.BlockedWebsite
 import com.focuslock.app.data.model.WorkRecordSource
 import com.focuslock.app.data.repository.CreditBankRepository
 import com.focuslock.app.data.repository.SettingsRepository
 import com.focuslock.app.service.DailyUsageSummary
 import com.focuslock.app.service.UsageStatsRepository
 import com.focuslock.app.sync.ConvexSyncClient
+import com.focuslock.app.sync.AccountPermanentTargetsSnapshot
+import com.focuslock.app.sync.SyncStatus
+import com.focuslock.app.sync.mergeTodayBoundaryUsageSeconds
+import com.focuslock.app.sync.summaryForAccountDate
 import com.focuslock.app.ui.dashboard.home.FocusHome
 import com.focuslock.app.ui.dashboard.home.FocusHomeCallbacks
 import com.focuslock.app.ui.dashboard.home.FocusHomeState
@@ -125,6 +130,7 @@ fun DashboardScreen(
     // invalidates the subtree that consumes it. Focus minutes derive from this snapshot.
     val liveBalanceState = bank.liveBalanceSeconds.collectAsStateWithLifecycle()
     val historyState = bank.workHistoryFlow.collectAsStateWithLifecycle(initialValue = null)
+    val bankStatsState = bank.statsFlow.collectAsStateWithLifecycle(initialValue = null)
 
     // Goals come from Settings → Daily Goals (focus minutes / TickTick tasks goal).
     val focusGoalMinutes by settings.focusGoalMinutesFlow
@@ -135,7 +141,9 @@ fun DashboardScreen(
     // Null until settings and UsageStats have been read, then zero is a real empty result.
     val boundaryApps by settings.blockedAppsFlow
         .collectAsStateWithLifecycle<List<BlockedApp>?>(initialValue = null)
+    val boundaryWebsites by settings.blockedWebsitesFlow.collectAsStateWithLifecycle(initialValue = emptyList())
     var boundaryLeisureSeconds by remember { mutableStateOf<Long?>(null) }
+    var localUsageAvailable by remember { mutableStateOf<Boolean?>(null) }
     val workRatio by settings.workRatioFlow.collectAsStateWithLifecycle(initialValue = 4)
 
     // Selected Focus-tab front page (see FocusHomeStyle; unknown keys use its safe fallback).
@@ -143,6 +151,28 @@ fun DashboardScreen(
         .collectAsStateWithLifecycle(initialValue = SettingsRepository.DEFAULT_FOCUS_HOME_STYLE)
     val nukeActive by settings.nukeActiveFlow.collectAsStateWithLifecycle(initialValue = false)
     val clerkUser by Clerk.userFlow.collectAsStateWithLifecycle(initialValue = null)
+    val signedInAccountId = clerkUser?.id
+    val todayUsageSnapshot by app.syncManager.todayUsageSnapshot.collectAsStateWithLifecycle()
+    val syncStatus by app.syncManager.status.collectAsStateWithLifecycle()
+    val remotePermanentSnapshot by app.syncManager.accountPermanentTargets.collectAsStateWithLifecycle()
+    val localPermanentTargets by produceState(
+        initialValue = AccountPermanentTargetsSnapshot("", emptyList()),
+        key1 = signedInAccountId,
+        key2 = syncStatus,
+        key3 = todayUsageSnapshot,
+    ) {
+        val accountId = signedInAccountId
+        value = if (accountId.isNullOrBlank()) AccountPermanentTargetsSnapshot("", emptyList())
+        else withContext(Dispatchers.IO) {
+            AccountPermanentTargetsSnapshot(accountId, app.permanentBlocksRepository.remoteTargets(accountId))
+        }
+    }
+    val accountPermanentTargets = remember(remotePermanentSnapshot, localPermanentTargets, signedInAccountId) {
+        buildList {
+            addAll(remotePermanentSnapshot?.takeIf { it.accountId == signedInAccountId }?.targets.orEmpty())
+            addAll(localPermanentTargets.takeIf { it.accountId == signedInAccountId }?.targets.orEmpty())
+        }.distinctBy { "${it.targetKind.lowercase()}:${it.targetKey.lowercase()}" }
+    }
 
     // Merged cross-device groups + today's synced per-group usage. Both come from the
     // already-running sync cycle (no network call on the Focus tab); the home styles
@@ -155,6 +185,9 @@ fun DashboardScreen(
     // Refresh permission + usage state on every resume (fixes stale "Setup needed" pill)
     var permissionTick by remember { mutableIntStateOf(0) }
     var usageRefreshTick by remember { mutableIntStateOf(0) }
+    val todayDateKey = remember(usageRefreshTick, permissionTick) {
+        SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date())
+    }
 
     // Activity-owned task state stays warm across tab changes instead of restarting
     // the network fan-out and showing a loading ring on every Focus return.
@@ -263,15 +296,35 @@ fun DashboardScreen(
     // StayFree-style screen-time summary. Null until the first query resolves so the UI can
     // distinguish "loading" from a real empty result (no zero-state flash).
     var usageSummary by remember { mutableStateOf<DailyUsageSummary?>(null) }
-    LaunchedEffect(permissionTick, usageRefreshTick, boundaryApps) {
+    LaunchedEffect(permissionTick, usageRefreshTick, boundaryApps, boundaryWebsites, todayUsageSnapshot, clerkUser?.id, todayDateKey, accountPermanentTargets) {
         // Tab returns and boundary edits reuse the shared aggregate. Explicit refresh
         // invalidates it; routine reads expire naturally after 30 seconds.
         usageSummary = withContext(Dispatchers.IO) {
             UsageStatsRepository.getTodaySummary(context, maxApps = 8)
         }
-        boundaryLeisureSeconds = boundaryApps?.let { apps ->
-            UsageStatsRepository.getTodayBoundaryForegroundMillis(context, apps)?.div(1_000L)
+        val expectedAccountId = signedInAccountId
+        val localBuckets = app.syncManager.getTodayAccountLocalUsageBuckets(expectedAccountId)
+        localUsageAvailable = localBuckets != null
+        val dayKey = todayDateKey
+        val remoteSummary = todayUsageSnapshot.summaryForAccountDate(expectedAccountId, dayKey)
+        val apps = boundaryApps.orEmpty().filter { it.isBlocked || it.isPermanent }
+        val websites = boundaryWebsites.filter { it.isBlocked || it.isPermanent }
+        val accountPermanentApps = accountPermanentTargets.filter {
+            it.targetKind.equals("android", true) || it.targetKind.equals("app", true) || it.targetKind.equals("windows", true)
         }
+        val accountPermanentSites = accountPermanentTargets.filter { it.targetKind.equals("website", true) }
+        val merged = mergeTodayBoundaryUsageSeconds(
+            localBuckets = localBuckets.orEmpty(),
+            summary = remoteSummary,
+            deviceId = if (expectedAccountId != null) app.syncManager.currentDeviceIdForUsage() else null,
+            boundaryApps = (apps.map { it.packageName } + accountPermanentApps.map { it.targetKey }).toHashSet(),
+            boundaryDomains = if (expectedAccountId != null)
+                (websites.map { it.domain } + accountPermanentSites.map { it.targetKey }).toHashSet()
+                else emptySet(),
+            date = dayKey,
+        )
+        if (clerkUser?.id != expectedAccountId || SimpleDateFormat("yyyy-MM-dd", Locale.US).format(Date()) != dayKey) return@LaunchedEffect
+        boundaryLeisureSeconds = merged
     }
 
     // In-app fallback auto-return: polls the permission the user just opened Settings for
@@ -356,19 +409,17 @@ fun DashboardScreen(
         } catch (_: Exception) { }
     }
 
-    val todayFormatted = remember {
-        val sdf = SimpleDateFormat("EEEE, MMM d", Locale.getDefault())
-        sdf.format(Date())
+    val todayFormatted = remember(todayDateKey) {
+        SimpleDateFormat("EEEE, MMM d", Locale.getDefault()).format(Date())
     }
 
     // ---- Shared home state: built once from the collected values above, then dispatched
     // to the selected variation. Variations render only; all behavior stays hoisted here.
     val historySnapshot = historyState.value
-    val focusMinutes = remember(historySnapshot) {
-        historySnapshot
-            ?.filter { CreditBankRepository.isFocusRecord(it.source, it.durationMinutes) }
-            ?.sumOf { it.durationMinutes } ?: 0
-    }
+    val bankStats = bankStatsState.value
+    val focusMinutes = if (bankStats?.lastResetDate == todayDateKey) bankStats.totalWorkMinutesToday else 0
+    val focusMinutesLoaded = bankStats != null
+    val accountTodayUsage = todayUsageSnapshot.summaryForAccountDate(signedInAccountId, todayDateKey)
     // Top used app today (exclude launcher noise); null while loading / off / empty.
     val topApp = usageSummary?.topApps?.firstOrNull {
         !it.packageName.contains("launcher", ignoreCase = true) &&
@@ -388,6 +439,7 @@ fun DashboardScreen(
         isUsageAccessOn,
         isNotificationOn,
         focusMinutes,
+        focusMinutesLoaded,
         historySnapshot,
         focusGoalMinutes,
         tickTickTasksDone,
@@ -405,6 +457,11 @@ fun DashboardScreen(
         accountName,
         targetGroups,
         groupUsageTodaySeconds,
+        accountPermanentTargets,
+        todayUsageSnapshot,
+        syncStatus,
+        localUsageAvailable,
+        signedInAccountId,
     ) {
         FocusHomeState(
             todayFormatted = todayFormatted,
@@ -417,7 +474,7 @@ fun DashboardScreen(
             },
             isUsageAccessGranted = isUsageAccessOn,
             focusMinutes = focusMinutes,
-            focusMinutesLoaded = historySnapshot != null,
+            focusMinutesLoaded = focusMinutesLoaded,
             focusGoalMinutes = focusGoalMinutes,
             tasksDone = tickTickTasksDone,
             tasksLoaded = tickTickTasksState == TickTickTasksState.Loaded,
@@ -442,7 +499,25 @@ fun DashboardScreen(
                 ?.uppercaseChar()?.toString() ?: "",
             crossDeviceGroups = targetGroups,
             groupUsageTodaySeconds = groupUsageTodaySeconds,
-            totalCrossDeviceSecondsToday = app.syncManager.totalTrackedSecondsToday,
+            totalCrossDeviceSecondsToday = accountTodayUsage?.totalTrackedSeconds ?: 0L,
+            focusMetricCaption = if (clerkUser == null) "Logged work on this phone" else "Logged work across devices",
+            leisureMetricCaption = when {
+                clerkUser == null -> "Boundary apps measured on this phone"
+                accountTodayUsage == null -> "Boundary apps and websites · Waiting for account usage"
+                isUsageAccessOn != true -> "Other devices only · Usage Access needed here"
+                localUsageAvailable == false -> "Phone usage unavailable · showing available account data"
+                accountTodayUsage.deviceTargets == null -> "Available measurements · leisure is a safe minimum"
+                else -> "Boundary apps and websites across devices"
+            },
+            usageStatusCaption = when (syncStatus) {
+                SyncStatus.Syncing -> "Refreshing account usage…"
+                is SyncStatus.Error -> "Account usage sync needs attention"
+                is SyncStatus.Skipped -> "Account usage may be out of date"
+                is SyncStatus.Done -> "Account usage synced"
+                else -> if (clerkUser == null) "Sign in to include other devices" else "Waiting for account usage"
+            },
+            usageAccessGranted = isUsageAccessOn,
+            localUsageDataAvailable = localUsageAvailable,
         )
     }
     val openSettings: () -> Unit = onOpenSettings ?: onNavigatePermissions
@@ -489,6 +564,13 @@ fun DashboardScreen(
                             throw e
                         } catch (_: Exception) {
                             Toast.makeText(context, "TickTick focus sync failed. Try again in Settings.", Toast.LENGTH_LONG).show()
+                        }
+                        try {
+                            app.syncManager.syncNow(authViewModel, forceUsageRefresh = true)
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (_: Exception) {
+                            Toast.makeText(context, "Usage sync failed. Try again shortly.", Toast.LENGTH_LONG).show()
                         }
                     } finally {
                         isRefreshing = false

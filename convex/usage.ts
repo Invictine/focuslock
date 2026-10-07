@@ -234,6 +234,12 @@ export async function loadUsageSummary(ctx: QueryCtx, userId: string,
     const deviceNames = new Map(devices.map((device) => [device.deviceId, device.name]));
     const byDay = new Map<string, { trackedSeconds: number; blockedSeconds: number }>();
     const byDevice = new Map<string, { trackedSeconds: number; blockedSeconds: number }>();
+    const byDeviceTarget = new Map<string, {
+      deviceId: string;
+      targetKind: "app" | "website";
+      targetKey: string;
+      trackedSeconds: number;
+    }>();
     const byTarget = new Map<string, {
       targetKind: "app" | "website";
       targetKey: string;
@@ -257,6 +263,16 @@ export async function loadUsageSummary(ctx: QueryCtx, userId: string,
     }
 
     for (const row of allTargets) {
+      const deviceTargetKey = `${row.deviceId}\u001f${row.targetKind}\u001f${row.targetKey}`;
+      const deviceTarget = byDeviceTarget.get(deviceTargetKey) ?? {
+        deviceId: row.deviceId,
+        targetKind: row.targetKind,
+        targetKey: row.targetKey,
+        trackedSeconds: 0,
+      };
+      deviceTarget.trackedSeconds += row.trackedSeconds;
+      byDeviceTarget.set(deviceTargetKey, deviceTarget);
+
       const device = byDevice.get(row.deviceId) ?? { trackedSeconds: 0, blockedSeconds: 0 };
       device.trackedSeconds += row.trackedSeconds;
       device.blockedSeconds += row.blockedSeconds ?? 0;
@@ -398,6 +414,7 @@ export async function loadUsageSummary(ctx: QueryCtx, userId: string,
           ...totals,
         }))
         .sort((a, b) => b.trackedSeconds - a.trackedSeconds),
+      deviceTargets: [...byDeviceTarget.values()],
       targets: [...byTarget.values()]
         .map((target) => ({ ...target, deviceIds: [...target.deviceIds] }))
         .sort((a, b) => b.trackedSeconds - a.trackedSeconds),

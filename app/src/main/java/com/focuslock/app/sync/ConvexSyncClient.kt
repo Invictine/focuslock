@@ -66,6 +66,14 @@ data class UsageTarget(
     val deviceIds: List<String>,
 )
 
+/** One target's tracked seconds on one device, used to add only the local unsynced delta. */
+data class UsageDeviceTarget(
+    val deviceId: String,
+    val targetKind: String,
+    val targetKey: String,
+    val trackedSeconds: Long,
+)
+
 /** One day bucket from `usage:getUsageSummary` (`days[]`). */
 data class UsageDay(
     val date: String,
@@ -164,6 +172,8 @@ data class UsageSummary(
     val days: List<UsageDay> = emptyList(),
     val groupedTargets: List<GroupedTarget> = emptyList(),
     val groups: List<TargetGroup> = emptyList(),
+    /** Optional on older deployments. */
+    val deviceTargets: List<UsageDeviceTarget>? = null,
 )
 
 /** A registered installation from `devices:listDevices`. */
@@ -807,6 +817,22 @@ class ConvexSyncClient(
                 )
             }
         }
+        val deviceTargets = root.optJSONArray("deviceTargets")?.let { arr ->
+            buildList {
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val deviceId = o.optString("deviceId").trim()
+                    val targetKey = o.optString("targetKey").trim()
+                    if (deviceId.isEmpty() || targetKey.isEmpty()) continue
+                    add(UsageDeviceTarget(
+                        deviceId = deviceId,
+                        targetKind = o.optString("targetKind").trim().ifEmpty { "app" },
+                        targetKey = targetKey,
+                        trackedSeconds = o.optLong("trackedSeconds", 0L).coerceAtLeast(0L),
+                    ))
+                }
+            }
+        }
         val reportedTotal = root.optLong("totalTrackedSeconds", -1L)
         return UsageSummary(
             totalTrackedSeconds = if (reportedTotal >= 0L) reportedTotal else devices.sumOf { it.trackedSeconds },
@@ -815,6 +841,7 @@ class ConvexSyncClient(
             days = days,
             groupedTargets = groupedTargets,
             groups = parseGroups(root.optJSONArray("groups")),
+            deviceTargets = deviceTargets,
         )
     }
 
