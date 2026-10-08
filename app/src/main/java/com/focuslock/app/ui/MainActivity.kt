@@ -419,7 +419,6 @@ class MainActivity : ComponentActivity() {
                                 )
                             }
                         }
-                        }
                     }
                 ) { innerPadding ->
                     Box(

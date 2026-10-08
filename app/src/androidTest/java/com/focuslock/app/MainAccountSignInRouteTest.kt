@@ -35,7 +35,7 @@ class MainAccountSignInRouteTest {
             tour.edit().putBoolean("paused_v2", true).commit()
             runBlocking { settings.setOfflineMode(true) }
             scenario = ActivityScenario.launch(MainActivity::class.java)
-            compose.onNodeWithContentDescription("Account").assertIsDisplayed().performClick()
+            compose.onNodeWithContentDescription("Profile").assertIsDisplayed().performClick()
             compose.onNodeWithText("Use email instead").assertIsDisplayed().performClick()
             compose.onNodeWithText("Continue with email").assertIsDisplayed()
             compose.onNodeWithText("Email").assertIsDisplayed()

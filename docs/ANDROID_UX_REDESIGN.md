@@ -24,11 +24,11 @@ This change affects Android Compose screens only. It does not modify the Windows
 
 Verified on October 8, 2026 using the standard Gradle build:
 
-- `testDebugUnitTest`: 211 tests, zero failures.
+- `testDebugUnitTest`: 216 tests, zero failures.
 - `assembleDebug`, `assembleDebugAndroidTest`, and `lintDebug`: passed.
-- 16 emulator UI tests passed across Android navigation, Boundaries, Frog settings, main navigation, product onboarding, the startup auth gate, and the in-app account sign-in surface.
+- 19 emulator UI tests passed across Android navigation, Boundaries, Frog settings, main navigation, product onboarding, the startup auth gate, and the native account sign-in surface and production Profile-to-sign-in route.
 - Two additional header/navigation checks passed in dark mode at 150% system text size. Light and dark screenshots were reviewed; permanent/location and Strict navigation were also exercised at 150% text size.
 
 The validation pass covers Settings return destinations, category restoration after Activity recreation, category Back navigation, Boundaries-to-Strict and permanent/location routes, the routine-to-essential-apps route, and timer preservation across Today and Activity. Google authentication, TickTick OAuth, cross-device sync, and physical-phone enforcement were not live-tested in this redesign task.
 
-The branch was rebased on `origin/master` at `45fa0b0`, preserving the latest onboarding fixes and the broken Android in-app updater removal as separate changes.
+The branch was rebased on `origin/master` at `45e0c1e`, preserving the latest onboarding fixes, native Google and app-owned sign-in flow, and broken Android in-app updater removal. The redesign remains a separate branch.
