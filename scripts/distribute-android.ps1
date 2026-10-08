@@ -15,6 +15,7 @@ $gradleWrapper = Join-Path $repoRoot 'gradlew.bat'
 $packageName = 'com.focuslock.app'
 $statePath = if ($StatePath) { [IO.Path]::GetFullPath($StatePath) } else { Join-Path $repoRoot 'artifacts\firebase-distribution-state.json' }
 $distributionLock = $null
+. (Join-Path $PSScriptRoot 'android-update-config.ps1')
 
 function Stop-WithError([string]$Message) {
     throw $Message
@@ -118,6 +119,8 @@ function Validate-DistributionConfig([string]$Path) {
 Push-Location $repoRoot
 try {
 $config = Validate-DistributionConfig $ConfigPath
+$localProperties = Join-Path $repoRoot 'local.properties'
+Assert-AndroidUpdateConfig $localProperties $config | Out-Null
 if (-not (Test-Path -LiteralPath $gradleWrapper -PathType Leaf)) { Stop-WithError 'Gradle wrapper was not found in the project root.' }
 if (-not (Get-Command java -ErrorAction SilentlyContinue)) { Stop-WithError 'Java was not found on PATH. Install JDK 17 and open a new terminal.' }
 $previousPreference = $ErrorActionPreference

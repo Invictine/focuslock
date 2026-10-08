@@ -67,6 +67,7 @@ import com.focuslock.app.service.TickTickAuthConfig
 import com.focuslock.app.service.TickTickOAuthLoopbackServer
 import com.focuslock.app.ui.permissions.PermissionHelper
 import com.focuslock.app.ui.permissions.PermissionKind
+import com.focuslock.app.updates.PrivateBuildUpdateCard
 import com.focuslock.app.work.DailyReminderScheduler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -393,6 +394,8 @@ fun SettingsScreen(
             .padding(top = 16.dp, bottom = 32.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        PrivateBuildUpdateCard()
+
         Card(
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
             shape = MaterialTheme.shapes.large,

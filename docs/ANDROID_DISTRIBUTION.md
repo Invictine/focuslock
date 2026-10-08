@@ -15,7 +15,17 @@ FocusLock distributes the existing **debug** Android build through Firebase App 
 3. Copy `firebase-distribution.example.json` to `firebase-distribution.local.json` in the repository root. Fill in `projectId`, `appId`, and at least one of `testers` (email addresses) or `groups` (Firebase tester group aliases). Keep this local file private; it is ignored by Git.
 4. Make sure the same Android debug signing key is used for every build. Firebase testers should install the App Tester app or accept Firebase's invitation, then use the release link they receive.
 
-Firebase authentication here is handled by the local Firebase CLI account. The app does not need a Firebase runtime SDK or committed service-account credentials for distribution.
+Upload authentication uses the local Firebase CLI account. Private debug builds also include the Firebase App Distribution Android SDK for in-app update alerts. Public release and performance builds do not include its self-update implementation.
+
+For private builds, add `firebase.applicationId`, `firebase.apiKey`, `firebase.projectId`, and `firebase.senderId` from the registered Android app's Firebase configuration to the ignored `local.properties`. Enable the **Firebase App Testers API** (`firebaseapptesters.googleapis.com`) for that project. The distributor checks that the local update configuration matches its selected project/app before building; keep CLI tokens and service-account credentials out of the APK.
+
+## In-app update alerts
+
+Install the first build containing the updater through App Tester. On opening FocusLock, enable update alerts and sign in with the Google account invited to test the app. This is separate from FocusLock's Clerk account and App Tester's own sign-in. Later launches and returns to FocusLock check for newer builds, with a one-minute cooldown to avoid duplicate dialogs after sign-in, rotation, or the installer.
+
+**Settings → Private build updates** shows the installed version/build counter and update status. **Check for updates** retries immediately after a failed or cancelled check; it cannot start a second concurrent download. **Open App Tester** provides recovery if sign-in, network access, or installation fails. Android still requires confirmation to install the downloaded APK; this is not silent installation.
+
+Firebase initializes during application startup, before activity lifecycle events, so the SDK can find the foreground screen on the first launch. Progress, cancellation, and errors appear in Settings without exposing authentication or download URLs. See [Firebase's in-app alert setup](https://firebase.google.com/docs/app-distribution/set-up-alerts?platform=android).
 
 ## Validate and distribute
 

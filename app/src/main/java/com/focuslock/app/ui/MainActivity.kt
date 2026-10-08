@@ -99,6 +99,11 @@ enum class NavigationItem(
 
 class MainActivity : ComponentActivity() {
 
+    override fun onResume() {
+        super.onResume()
+        com.focuslock.app.updates.PrivateBuildUpdater.onResume(this)
+    }
+
     private var monitorServiceStarted = false
 
     /** Last time [startMonitorServiceIfPermitted] ran the binder permission sweep (main thread only). */
