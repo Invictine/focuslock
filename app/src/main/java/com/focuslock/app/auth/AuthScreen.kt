@@ -23,16 +23,14 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import com.clerk.api.Clerk
-import com.clerk.api.auth.HostedAuthMode
-import com.clerk.api.network.serialization.onFailure
-import com.clerk.api.network.serialization.onSuccess
 import com.clerk.ui.auth.AuthView
 import com.clerk.ui.userbutton.UserButton
 import com.focuslock.app.ui.components.IconBadge
 import com.focuslock.app.ui.components.StaggeredFadeSlide
 import com.focuslock.app.ui.components.rememberDecorativePulse
-import kotlinx.coroutines.launch
 
 @Composable
 fun FocusAuthGate(
@@ -51,10 +49,7 @@ fun FocusAuthGate(
 
 @Composable
 fun SignInScreen(onContinueOffline: () -> Unit) {
-    val scope = rememberCoroutineScope()
     var showInAppAuth by remember { mutableStateOf(false) }
-    var signInLoading by remember { mutableStateOf(false) }
-    var authError by remember { mutableStateOf<String?>(null) }
 
     // Single one-shot entrance flag; every element stages itself off this via StaggeredEnter.
     var entered by remember { mutableStateOf(false) }
@@ -101,40 +96,15 @@ fun SignInScreen(onContinueOffline: () -> Unit) {
                 SignInHeadline(visible = entered)
                 Spacer(Modifier.height(20.dp))
 
-                authError?.let { message ->
-                    Surface(
-                        color = MaterialTheme.colorScheme.errorContainer,
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(
-                                Icons.Rounded.Warning,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onErrorContainer,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Text(
-                                message,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onErrorContainer
-                            )
-                        }
-                    }
-                    Spacer(Modifier.height(12.dp))
-                }
-
                 Box(Modifier.weight(1f, fill = true).fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
-                    AuthView(modifier = Modifier.fillMaxWidth())
+                    AuthView(
+                        modifier = Modifier.fillMaxWidth(),
+                        preferGoogleOneTap = true,
+                    )
                 }
 
                 TextButton(onClick = {
                     showInAppAuth = false
-                    authError = null
                 }) {
                     Text("Back to sign-in options", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -196,19 +166,8 @@ fun SignInScreen(onContinueOffline: () -> Unit) {
                     ) {
                         Button(
                             onClick = {
-                                authError = null
-                                signInLoading = true
-                                scope.launch {
-                                    Clerk.auth.startHostedAuth(mode = HostedAuthMode.SIGN_IN)
-                                        .onSuccess { signInLoading = false }
-                                        .onFailure {
-                                            signInLoading = false
-                                            authError = "Couldn't open secure sign-in. Use the email form below."
-                                            showInAppAuth = true
-                                        }
-                                }
+                                showInAppAuth = true
                             },
-                            enabled = !signInLoading,
                             shape = RoundedCornerShape(16.dp),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = MaterialTheme.colorScheme.primary,
@@ -216,18 +175,10 @@ fun SignInScreen(onContinueOffline: () -> Unit) {
                             ),
                             modifier = Modifier.fillMaxWidth().height(56.dp)
                         ) {
-                            if (signInLoading) {
-                                CircularProgressIndicator(
-                                    color = MaterialTheme.colorScheme.onPrimary,
-                                    strokeWidth = 2.dp,
-                                    modifier = Modifier.size(18.dp)
-                                )
-                            } else {
-                                Icon(Icons.Rounded.Login, contentDescription = null, modifier = Modifier.size(18.dp))
-                            }
+                            Icon(Icons.Rounded.Login, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(8.dp))
                             Text(
-                                if (signInLoading) "Opening sign-in…" else "Sign in to FocusLock",
+                                "Sign in to FocusLock",
                                 style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
                             )
                         }
@@ -237,7 +188,6 @@ fun SignInScreen(onContinueOffline: () -> Unit) {
                         // Tonal secondary action — no outlined/bordered container.
                         FilledTonalButton(
                             onClick = { showInAppAuth = true },
-                            enabled = !signInLoading,
                             shape = RoundedCornerShape(16.dp),
                             colors = ButtonDefaults.filledTonalButtonColors(
                                 containerColor = MaterialTheme.colorScheme.secondaryContainer,
@@ -470,12 +420,14 @@ fun AccountScreen(
     syncStatus: String,
     onSyncNow: () -> Unit,
     onSignOut: () -> Unit,
-    onSignIn: () -> Unit = {},
 ) {
-    val scope = rememberCoroutineScope()
     val user by Clerk.userFlow.collectAsState(initial = null)
     val isSignedIn = authState == FocusAuthState.SignedIn && user != null
+    var showSignIn by remember { mutableStateOf(false) }
     var showSignOutConfirm by remember { mutableStateOf(false) }
+    LaunchedEffect(isSignedIn) {
+        if (isSignedIn) showSignIn = false
+    }
     // MainActivity surfaces SyncStatus.Syncing as "Syncing…" — use it to lock the button.
     val isSyncing = syncStatus.startsWith("Syncing")
     // No internal verticalScroll/fillMaxSize: renders at content height so it can be
@@ -679,13 +631,7 @@ fun AccountScreen(
                     HorizontalDivider(color = MaterialTheme.colorScheme.surfaceContainerHighest)
 
                     Button(
-                        onClick = {
-                            scope.launch {
-                                Clerk.auth.startHostedAuth(mode = HostedAuthMode.SIGN_IN).onFailure {
-                                    onSignIn()
-                                }
-                            }
-                        },
+                        onClick = { showSignIn = true },
                         shape = RoundedCornerShape(12.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = MaterialTheme.colorScheme.primary,
@@ -703,6 +649,17 @@ fun AccountScreen(
                 }
             }
 
+        }
+    }
+
+    if (showSignIn && !isSignedIn) {
+        Dialog(
+            onDismissRequest = { showSignIn = false },
+            properties = DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            Box(Modifier.fillMaxSize()) {
+                SignInScreen(onContinueOffline = { showSignIn = false })
+            }
         }
     }
 
