@@ -26,7 +26,7 @@ object FrogAppPolicy {
 
     /** Effective ordered shortcut list: mandatory core four plus configured options. */
     fun configuredLaunchPackages(context: Context, state: FrogState): List<String> =
-        configuredLaunchPackages(defaultLaunchPackages(context), state.essentialAppPackages)
+        configuredLaunchPackages(defaultLaunchPackages(context), state.essentialAppPackages, state.boundaryAppPackages)
 
     const val GPAY_PACKAGE = "com.google.android.apps.nbu.paisa.user"
     const val GPAY_WALLET_PACKAGE = "com.google.android.apps.walletnfcrel"
@@ -43,12 +43,18 @@ object FrogAppPolicy {
     }.getOrDefault(GPAY_PACKAGE)
 
     /** Pure ordering helper: null selects all default eight; empty selects only pinned core four. */
-    fun configuredLaunchPackages(defaults: List<String>, configuredPackages: Set<String>?): List<String> {
+    fun configuredLaunchPackages(
+        defaults: List<String>,
+        configuredPackages: Set<String>?,
+        boundaryPackages: Set<String> = emptySet(),
+    ): List<String> {
         val core = defaults.take(4)
         val configured = configuredPackages ?: defaults.toSet()
         val defaultOptionals = defaults.drop(4).filter { it in configured }
         val additional = (configured - defaults.toSet()).sorted()
+        val boundaries = boundaryPackages.map { it.trim().lowercase(java.util.Locale.ROOT) }.toSet()
         return (core + defaultOptionals + additional).distinct()
+            .filterNot { it.trim().lowercase(java.util.Locale.ROOT) in boundaries }
     }
 
     /** Effective policy set of apps kept available during this Frog cycle. */
@@ -98,7 +104,8 @@ object FrogAppPolicy {
 
     fun isBlocked(context: Context, packageName: String, state: FrogState): Boolean {
         val essentials = essentialLaunchPackages(context, state)
-        val paymentExemption = if (GOOGLE_PAY_PACKAGES.any { it in essentials } && packageName in GOOGLE_PAY_PACKAGES) {
+        val paymentExemption = if (GOOGLE_PAY_PACKAGES.any { it in essentials } && packageName in GOOGLE_PAY_PACKAGES &&
+            packageName.trim().lowercase(java.util.Locale.ROOT) !in state.boundaryAppPackages) {
             setOf(packageName)
         } else {
             emptySet()

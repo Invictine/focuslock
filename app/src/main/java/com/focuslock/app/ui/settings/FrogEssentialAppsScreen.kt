@@ -45,6 +45,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
@@ -77,6 +78,7 @@ private data class EssentialAppRow(
     val isDefault: Boolean,
     val installed: Boolean,
     val isSafetyEssential: Boolean,
+    val isBoundary: Boolean,
 )
 
 private data class FrogEssentialAppsData(
@@ -103,6 +105,8 @@ internal fun FrogEssentialAppsScreen(
             FrogEssentialAppsData(defaults, installed, safety)
         }
     }
+    val boundaryPackagesValue by repository.boundaryAppPackagesFlow.collectAsStateWithLifecycle(initialValue = null)
+    val boundaryPackages = boundaryPackagesValue.orEmpty()
     val defaultPackages = appData?.defaultPackages.orEmpty()
     val corePackages = defaultPackages.take(4).toSet()
     val defaultPackageSet = defaultPackages.toSet()
@@ -117,18 +121,24 @@ internal fun FrogEssentialAppsScreen(
     var saving by remember { mutableStateOf(false) }
     var saveError by remember { mutableStateOf<String?>(null) }
 
-    LaunchedEffect(defaultPackages, repository) {
-        if (!initialized && defaultPackages.isNotEmpty()) {
+    LaunchedEffect(defaultPackages, repository, boundaryPackagesValue) {
+        if (!initialized && defaultPackages.isNotEmpty() && boundaryPackagesValue != null) {
             val storedPackages = repository.essentialAppPackagesFlow.first()
-            selected = storedPackages ?: defaultPackageSet
-            selected = selected + corePackages
+            val initial = storedPackages ?: defaultPackageSet
+            selected = (initial + corePackages).filterNotTo(mutableSetOf()) { it.trim().lowercase(java.util.Locale.ROOT) in boundaryPackages }
             initialized = true
+        }
+    }
+
+    LaunchedEffect(boundaryPackagesValue) {
+        if (boundaryPackagesValue != null && boundaryPackages.isNotEmpty()) {
+            selected = selected.filterNotTo(mutableSetOf()) { it.trim().lowercase(java.util.Locale.ROOT) in boundaryPackages }
         }
     }
 
     val installedApps = appData?.installedApps.orEmpty()
     val safetyPackages = appData?.safetyPackages.orEmpty()
-    val rows = remember(installedApps, defaultPackages, selected, corePackages, safetyPackages) {
+    val rows = remember(installedApps, defaultPackages, selected, corePackages, safetyPackages, boundaryPackages) {
         val byPackage = installedApps.associateBy { it.packageName }
         val defaultLabels = defaultPackages.zip(FROG_DEFAULT_LABELS).toMap().toMutableMap().apply {
             putIfAbsent(FrogAppPolicy.GPAY_PACKAGE, "Google Pay")
@@ -136,7 +146,7 @@ internal fun FrogEssentialAppsScreen(
         }
         fun displayLabel(packageName: String): String =
             defaultLabels[packageName] ?: byPackage[packageName]?.appName ?: packageName.substringAfterLast('.')
-        val optionalExtras = (selected + installedApps.map { it.packageName })
+        val optionalExtras = (selected + installedApps.map { it.packageName } + boundaryPackagesValue.orEmpty())
             .filterNot { it in defaultPackageSet }
             .distinct()
             .sortedWith(compareBy<String, String>(String.CASE_INSENSITIVE_ORDER) { displayLabel(it) }.thenBy { it })
@@ -150,6 +160,7 @@ internal fun FrogEssentialAppsScreen(
                 isDefault = packageName in defaultPackageSet,
                 installed = app != null,
                 isSafetyEssential = packageName in safetyPackages,
+                isBoundary = packageName.trim().lowercase(java.util.Locale.ROOT) in boundaryPackages,
             )
         }
     }
@@ -187,12 +198,12 @@ internal fun FrogEssentialAppsScreen(
                     }
                     Button(
                         onClick = {
-                            if (saving || !initialized) return@Button
+                            if (saving || !initialized || boundaryPackagesValue == null) return@Button
                             saving = true
                             saveError = null
                             scope.launch {
                                 val saved = try {
-                                    repository.setEssentialApps(selected + corePackages)
+                                    repository.setEssentialApps((selected + corePackages).filterNotTo(mutableSetOf()) { it.trim().lowercase(java.util.Locale.ROOT) in boundaryPackages })
                                 } catch (e: CancellationException) {
                                     throw e
                                 } catch (_: Exception) {
@@ -202,7 +213,7 @@ internal fun FrogEssentialAppsScreen(
                                 if (saved) onBack() else saveError = "Couldn't save your essential apps. Please try again."
                             }
                         },
-                        enabled = initialized && !saving,
+                        enabled = initialized && boundaryPackagesValue != null && !saving,
                         modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
                     ) {
                         Text(if (saving) "Saving…" else "Save")
@@ -226,6 +237,11 @@ internal fun FrogEssentialAppsScreen(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            Text(
+                "Apps in Boundaries can't be essential apps.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             OutlinedTextField(
                 value = search,
                 onValueChange = { search = it },
@@ -246,12 +262,12 @@ internal fun FrogEssentialAppsScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     items(filteredRows, key = { it.packageName }) { row ->
-                        val checked = row.isCore || row.isSafetyEssential || row.packageName in selected
+                        val checked = !row.isBoundary && (row.isCore || row.isSafetyEssential || row.packageName in selected)
                         EssentialAppRowView(
                             row = row,
                             checked = checked,
                             onToggle = {
-                                if (row.isCore || row.isSafetyEssential) return@EssentialAppRowView
+                                if (row.isBoundary || row.isCore || row.isSafetyEssential) return@EssentialAppRowView
                                 selected = if (checked) selected - row.packageName else selected + row.packageName
                                 saveError = null
                             },
@@ -283,7 +299,7 @@ private fun EssentialAppRowView(
                 .heightIn(min = 64.dp)
                 .toggleable(
                     value = checked,
-                    enabled = !row.isCore && !row.isSafetyEssential,
+                    enabled = !row.isBoundary && !row.isCore && !row.isSafetyEssential,
                     role = Role.Checkbox,
                     onValueChange = { onToggle() },
                 )
@@ -305,6 +321,7 @@ private fun EssentialAppRowView(
                 Text(row.label, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
                     text = when {
+                        row.isBoundary -> "Boundary app · Can't be essential"
                         !row.installed && (row.isCore || row.isSafetyEssential) -> "Always available · Not installed"
                         !row.installed -> "Not installed"
                         row.isCore || row.isSafetyEssential -> "Always available"
@@ -319,7 +336,7 @@ private fun EssentialAppRowView(
             Checkbox(
                 checked = checked,
                 onCheckedChange = null,
-                enabled = !row.isCore && !row.isSafetyEssential,
+                enabled = !row.isBoundary && !row.isCore && !row.isSafetyEssential,
                 modifier = Modifier.size(48.dp),
             )
         }

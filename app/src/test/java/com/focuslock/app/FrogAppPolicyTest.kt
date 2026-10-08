@@ -1,5 +1,7 @@
 package com.focuslock.app
 
+import com.focuslock.app.data.model.BlockedApp
+import com.focuslock.app.data.repository.frogBoundaryAppPackages
 import com.focuslock.app.service.FrogAppPolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -112,5 +114,68 @@ class FrogAppPolicyTest {
         assertFalse(FrogAppPolicy.shouldBlock(FrogAppPolicy.GPAY_PACKAGE, true, false, emptySet(), essentials))
         assertTrue(FrogAppPolicy.GOOGLE_PAY_PACKAGES.contains(FrogAppPolicy.GPAY_PACKAGE))
         assertTrue(FrogAppPolicy.GOOGLE_PAY_PACKAGES.contains(FrogAppPolicy.GPAY_WALLET_PACKAGE))
+    }
+
+    @Test
+    fun boundaryPackagesAreRemovedAfterDefaultsCoreAndExplicitSelectionsAreAssembled() {
+        val defaults = listOf(
+            "com.ticktick.task", "com.phone", "com.clock", "com.messages",
+            "com.whatsapp", "com.openai.chatgpt", "com.spotify.music",
+        )
+        val boundaries = setOf("com.phone", "com.whatsapp", "com.extra.boundary")
+
+        // Null preserves the usual defaults, except that boundary policy always wins,
+        // including over the mandatory core shortcuts.
+        assertEquals(
+            listOf("com.ticktick.task", "com.clock", "com.messages", "com.openai.chatgpt", "com.spotify.music"),
+            FrogAppPolicy.configuredLaunchPackages(defaults, null, boundaries),
+        )
+        assertEquals(
+            listOf("com.ticktick.task", "com.clock", "com.messages"),
+            FrogAppPolicy.configuredLaunchPackages(defaults, emptySet(), boundaries),
+        )
+        assertEquals(
+            listOf("com.ticktick.task", "com.clock", "com.messages", "com.spotify.music"),
+            FrogAppPolicy.configuredLaunchPackages(defaults, setOf("com.whatsapp", "com.spotify.music"), boundaries),
+        )
+        assertEquals(
+            listOf("com.ticktick.task", "com.clock", "com.messages", "com.notes.app"),
+            FrogAppPolicy.configuredLaunchPackages(
+                defaults,
+                setOf("com.notes.app", "com.whatsapp", "com.phone"),
+                boundaries,
+            ),
+        )
+    }
+
+    @Test
+    fun boundaryMatchingIsTrimmedAndCaseInsensitiveWithoutAffectingUnlistedApps() {
+        val defaults = listOf("com.ticktick.task", "com.phone", "com.clock", "com.messages", "com.whatsapp")
+        assertEquals(
+            listOf("com.ticktick.task", "com.phone", "com.clock", "com.messages", "com.spotify.music"),
+            FrogAppPolicy.configuredLaunchPackages(
+                defaults,
+                setOf("com.whatsapp", "com.spotify.music"),
+                setOf(" COM.WHATSAPP ", " com.unrelated.app "),
+            ),
+        )
+    }
+
+    @Test
+    fun boundarySourceIncludesBlockedShortsAndPermanentEntriesButNotOrdinaryApps() {
+        val packages = frogBoundaryAppPackages(
+            apps = listOf(
+                BlockedApp(" com.example.blocked ", "Blocked", isBlocked = true),
+                BlockedApp("com.example.shorts", "Shorts", isBlocked = true, specificShortsOnly = true),
+                BlockedApp("com.example.legacy", "Legacy permanent", isBlocked = false, isPermanent = true),
+                BlockedApp("com.example.ordinary", "Ordinary", isBlocked = false),
+            ),
+            permanent = setOf(" COM.EXAMPLE.PERMANENT "),
+        )
+
+        assertEquals(
+            setOf("com.example.blocked", "com.example.shorts", "com.example.legacy", "com.example.permanent"),
+            packages,
+        )
     }
 }

@@ -81,4 +81,5 @@ data class FrogState(
     val allowedToolPackages: Set<String> = emptySet(),
     val toolsConfirmed: Boolean = false,
     val essentialAppPackages: Set<String>? = null,
+    val boundaryAppPackages: Set<String> = emptySet(),
 )

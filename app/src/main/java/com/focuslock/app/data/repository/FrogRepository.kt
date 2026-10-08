@@ -16,6 +16,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import com.focuslock.app.data.model.FrogPhase
 import com.focuslock.app.data.model.FrogState
 import com.focuslock.app.data.model.FrogTask
+import com.focuslock.app.data.model.BlockedApp
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -27,6 +28,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -114,6 +117,18 @@ fun sanitizeFrogToolPackages(packages: Set<String>): Set<String> = packages
 
 private val FROG_PACKAGE_NAME = Regex("[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)+")
 
+/** Both ordinary boundaries (including Shorts-only) and permanent commitments exclude essentials. */
+fun frogBoundaryAppPackages(apps: List<BlockedApp>, permanent: Set<String>): Set<String> =
+    (permanent + apps.filter { it.isBlocked || it.isPermanent }.map { it.packageName })
+        .map { it.trim().lowercase(Locale.ROOT) }.toSet()
+
+private fun frogBoundaryPackages(context: Context): Flow<Set<String>> = combine(
+    SettingsRepository(context.applicationContext).blockedAppsFlow,
+    PermanentBlocksRepository(context.applicationContext).packagesFlow,
+) { apps, permanent ->
+    frogBoundaryAppPackages(apps, permanent)
+}
+
 /**
  * "Eat the frog" repository backed by its own DataStore file (`focuslock_frog`),
  * following CreditBankRepository's idioms: corruption-hardened read/edit helpers,
@@ -131,6 +146,7 @@ private val FROG_PACKAGE_NAME = Regex("[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-
 class FrogRepository(
     private val context: Context,
     private val frogStore: DataStore<Preferences> = context.frogDataStore,
+    boundaryPackages: Flow<Set<String>> = frogBoundaryPackages(context),
 ) {
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -145,6 +161,18 @@ class FrogRepository(
 
     // Serializes the lazy rollover edit so concurrent collectors roll at most once.
     private val rolloverMutex = Mutex()
+
+    val boundaryAppPackagesFlow: Flow<Set<String>> = boundaryPackages
+        .map { packages -> packages.map { it.trim().lowercase(Locale.ROOT) }.toSet() }
+        .distinctUntilChanged()
+
+    private fun withoutBoundaries(packages: Set<String>, boundaries: Set<String>): Set<String> =
+        sanitizeFrogToolPackages(packages).filterNot { it.lowercase(Locale.ROOT) in boundaries }.toSet()
+
+    private fun FrogState.withBoundaries(boundaries: Set<String>): FrogState = copy(
+        boundaryAppPackages = boundaries,
+        essentialAppPackages = essentialAppPackages?.let { withoutBoundaries(it, boundaries) },
+    )
 
     object Keys {
         val FROG_ENABLED = booleanPreferencesKey("frog_enabled")
@@ -199,9 +227,10 @@ class FrogRepository(
             emit(DEFAULT_WAKE_HOUR)
         }
 
-    /** Null means use the seven default launch apps; an empty set is an explicit choice. */
-    val essentialAppPackagesFlow: Flow<Set<String>?> = frogStore.data
-        .map { prefs -> prefs[Keys.FROG_ESSENTIAL_APP_PACKAGES]?.let(::sanitizeFrogToolPackages) }
+    /** Null means use default launch apps; an empty set is an explicit choice. Boundaries are excluded. */
+    val essentialAppPackagesFlow: Flow<Set<String>?> = combine(frogStore.data, boundaryAppPackagesFlow) { prefs, boundaries ->
+        prefs[Keys.FROG_ESSENTIAL_APP_PACKAGES]?.let { withoutBoundaries(it, boundaries) }
+    }
         .catch { e ->
             if (e is CancellationException) throw e
             Log.w(FROG_TAG, "essentialAppPackagesFlow failed; emitting defaults", e)
@@ -210,22 +239,22 @@ class FrogRepository(
 
     /**
      * Derived frog state for the current cycle day. Hot-friendly: the daily rollover is
-     * never awaited inside `map` — a stale cycle date emits the reset state immediately
+     * never awaited inside the flow transform — a stale cycle date emits the reset state immediately
      * and persists asynchronously (exactly like CreditBankRepository.statsFlow does for
      * daily stats), while the authoritative reset runs on the next suspend call.
      */
-    val frogStateFlow: Flow<FrogState> = frogStore.data
-        .map { prefs ->
-            val now = System.currentTimeMillis()
-            val today = frogCycleDate(now, wakeHour(prefs))
-            if ((prefs[Keys.FROG_CYCLE_DATE] ?: "") != today) {
-                // Stale day: emit rolled-over state now, persist off the collector.
-                repositoryScope.launch { rolloverIfNeeded(now) }
-                rolledOverState(prefs, today)
-            } else {
-                stateFromPrefs(prefs, today)
-            }
+    val frogStateFlow: Flow<FrogState> = combine(frogStore.data, boundaryAppPackagesFlow) { prefs, boundaries ->
+        val now = System.currentTimeMillis()
+        val today = frogCycleDate(now, wakeHour(prefs))
+        val state = if ((prefs[Keys.FROG_CYCLE_DATE] ?: "") != today) {
+            // Stale day: emit rolled-over state now, persist off the collector.
+            repositoryScope.launch { rolloverIfNeeded(now) }
+            rolledOverState(prefs, today)
+        } else {
+            stateFromPrefs(prefs, today)
         }
+        state.withBoundaries(boundaries)
+    }
         .catch { e ->
             if (e is CancellationException) throw e
             Log.w(FROG_TAG, "frogStateFlow failed; emitting default state", e)
@@ -272,8 +301,9 @@ class FrogRepository(
     /** Persist the optional essential launch apps; empty explicitly disables optional defaults. */
     suspend fun setEssentialApps(packages: Set<String>): Boolean = withFrogStore(false) {
         rolloverIfNeeded()
+        val boundaries = boundaryAppPackagesFlow.first()
         editFrogPrefs { prefs ->
-            prefs[Keys.FROG_ESSENTIAL_APP_PACKAGES] = sanitizeFrogToolPackages(packages)
+            prefs[Keys.FROG_ESSENTIAL_APP_PACKAGES] = withoutBoundaries(packages, boundaries)
         }
     }
 
@@ -440,11 +470,12 @@ class FrogRepository(
             rolloverIfNeeded(nowMillis)
             val prefs = readFrogPrefs()
             val today = frogCycleDate(nowMillis, wakeHour(prefs))
-            if ((prefs[Keys.FROG_CYCLE_DATE] ?: "") != today) {
+            val state = if ((prefs[Keys.FROG_CYCLE_DATE] ?: "") != today) {
                 rolledOverState(prefs, today)
             } else {
                 stateFromPrefs(prefs, today)
             }
+            state.withBoundaries(boundaryAppPackagesFlow.first())
         }
 
     /**

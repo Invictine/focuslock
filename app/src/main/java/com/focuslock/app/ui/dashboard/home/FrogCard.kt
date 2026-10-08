@@ -482,7 +482,7 @@ private fun FrogToolsDialog(
     val context = LocalContext.current
     var apps by remember { mutableStateOf<List<InstalledApp>>(emptyList()) }
     var loaded by remember { mutableStateOf(false) }
-    val defaultPackages = remember(context, state.essentialAppPackages) {
+    val defaultPackages = remember(context, state.essentialAppPackages, state.boundaryAppPackages) {
         FrogAppPolicy.essentialLaunchPackages(context, state)
     }
     var selected by rememberSaveable(
@@ -494,7 +494,7 @@ private fun FrogToolsDialog(
         ),
     ) { mutableStateOf(state.allowedToolPackages - defaultPackages) }
 
-    LaunchedEffect(state.cycleDate, state.frog?.id) {
+    LaunchedEffect(state.cycleDate, state.frog?.id, defaultPackages) {
         apps = withContext(Dispatchers.IO) {
             InstalledAppsRepository.getInstalledLaunchableApps(context)
                 .filterNot { it.packageName in defaultPackages || FrogAppPolicy.isSafetyEssential(context, it.packageName) }

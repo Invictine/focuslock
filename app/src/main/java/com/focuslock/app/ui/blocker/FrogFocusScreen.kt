@@ -78,7 +78,7 @@ internal fun FrogFocusScreen(
     val state by repository.frogStateFlow.collectAsStateWithLifecycle(initialValue = null)
     val extraPackages = state?.takeIf { it.toolsConfirmed }?.allowedToolPackages.orEmpty()
         .sorted()
-    val shortcuts by androidx.compose.runtime.produceState(emptyList<FrogShortcut>(), state != null, state?.essentialAppPackages, extraPackages) {
+    val shortcuts by androidx.compose.runtime.produceState(emptyList<FrogShortcut>(), state != null, state?.essentialAppPackages, state?.boundaryAppPackages, extraPackages) {
         val current = state ?: return@produceState
         value = withContext(Dispatchers.IO) {
             val defaults = FrogAppPolicy.defaultLaunchPackages(context)
@@ -86,7 +86,7 @@ internal fun FrogFocusScreen(
                 putIfAbsent(FrogAppPolicy.GPAY_PACKAGE, "Google Pay")
                 putIfAbsent(FrogAppPolicy.GPAY_WALLET_PACKAGE, "Google Pay")
             }
-            val essentials = FrogAppPolicy.configuredLaunchPackages(defaults, current.essentialAppPackages)
+            val essentials = FrogAppPolicy.configuredLaunchPackages(defaults, current.essentialAppPackages, current.boundaryAppPackages)
             (essentials + extraPackages).distinct().map { pkg ->
                 val label = defaultLabels[pkg] ?: InstalledAppsRepository.getAppLabel(context, pkg)
                 FrogShortcut(

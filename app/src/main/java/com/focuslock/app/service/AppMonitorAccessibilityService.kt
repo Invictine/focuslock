@@ -438,7 +438,9 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                         frogWakeHour = wakeHour
                         if (state.locked && (previousState?.locked != true ||
                                 previousState.allowedToolPackages != state.allowedToolPackages ||
-                                previousState.toolsConfirmed != state.toolsConfirmed)) {
+                                previousState.toolsConfirmed != state.toolsConfirmed ||
+                                previousState.essentialAppPackages != state.essentialAppPackages ||
+                                previousState.boundaryAppPackages != state.boundaryAppPackages)) {
                             enforceFrogOnCurrentForeground()
                         }
                     }
