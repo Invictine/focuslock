@@ -6,6 +6,11 @@ blocking, focus credits, limits and schedules, Frog and launcher protection,
 Strict Mode, permanent blocks, Nuke, TickTick, personalization, and backups.
 The final chapter gives a practical setup checklist.
 
+Account initialization shows the auth loading screen. The guide is composed only
+after a signed-in session, an explicit offline choice, or an unconfigured offline
+build, and its dialog waits for the app activity to resume after sign-in. Outside
+taps do not dismiss it; Android Back and Save for later still pause it explicitly.
+
 - **Continue / Back** move between chapters; **Topics** jumps directly to one.
 - **Save for later**, Android Back, or a setup shortcut saves the current chapter
   without marking the guide complete. It stops opening automatically after a pause.

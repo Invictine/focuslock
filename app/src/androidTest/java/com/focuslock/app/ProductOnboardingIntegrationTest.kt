@@ -10,6 +10,7 @@ import androidx.compose.ui.test.performScrollTo
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import androidx.lifecycle.Lifecycle
 import com.focuslock.app.data.repository.SettingsRepository
 import com.focuslock.app.ui.MainActivity
 import com.focuslock.app.ui.onboarding.ProductOnboardingStore
@@ -54,6 +55,15 @@ class ProductOnboardingIntegrationTest {
 
             compose.onNodeWithText("Continue").performClick()
             compose.onNodeWithText("Continue").performClick()
+            assertCurrentPage(2)
+
+            // A sign-in activity may still cover MainActivity when the session activates.
+            // Backgrounding the host hides the dialog without recording a user dismissal.
+            activeScenario.moveToState(Lifecycle.State.STARTED)
+            compose.onNodeWithText("FocusLock guide").assertDoesNotExist()
+            assertTrue(ProductOnboardingStore(context).shouldAutoShow)
+            activeScenario.moveToState(Lifecycle.State.RESUMED)
+            compose.onNodeWithText("FocusLock guide").assertIsDisplayed()
             assertCurrentPage(2)
 
             activeScenario.recreate()

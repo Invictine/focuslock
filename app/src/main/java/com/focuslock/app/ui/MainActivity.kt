@@ -56,7 +56,7 @@ import com.focuslock.app.BuildConfig
 import com.focuslock.app.FocusLockApplication
 import com.focuslock.app.auth.AccountScreen
 import com.focuslock.app.auth.AuthViewModel
-import com.focuslock.app.auth.FocusAuthGate
+import com.focuslock.app.auth.FocusLockStartupGate
 import com.focuslock.app.auth.FocusAuthState
 import com.focuslock.app.service.AppMonitorForegroundService
 import com.focuslock.app.sync.ConvexSyncClient
@@ -208,6 +208,8 @@ class MainActivity : ComponentActivity() {
                 // The resume/pause hooks also let PermissionReturnWatcher know whether the app
                 // is visible, and drop any pending auto-return we handled ourselves.
                 val lifecycleOwner = LocalLifecycleOwner.current
+                val hostLifecycleState by lifecycleOwner.lifecycle.currentStateFlow
+                    .collectAsStateWithLifecycle(minActiveState = Lifecycle.State.CREATED)
                 val appContext = applicationContext
                 DisposableEffect(lifecycleOwner) {
                     val observer = LifecycleEventObserver { _, event ->
@@ -242,15 +244,14 @@ class MainActivity : ComponentActivity() {
                     if (result == SnackbarResult.ActionPerformed) openNotificationSettings()
                 }
 
-                if (authState == FocusAuthState.SignedOut && !offlineMode) {
-                    FocusAuthGate(
-                        state = authState,
-                        onContinueOffline = {
-                            offlineOverride = true
-                            lifecycleScope.launch { app.settingsRepository.setOfflineMode(true) }
-                        }
-                    ) { }
-                } else {
+                FocusLockStartupGate(
+                    authState = authState,
+                    offlineMode = offlineMode,
+                    onContinueOffline = {
+                        offlineOverride = true
+                        lifecycleScope.launch { app.settingsRepository.setOfflineMode(true) }
+                    },
+                ) {
                     var currentTab by rememberSaveable { mutableStateOf(NavigationItem.DASHBOARD) }
                     var showDebug by rememberSaveable { mutableStateOf(false) }
                     val onboardingStore = remember { ProductOnboardingStore(this@MainActivity) }
@@ -431,7 +432,9 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
-                    if (showProductOnboarding) {
+                    // Google/Clerk may activate the session while their sign-in activity
+                    // still owns the screen. Attach the guide only after this host resumes.
+                    if (showProductOnboarding && hostLifecycleState.isAtLeast(Lifecycle.State.RESUMED)) {
                         ProductOnboardingDialog(
                             pageIndex = onboardingPage,
                             onPageChange = { index ->

@@ -32,7 +32,7 @@ internal fun ProductOnboardingDialog(
 
     Dialog(
         onDismissRequest = { if (showTopics) showTopics = false else onPause() },
-        properties = DialogProperties(usePlatformDefaultWidth = false),
+        properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false),
     ) {
         Surface(
             modifier = Modifier.padding(horizontal = 12.dp, vertical = 16.dp)
