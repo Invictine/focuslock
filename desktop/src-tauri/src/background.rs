@@ -4,6 +4,10 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{AppHandle, Manager};
 
+#[cfg(windows)]
+#[path = "background_recovery.rs"]
+mod recovery;
+
 #[derive(Default)]
 pub struct BackgroundRuntime {
     exiting: AtomicBool,
@@ -105,7 +109,13 @@ fn disarm_watchdog(app: &AppHandle) -> Result<(), String> {
     }
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::write(stop_path(&dir, std::process::id()), b"intentional quit")
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    #[cfg(windows)]
+    if let Err(error) = recovery::disarm(&dir) {
+        let _ = std::fs::remove_file(stop_path(&dir, std::process::id()));
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -124,17 +134,33 @@ pub fn start_recovery(app: &AppHandle) -> Result<(), String> {
         .and_then(|i| args.get(i + 1))
         .and_then(|v| v.parse::<u32>().ok())
         .unwrap_or(0);
-    std::process::Command::new(&exe)
-        .arg("--focuslock-watchdog")
-        .arg(std::process::id().to_string())
-        .arg(&dir)
-        .arg(attempt.to_string())
-        .creation_flags(0x0800_0000)
-        .spawn()
-        .map_err(|e| format!("Could not start FocusLock recovery: {e}"))?;
+    let installed = !exe.components().any(|part| part.as_os_str() == "target");
+    let test_task = args.iter().any(|arg| arg == "--recovery-test-task")
+        && app
+            .config()
+            .identifier
+            .starts_with("com.focuslock.browserqa.");
+    let scheduled_result = if installed || test_task {
+        Some(recovery::start(&exe, &dir, attempt))
+    } else {
+        None
+    };
+    // Keep crash-only recovery as a fallback if Task Scheduler is unavailable.
+    // The error is surfaced in Settings; fallback is never reported as full
+    // process-tree protection.
+    if !matches!(scheduled_result, Some(Ok(()))) {
+        std::process::Command::new(&exe)
+            .arg("--focuslock-watchdog")
+            .arg(std::process::id().to_string())
+            .arg(&dir)
+            .arg(attempt.to_string())
+            .creation_flags(0x0800_0000)
+            .spawn()
+            .map_err(|e| format!("Could not start FocusLock recovery: {e}"))?;
+    }
     // Only installed releases register at sign-in; running build output for QA
     // must not replace an installed app's startup entry.
-    if !exe.components().any(|part| part.as_os_str() == "target") {
+    if installed && !test_task {
         let command = format!("\"{}\" --background", exe.display());
         let result = std::process::Command::new("reg.exe")
             .args([
@@ -155,6 +181,9 @@ pub fn start_recovery(app: &AppHandle) -> Result<(), String> {
             return Err("Could not register FocusLock at Windows sign-in".into());
         }
     }
+    if let Some(result) = scheduled_result {
+        result?;
+    }
     Ok(())
 }
 
@@ -167,6 +196,9 @@ pub fn start_recovery(_app: &AppHandle) -> Result<(), String> {
 /// register startup, or take ownership of the desktop instance.
 #[cfg(windows)]
 pub fn maybe_run_watchdog() -> bool {
+    if recovery::maybe_run() {
+        return true;
+    }
     use std::{
         os::windows::process::CommandExt,
         path::PathBuf,
@@ -241,6 +273,12 @@ pub fn maybe_run_watchdog() -> bool {
             return true;
         }
     }
+    // Let a late scheduled supervisor take ownership while the app is alive.
+    // The fallback claims recovery only once its parent has died, so a slow
+    // Windows task launch cannot be starved by the fallback's lock.
+    let Ok(_recovery_lock) = recovery::claim_lock(&dir) else {
+        return true;
+    };
     // A new desktop instance creates its own recovery companion. Back off on
     // launch failure rather than running a busy crash loop.
     for _ in 0..3 {
