@@ -69,6 +69,9 @@ import com.focuslock.app.ui.components.PendingMergeTarget
 import com.focuslock.app.ui.components.SectionHeader
 import com.focuslock.app.ui.components.formatUsageSeconds
 import com.focuslock.app.ui.dashboard.DashboardScreen
+import com.focuslock.app.ui.onboarding.ProductOnboardingDialog
+import com.focuslock.app.ui.onboarding.ProductOnboardingStore
+import com.focuslock.app.ui.onboarding.ProductTourDestination
 import com.focuslock.app.ui.debug.DebugDataScreen
 import com.focuslock.app.ui.permissions.PermissionHelper
 import com.focuslock.app.ui.permissions.PermissionReturnWatcher
@@ -245,6 +248,24 @@ class MainActivity : ComponentActivity() {
                 } else {
                     var currentTab by rememberSaveable { mutableStateOf(NavigationItem.DASHBOARD) }
                     var showDebug by rememberSaveable { mutableStateOf(false) }
+                    val onboardingStore = remember { ProductOnboardingStore(this@MainActivity) }
+                    var onboardingPage by rememberSaveable { mutableIntStateOf(onboardingStore.pageIndex) }
+                    var showProductOnboarding by rememberSaveable {
+                        mutableStateOf(onboardingStore.shouldAutoShow)
+                    }
+                    LaunchedEffect(authState, offlineMode) {
+                        if (onboardingStore.shouldAutoShow &&
+                            (authState == FocusAuthState.SignedIn || offlineMode)
+                        ) showProductOnboarding = true
+                    }
+                    val finishProductOnboarding = {
+                        onboardingStore.finish()
+                        showProductOnboarding = false
+                    }
+                    val pauseProductOnboarding = {
+                        onboardingStore.pause()
+                        showProductOnboarding = false
+                    }
                     val tabStateHolder = rememberSaveableStateHolder()
                     // Cross-device "New bucket…": a usage row asks to open the merge editor
                     // in the Boundaries picker. Plain state; consumed (cleared) by the
@@ -346,7 +367,10 @@ class MainActivity : ComponentActivity() {
                         contentAlignment = Alignment.TopCenter
                     ) {
                         Box(Modifier.widthIn(max = 720.dp).fillMaxSize()) {
-                        if (showDebug) {
+                        // The permission wizard starts after the product tour, avoiding stacked dialogs.
+                        if (showProductOnboarding) {
+                            // The guide occupies its own modal surface below.
+                        } else if (showDebug) {
                             DebugDataScreen(onBack = { showDebug = false })
                         } else {
                         // Bottom-nav tabs switch instantly (direct when): the previous
@@ -371,7 +395,14 @@ class MainActivity : ComponentActivity() {
                             NavigationItem.SETTINGS -> SettingsScreen(
                                 // highlightKind omitted (defaults null): the screen derives
                                 // the next missing permission from its own checks.
-                                onOpenDebug = { showDebug = true }
+                                onOpenDebug = { showDebug = true },
+                                onReplayOnboarding = {
+                                    if (onboardingStore.isComplete) onboardingStore.replay()
+                                    else onboardingStore.resume()
+                                    onboardingPage = onboardingStore.pageIndex
+                                    showProductOnboarding = true
+                                },
+                                onboardingComplete = onboardingStore.isComplete
                             )
                             NavigationItem.ACCOUNT -> AccountTab(
                                 authState = authState,
@@ -394,6 +425,28 @@ class MainActivity : ComponentActivity() {
                         }
                     }
                 }
+
+                    if (showProductOnboarding) {
+                        ProductOnboardingDialog(
+                            pageIndex = onboardingPage,
+                            onPageChange = { index ->
+                                onboardingStore.savePage(index)
+                                onboardingPage = onboardingStore.pageIndex
+                            },
+                            onPause = pauseProductOnboarding,
+                            onFinish = finishProductOnboarding,
+                            onOpenDestination = { destination ->
+                                pauseProductOnboarding()
+                                currentTab = when (destination) {
+                                    ProductTourDestination.FOCUS -> NavigationItem.DASHBOARD
+                                    ProductTourDestination.BOUNDARIES -> NavigationItem.APPS
+                                    ProductTourDestination.STRICT -> NavigationItem.STRICT
+                                    ProductTourDestination.SETTINGS -> NavigationItem.SETTINGS
+                                    ProductTourDestination.ACCOUNT -> NavigationItem.ACCOUNT
+                                }
+                            }
+                        )
+                    }
 
                 }
 

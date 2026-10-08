@@ -78,7 +78,12 @@ import java.util.Locale
 import java.util.UUID
 
 @Composable
-fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Unit = {}) {
+fun SettingsScreen(
+    highlightKind: PermissionKind? = null,
+    onOpenDebug: () -> Unit = {},
+    onReplayOnboarding: () -> Unit = {},
+    onboardingComplete: Boolean = false,
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
@@ -388,6 +393,24 @@ fun SettingsScreen(highlightKind: PermissionKind? = null, onOpenDebug: () -> Uni
             .padding(top = 16.dp, bottom = 32.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+            shape = MaterialTheme.shapes.large,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Explore FocusLock", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold))
+                    Text(if (onboardingComplete) "Replay the guide to every feature and setup." else "Continue the guide from where you left off.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                TextButton(onClick = onReplayOnboarding) { Text(if (onboardingComplete) "Replay guide" else "Resume guide") }
+            }
+        }
+
         // 1. Productivity Conversion Rules Card — the ratio/bonus controls live in their own
         // composable so slider drag frames don't recompose the rest of this screen.
         Card(
