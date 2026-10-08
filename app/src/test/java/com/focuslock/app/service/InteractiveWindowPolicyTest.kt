@@ -103,6 +103,42 @@ class InteractiveWindowPolicyTest {
         ))
     }
 
+    @Test
+    fun keyboardAndSystemPopupsOccludeBlockedAppWithoutBecomingTargets() {
+        val blocked = window(1, "blocked", active = true, bounds = display, layer = 1)
+        val keyboard = window(2, "com.samsung.android.honeyboard", bounds = WindowBounds(0, 500, 1_000, 800), layer = 5)
+            .copy(isAppWindow = false, focused = true)
+        val systemPopup = window(3, "com.android.systemui", bounds = WindowBounds(100, 100, 900, 400), layer = 6)
+            .copy(isAppWindow = false, active = true)
+        val windows = listOf(keyboard, systemPopup, blocked)
+        assertEquals(blocked, InteractiveWindowPolicy.foreground(windows))
+        assertFalse(InteractiveWindowPolicy.isMultiWindow(blocked, windows, display))
+        val exposed = InteractiveWindowPolicy.exposedBounds(blocked, windows, display)
+        assertEquals(260_000L, exposed.sumOf { it.width.toLong() * it.height })
+        exposed.forEach {
+            assertNull(it.intersect(keyboard.bounds))
+            assertNull(it.intersect(systemPopup.bounds))
+        }
+        // Closing the controls restores the blocked region, never an app exemption.
+        assertEquals(listOf(display), InteractiveWindowPolicy.exposedBounds(blocked, listOf(blocked), display))
+    }
+
+    @Test
+    fun keyboardSettingsActivityIsForegroundAndOccludesBackgroundBlockedWindow() {
+        val blocked = window(1, "blocked", bounds = display, layer = 1)
+        val settings = window(2, "com.samsung.android.honeyboard", active = true, focused = true, bounds = display, layer = 2)
+        assertEquals(settings, InteractiveWindowPolicy.foreground(listOf(settings, blocked)))
+        assertTrue(InteractiveWindowPolicy.exposedBounds(blocked, listOf(settings, blocked), display).isEmpty())
+    }
+
+    @Test
+    fun systemOccludersOnOtherDisplaysOrBelowAppDoNotHideBlockedRegions() {
+        val blocked = window(1, "blocked", bounds = display, layer = 2)
+        val below = window(2, "android", bounds = display, layer = 1).copy(isAppWindow = false)
+        val otherDisplay = below.copy(id = 3, layer = 5, displayId = 1)
+        assertEquals(listOf(display), InteractiveWindowPolicy.exposedBounds(blocked, listOf(blocked, below, otherDisplay), display))
+    }
+
     private fun window(
         id: Int,
         packageName: String,

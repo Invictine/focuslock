@@ -31,20 +31,22 @@ data class InteractiveAppWindow(
     val focused: Boolean,
     val bounds: WindowBounds,
     val displayId: Int = 0,
+    /** System and IME windows occlude apps but must never become enforcement targets. */
+    val isAppWindow: Boolean = true,
 )
 
-/** Pure window-selection and geometry policy; system/IME windows should be excluded by callers. */
+/** Pure window-selection and geometry policy, including system/IME occlusion. */
 object InteractiveWindowPolicy {
     private val systemPackages = setOf("android", "com.android.systemui")
 
     fun foreground(windows: List<InteractiveAppWindow>): InteractiveAppWindow? {
-        val appWindows = windows.filter { it.packageName !in systemPackages }
+        val appWindows = windows.filter { it.isAppWindow && it.packageName !in systemPackages }
         return appWindows.firstOrNull { it.active }
             ?: appWindows.firstOrNull { it.focused }
     }
 
     /**
-     * Visible pieces of [target] after subtracting every higher-layer app window on the
+     * Visible pieces of [target] after subtracting every higher-layer window on the
      * same display. Rectangles are disjoint and clipped to the display's coordinate area.
      */
     fun exposedBounds(
@@ -56,7 +58,7 @@ object InteractiveWindowPolicy {
         var visible = listOf(initial)
         val occluders = allWindows.asSequence()
             .filter { it.id != target.id && it.displayId == target.displayId }
-            .filter { it.packageName !in systemPackages && it.layer > target.layer && !it.bounds.isEmpty }
+            .filter { it.layer > target.layer && !it.bounds.isEmpty }
             .sortedByDescending { it.layer }
             .map { it.bounds }
             .toList()
@@ -74,7 +76,7 @@ object InteractiveWindowPolicy {
         displayBounds: WindowBounds,
     ): Boolean {
         val displayWindows = windows.filter {
-            it.displayId == target.displayId && it.packageName !in systemPackages && !it.bounds.isEmpty
+            it.displayId == target.displayId && it.isAppWindow && it.packageName !in systemPackages && !it.bounds.isEmpty
         }
         val hasMultipleAppWindows = displayWindows.map { it.id to it.packageName }.distinct().size >= 2
         val displayWidth = displayBounds.width

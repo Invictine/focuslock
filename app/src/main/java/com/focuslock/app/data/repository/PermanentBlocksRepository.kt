@@ -3,7 +3,6 @@ package com.focuslock.app.data.repository
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.provider.Settings
 import android.telecom.TelecomManager
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.mutablePreferencesOf
@@ -13,6 +12,7 @@ import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.focuslock.app.data.model.BlockedApp
 import com.focuslock.app.data.model.BlockedWebsite
+import com.focuslock.app.service.DeviceAccessPolicy
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collect
@@ -222,9 +222,7 @@ class PermanentBlocksRepository(private val context: Context) {
         /** Packages which must never be permanently blocked because they are recovery paths. */
         fun isProtectedPackage(context: Context, packageName: String): Boolean {
             if (com.focuslock.app.service.AppUpdateAccessPolicy.isUpdateApp(packageName)) return true
-            val own = context.packageName
-            if (packageName == own || packageName == "android" || packageName == "com.android.systemui" ||
-                packageName == "com.android.settings" || packageName == "com.android.dialer" ||
+            if (DeviceAccessPolicy.isExempt(context, packageName) || packageName == "com.android.dialer" ||
                 packageName == "com.google.android.dialer" || packageName == "com.samsung.android.dialer") return true
             val pm = context.packageManager
             val launcher = pm.resolveActivity(
@@ -235,9 +233,7 @@ class PermanentBlocksRepository(private val context: Context) {
                 (context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager)?.defaultDialerPackage
             } catch (_: SecurityException) { null }
             if (packageName == defaultDialer) return true
-            val enabledIme = Settings.Secure.getString(context.contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)
-                ?.substringBefore('/')
-            return packageName == enabledIme || packageName == "com.android.packageinstaller" ||
+            return packageName == "com.android.packageinstaller" ||
                 packageName == "com.google.android.packageinstaller"
         }
     }

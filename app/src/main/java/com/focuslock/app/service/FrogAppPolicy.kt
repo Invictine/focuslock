@@ -4,18 +4,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.provider.AlarmClock
-import android.provider.Settings
 import android.provider.Telephony
 import com.focuslock.app.data.model.FrogState
 
 /** Frog allows only essential functions and the tools confirmed for this cycle. */
 object FrogAppPolicy {
-    private val corePackages = setOf(
-        "android", "com.android.systemui", "com.android.settings",
-        "com.android.phone", "com.android.server.telecom", "com.android.emergency",
-        "com.android.permissioncontroller", "com.google.android.permissioncontroller",
-        "com.ticktick.task",
-    )
+    private val corePackages = setOf("com.ticktick.task")
 
     fun shouldBlock(
         packageName: String,
@@ -96,14 +90,10 @@ object FrogAppPolicy {
     /** Safety/recovery exemptions that apply outside Frog as well. */
     fun isSafetyEssential(context: Context, packageName: String): Boolean {
         if (AppUpdateAccessPolicy.isUpdateApp(packageName)) return true
-        if (packageName == context.packageName || packageName in corePackages) return true
+        if (DeviceAccessPolicy.isExempt(context, packageName) || packageName in corePackages) return true
         if (isHome(context, packageName)) return true
         if (packageName in defaultLaunchPackages(context).take(4)) return true
-        val ime = runCatching {
-            Settings.Secure.getString(context.contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)
-                ?.substringBefore('/')
-        }.getOrNull()
-        return packageName == ime
+        return false
     }
 
     fun isBlocked(context: Context, packageName: String, state: FrogState): Boolean {

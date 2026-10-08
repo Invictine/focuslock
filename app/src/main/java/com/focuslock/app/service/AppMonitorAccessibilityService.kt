@@ -681,11 +681,15 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         }.getOrDefault(emptyList())
         for (window in windowList) {
             try {
-                if (window.type != AccessibilityWindowInfo.TYPE_APPLICATION) continue
-                val root = window.root ?: continue
+                // Accessibility shields must never occlude themselves. Keep native
+                // system/IME geometry so shields leave their higher-layer areas clear.
+                val appWindow = window.type == AccessibilityWindowInfo.TYPE_APPLICATION
+                if (!appWindow && window.type != AccessibilityWindowInfo.TYPE_SYSTEM &&
+                    window.type != AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue
+                val root = window.root
                 try {
-                    val pkg = root.packageName?.toString() ?: continue
-                    if (pkg == "android" || pkg == "com.android.systemui" || pkg == resolveDefaultImePackage()) continue
+                    val pkg = root?.packageName?.toString().orEmpty()
+                    if (appWindow && pkg.isBlank()) continue
                     val bounds = Rect()
                     window.getBoundsInScreen(bounds)
                     if (bounds.isEmpty) continue
@@ -693,8 +697,11 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                         window.id, pkg, window.layer, window.isActive, window.isFocused,
                         WindowBounds(bounds.left, bounds.top, bounds.right, bounds.bottom),
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) window.displayId else 0,
+                        // Keyboard settings are ordinary app windows: track them
+                        // as foreground, then exempt them through DeviceAccessPolicy.
+                        isAppWindow = appWindow,
                     )
-                } finally { if (canRecycleNodes) root.recycle() }
+                } finally { if (canRecycleNodes) root?.recycle() }
             } catch (_: Exception) {
                 // A closed window can disappear between metadata and root reads.
             } finally { if (canRecycleNodes) runCatching { window.recycle() } }
@@ -808,6 +815,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         windowClasses.keys.retainAll(ids)
         val decisions = mutableMapOf<Int, String>()
         for (window in snapshot) {
+            if (!window.isAppWindow) continue
             if (window.packageName == applicationContext.packageName || FrogAppPolicy.isHome(this, window.packageName)) continue
             val screen = displayBounds(window.displayId)
             if (!InteractiveWindowPolicy.isMultiWindow(window, snapshot, screen) ||
@@ -829,6 +837,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         // Policy reads suspend. Never shield a closed/moved window using stale geometry.
         val current = readInteractiveAppWindows()
         val targets = current.mapNotNull { window ->
+            if (!window.isAppWindow) return@mapNotNull null
             val original = snapshot.firstOrNull { it.id == window.id && it.packageName == window.packageName && it.displayId == window.displayId }
                 ?: return@mapNotNull null
             decisions[original.id] ?: return@mapNotNull null
@@ -964,7 +973,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             val decision = appWindowDecision(packageName, foregroundWindowClass)
             if (currentForegroundPackage != packageName) return@launch
             latestAppCheckDecision = decision
-            if (decision == "update_access_exempt") {
+            if (decision == "update_access_exempt" || decision == "device_access_exempt") {
                 stopPolicyActivityRefresh()
                 return@launch
             }
@@ -996,6 +1005,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
 
     /** Shared access decision for foreground enforcement and every visible popup. */
     private suspend fun appWindowDecision(packageName: String, windowClass: String?): String {
+        if (DeviceAccessPolicy.isExempt(this, packageName)) return "device_access_exempt"
         if (AppUpdateAccessPolicy.isUpdateApp(packageName)) return "update_access_exempt"
         val app = FocusLockApplication.instance
         val settings = app.settingsRepository
@@ -1035,6 +1045,10 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     }
 
     private suspend fun updateAppPolicyActivity(app: FocusLockApplication, packageName: String): Boolean {
+        if (DeviceAccessPolicy.isExempt(this, packageName)) {
+            stopPolicyActivityRefresh()
+            return false
+        }
         if (packageName == applicationContext.packageName || packageName in BROWSER_PACKAGES) return false
         if (!app.homeLocationRepository.shouldEnforceNow()) {
             stopPolicyActivityRefresh()
@@ -1201,6 +1215,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     private suspend fun enforceScheduleOnCurrentForeground() {
         if (!FocusLockApplication.instance.homeLocationRepository.shouldEnforceNow()) return
         val packageName = currentForegroundPackage ?: return
+        if (DeviceAccessPolicy.isExempt(this, packageName)) return
         if (packageName == applicationContext.packageName) return
         try {
             val settings = FocusLockApplication.instance.settingsRepository
@@ -1733,6 +1748,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     }
 
     private suspend fun triggerBlocker(blockedPackage: String, website: String? = null, reason: String? = null) {
+        if (DeviceAccessPolicy.isExempt(this, blockedPackage)) return
         if (AppUpdateAccessPolicy.isUpdateApp(blockedPackage)) return
         if (!FocusLockApplication.instance.homeLocationRepository.shouldEnforceNow(permanent = reason == "permanent")) return
         if (currentForegroundPackage != blockedPackage || !isScreenInteractive()) return
@@ -1756,6 +1772,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         // the best chance of succeeding when called from serviceScope (Default).
         withContext(Dispatchers.Main) {
             if (currentForegroundPackage != blockedPackage || !isScreenInteractive()) return@withContext
+            if (DeviceAccessPolicy.isExempt(this@AppMonitorAccessibilityService, blockedPackage)) return@withContext
             // A check begun before Frog armed may resume after a settings/store read.
             // Apply the current policy at the actual launch boundary as well.
             val enforceFrog = reason != "permanent" && (reason == FrogCoordinator.REASON_FROG || isFrogLockActive())
@@ -1864,6 +1881,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     }
 
     private suspend fun triggerNuke() {
+        if (currentForegroundPackage?.let { DeviceAccessPolicy.isExempt(this, it) } == true) return
         if (AppUpdateAccessPolicy.isUpdateApp(currentForegroundPackage)) return
         if (!FocusLockApplication.instance.homeLocationRepository.shouldEnforceNow()) return
         if (!isScreenInteractive()) return
@@ -1875,6 +1893,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
             }
             withContext(Dispatchers.Main) {
+                if (currentForegroundPackage?.let { DeviceAccessPolicy.isExempt(this@AppMonitorAccessibilityService, it) } == true) return@withContext
                 if (AppUpdateAccessPolicy.isUpdateApp(currentForegroundPackage)) return@withContext
                 startActivity(intent)
             }
