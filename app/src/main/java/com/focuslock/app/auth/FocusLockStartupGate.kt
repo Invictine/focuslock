@@ -8,11 +8,15 @@ internal fun FocusLockStartupGate(
     authState: FocusAuthState,
     offlineMode: Boolean,
     onContinueOffline: () -> Unit,
+    nativeSignInViewModel: NativeSignInViewModel? = null,
+    onGoogle: () -> Unit = {},
     content: @Composable () -> Unit,
 ) {
     FocusAuthGate(
         state = if (offlineMode) FocusAuthState.Unconfigured else authState,
         onContinueOffline = onContinueOffline,
+        nativeSignInViewModel = nativeSignInViewModel,
+        onGoogle = onGoogle,
         content = content,
     )
 }

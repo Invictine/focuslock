@@ -2,9 +2,14 @@ package com.focuslock.app.auth
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.credentials.CredentialManager
+import androidx.credentials.ClearCredentialStateRequest
+import com.focuslock.app.FocusLockApplication
 import com.clerk.api.Clerk
 import com.clerk.api.network.serialization.onSuccess
 import com.clerk.api.session.GetTokenOptions
+import com.clerk.api.session.Session.SessionStatus
+import com.clerk.api.session.pendingTaskKey
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
@@ -38,11 +43,11 @@ class AuthViewModel : ViewModel() {
             _state.value = FocusAuthState.Unconfigured
         } else {
             viewModelScope.launch {
-                combine(Clerk.isInitialized, Clerk.userFlow) { initialized, user ->
+                combine(Clerk.isInitialized, Clerk.userFlow, Clerk.sessionFlow) { initialized, user, session ->
                     _accountId.value = user?.id
                     when {
                         !initialized -> FocusAuthState.Loading
-                        user != null -> FocusAuthState.SignedIn
+                        user != null && session?.status == SessionStatus.ACTIVE && session.pendingTaskKey == null -> FocusAuthState.SignedIn
                         else -> FocusAuthState.SignedOut
                     }
                 }.collect { _state.value = it }
@@ -76,6 +81,11 @@ class AuthViewModel : ViewModel() {
     fun signOut(onDone: () -> Unit = {}) {
         viewModelScope.launch {
             try { Clerk.auth.signOut() } catch (_: Exception) { }
+            // Let Google's provider offer all accounts again after an explicit sign-out.
+            try {
+                CredentialManager.create(FocusLockApplication.instance)
+                    .clearCredentialState(ClearCredentialStateRequest())
+            } catch (_: Exception) { }
             onDone()
         }
     }

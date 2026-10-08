@@ -1,41 +1,28 @@
 package com.focuslock.app.auth
 
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import com.clerk.api.Clerk
-import com.clerk.ui.auth.AuthView
 import com.clerk.ui.userbutton.UserButton
-import com.focuslock.app.ui.components.IconBadge
-import com.focuslock.app.ui.components.StaggeredFadeSlide
-import com.focuslock.app.ui.components.rememberDecorativePulse
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.activity.compose.BackHandler
 
 @Composable
 fun FocusAuthGate(
     state: FocusAuthState,
     onContinueOffline: () -> Unit,
+    nativeSignInViewModel: NativeSignInViewModel? = null,
+    onGoogle: () -> Unit = {},
     content: @Composable () -> Unit,
 ) {
     when (state) {
@@ -43,374 +30,25 @@ fun FocusAuthGate(
             CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
         }
         FocusAuthState.SignedIn, FocusAuthState.Unconfigured -> content()
-        FocusAuthState.SignedOut -> SignInScreen(onContinueOffline = onContinueOffline)
-    }
-}
-
-@Composable
-fun SignInScreen(onContinueOffline: () -> Unit) {
-    var showInAppAuth by remember { mutableStateOf(false) }
-
-    // Single one-shot entrance flag; every element stages itself off this via StaggeredEnter.
-    var entered by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) { entered = true }
-
-    // Memoize the backdrop brush so a new gradient isn't allocated on every recomposition.
-    val primaryContainer = MaterialTheme.colorScheme.primaryContainer
-    val secondaryContainer = MaterialTheme.colorScheme.secondaryContainer
-    val backgroundColor = MaterialTheme.colorScheme.background
-    val backdropBrush = remember(primaryContainer, secondaryContainer, backgroundColor) {
-        Brush.verticalGradient(
-            colors = listOf(
-                primaryContainer.copy(alpha = 0.42f),
-                backgroundColor,
-                secondaryContainer.copy(alpha = 0.30f),
-            )
-        )
-    }
-
-    // No Scaffold hosts this screen, so the root owns safeDrawing (status bar, display cutout,
-    // nav bar and IME). The background is painted full-bleed before the inset padding so the
-    // gradient runs under the system bars while content never does.
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(backgroundColor)
-            .background(backdropBrush)
-            .windowInsetsPadding(WindowInsets.safeDrawing)
-    ) {
-        SignInBackdrop(Modifier.matchParentSize())
-
-        if (showInAppAuth) {
-            // Auth form mode: bounded full-height column so Clerk's AuthView keeps the
-            // weight-based height it had before; the root still owns safe-drawing insets.
-            // Vertical breathing room stays minimal so content starts just under the bar.
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = 24.dp, vertical = 8.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                StaggeredEnter(visible = entered, index = 0, screenKey = "auth") { HeroEmblem(compact = true) }
-                Spacer(Modifier.height(12.dp))
-                SignInHeadline(visible = entered)
-                Spacer(Modifier.height(20.dp))
-
-                Box(Modifier.weight(1f, fill = true).fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
-                    AuthView(
-                        modifier = Modifier.fillMaxWidth(),
-                        preferGoogleOneTap = true,
-                    )
-                }
-
-                TextButton(onClick = {
-                    showInAppAuth = false
-                }) {
-                    Text("Back to sign-in options", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-        } else {
-            // Centering + scroll safety: a wrap-height Column aligned to Center scrolls once it
-            // exceeds the viewport (short screens) and stays optically centered when it doesn't.
-            // Vertical breathing room stays minimal; safe-drawing insets are owned by the root.
-            Column(
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 24.dp, vertical = 8.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                StaggeredEnter(visible = entered, index = 0, screenKey = "auth") { HeroEmblem() }
-                Spacer(Modifier.height(16.dp))
-                SignInHeadline(visible = entered)
-                Spacer(Modifier.height(20.dp))
-
-                // Feature Highlights
-                StaggeredEnter(visible = entered, index = 3, modifier = Modifier.fillMaxWidth(), screenKey = "auth") {
-                    Card(
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceContainer
-                        ),
-                        shape = RoundedCornerShape(20.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(16.dp),
-                            verticalArrangement = Arrangement.spacedBy(14.dp)
-                        ) {
-                            PriorityFeatureRow(
-                                icon = Icons.Rounded.Lock,
-                                title = "Multi-device focus lock",
-                                description = "Keep your phone and computer focused together."
-                            )
-                            PriorityFeatureRow(
-                                icon = Icons.Rounded.CloudSync,
-                                title = "Cloud sync",
-                                description = "Keep focus credits and habits in sync."
-                            )
-                            PriorityFeatureRow(
-                                icon = Icons.Rounded.Laptop,
-                                title = "Desktop companion",
-                                description = "Apply the same boundaries across your devices."
-                            )
-                        }
-                    }
-                }
-
-                Spacer(Modifier.height(24.dp))
-
-                StaggeredEnter(visible = entered, index = 4, modifier = Modifier.fillMaxWidth(), screenKey = "auth") {
-                    Column(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                    ) {
-                        Button(
-                            onClick = {
-                                showInAppAuth = true
-                            },
-                            shape = RoundedCornerShape(16.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.primary,
-                                contentColor = MaterialTheme.colorScheme.onPrimary
-                            ),
-                            modifier = Modifier.fillMaxWidth().height(56.dp)
-                        ) {
-                            Icon(Icons.Rounded.Login, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text(
-                                "Sign in to FocusLock",
-                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
-                            )
-                        }
-
-                        Spacer(Modifier.height(10.dp))
-
-                        // Tonal secondary action — no outlined/bordered container.
-                        FilledTonalButton(
-                            onClick = { showInAppAuth = true },
-                            shape = RoundedCornerShape(16.dp),
-                            colors = ButtonDefaults.filledTonalButtonColors(
-                                containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer
-                            ),
-                            modifier = Modifier.fillMaxWidth().height(52.dp)
-                        ) {
-                            Icon(Icons.Rounded.Mail, contentDescription = null, modifier = Modifier.size(18.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text("Use email instead")
-                        }
-                    }
-                }
-
-                Spacer(Modifier.height(12.dp))
-
-                SignInFooter(visible = entered, onContinueOffline = onContinueOffline)
-            }
+        FocusAuthState.SignedOut -> {
+                val signInModel = nativeSignInViewModel ?: viewModel<NativeSignInViewModel>()
+                val signInState by signInModel.uiState.collectAsState()
+                BackHandler(enabled = signInState.step != NativeSignInStep.Options) { signInModel.backToOptions() }
+                NativeSignInScreen(
+                    state = signInState,
+                    onGoogle = onGoogle,
+                    onShowEmail = signInModel::showEmail,
+                    onEmail = signInModel::submitEmail,
+                    onPassword = signInModel::submitPassword,
+                    onCode = signInModel::submitCode,
+                    onProfile = signInModel::submitProfile,
+                    onResendCode = signInModel::resendCode,
+                    onChooseSecondFactor = signInModel::chooseSecondFactor,
+                    onBackToOptions = signInModel::backToOptions,
+                    onContinueOffline = { signInModel.backToOptions(); onContinueOffline() },
+                    applySafeDrawingInsets = true,
+                )
         }
-    }
-}
-
-/**
- * Shared 12dp entrance with capped stagger and motion-scale gating.
- * Content stays laid out; switching auth forms does not replay the cascade.
- */
-@Composable
-private fun StaggeredEnter(
-    visible: Boolean,
-    index: Int,
-    modifier: Modifier = Modifier,
-    screenKey: String? = null,
-    content: @Composable () -> Unit,
-) {
-    StaggeredFadeSlide(
-        visible = visible,
-        index = index,
-        modifier = modifier,
-        screenKey = screenKey,
-        content = content,
-    )
-}
-
-@Composable
-private fun SignInHeadline(visible: Boolean) {
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        StaggeredEnter(visible = visible, index = 1, screenKey = "auth") {
-            Text(
-                "Stay focused everywhere",
-                style = MaterialTheme.typography.headlineMedium.copy(
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = (-0.4).sp
-                ),
-                color = MaterialTheme.colorScheme.onSurface,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
-        Spacer(Modifier.height(8.dp))
-        StaggeredEnter(visible = visible, index = 2, screenKey = "auth") {
-            Text(
-                "Sign in to sync your focus boundaries, credits, and progress across devices.",
-                style = MaterialTheme.typography.bodyLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
-    }
-}
-
-@Composable
-private fun SignInFooter(visible: Boolean, onContinueOffline: () -> Unit) {
-    StaggeredEnter(visible = visible, index = 5, screenKey = "auth") {
-        Column(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            TextButton(onClick = onContinueOffline) {
-                Text("Continue offline", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            Text(
-                "Your boundaries and progress stay on this device. Sign in later from Account to sync.",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(horizontal = 8.dp)
-            )
-        }
-    }
-}
-
-/**
- * Layered hero: concentric tonal rings (filled, never stroked), an infinite halo pulse read in
- * the draw/layer phase, and the gradient shield disc on top.
- */
-@Composable
-private fun HeroEmblem(compact: Boolean = false) {
-    val primary = MaterialTheme.colorScheme.primary
-    val tertiary = MaterialTheme.colorScheme.tertiary
-    val primaryContainer = MaterialTheme.colorScheme.primaryContainer
-    val onPrimary = MaterialTheme.colorScheme.onPrimary
-
-    // Memoize the brush so a new gradient isn't allocated on every recomposition.
-    val gradient = remember(primary, tertiary) {
-        Brush.linearGradient(colors = listOf(primary, tertiary))
-    }
-
-    // Halo pulse is gated by the shared lifecycle/system-animator/motion-scale helper;
-    // idle reads a static value with no infinite transition running. Both State values
-    // are read only inside the layer/draw lambdas below so the pulse never recomposes.
-    val haloAlphaState = rememberDecorativePulse(
-        initialValue = 0.10f,
-        targetValue = 0.26f,
-        label = "signin-halo-alpha",
-    )
-    val haloScaleState = rememberDecorativePulse(
-        initialValue = 0.94f,
-        targetValue = 1.06f,
-        staticValue = 1f,
-        label = "signin-halo-scale",
-    )
-
-    val emblemSize = if (compact) 104.dp else 160.dp
-    val haloSize = if (compact) 64.dp else 96.dp
-    val discSize = if (compact) 56.dp else 80.dp
-    val iconSize = if (compact) 28.dp else 40.dp
-
-    Box(modifier = Modifier.size(emblemSize), contentAlignment = Alignment.Center) {
-        Canvas(Modifier.fillMaxSize()) {
-            val ringCenter = center
-            drawCircle(
-                color = primaryContainer.copy(alpha = 0.10f),
-                radius = size.minDimension * 0.50f,
-                center = ringCenter
-            )
-            drawCircle(
-                color = primaryContainer.copy(alpha = 0.20f),
-                radius = size.minDimension * 0.375f,
-                center = ringCenter
-            )
-            drawCircle(
-                color = primaryContainer.copy(alpha = 0.32f),
-                radius = size.minDimension * 0.26f,
-                center = ringCenter
-            )
-        }
-
-        // Infinite halo pulse, read in the layer/draw phase so it never recomposes the emblem.
-        Box(
-            modifier = Modifier
-                .size(haloSize)
-                .graphicsLayer {
-                    scaleX = haloScaleState.value
-                    scaleY = haloScaleState.value
-                }
-                .drawBehind {
-                    drawCircle(color = primary, alpha = haloAlphaState.value)
-                }
-        )
-
-        Box(
-            modifier = Modifier
-                .size(discSize)
-                .background(brush = gradient, shape = CircleShape),
-            contentAlignment = Alignment.Center
-        ) {
-            Icon(
-                imageVector = Icons.Rounded.Shield,
-                contentDescription = null,
-                tint = onPrimary,
-                modifier = Modifier.size(iconSize)
-            )
-        }
-    }
-}
-
-/**
- * Full-bleed decorative layer: two soft tonal blobs plus faint orbit rings behind the hero.
- * Purely tonal fills (no hardcoded colors, no borders), sourced from the color scheme.
- */
-@Composable
-private fun SignInBackdrop(modifier: Modifier = Modifier) {
-    val primaryContainer = MaterialTheme.colorScheme.primaryContainer
-    val secondaryContainer = MaterialTheme.colorScheme.secondaryContainer
-    val primary = MaterialTheme.colorScheme.primary
-    val background = MaterialTheme.colorScheme.background
-
-    Canvas(modifier = modifier) {
-        val width = size.width
-        val height = size.height
-        if (width <= 0f || height <= 0f) return@Canvas
-
-        val topBlobRadius = width * 0.62f
-        val topBlobCenter = Offset(width * 0.88f, height * 0.08f)
-        drawCircle(
-            brush = Brush.radialGradient(
-                colors = listOf(primaryContainer.copy(alpha = 0.55f), background.copy(alpha = 0f)),
-                center = topBlobCenter,
-                radius = topBlobRadius
-            ),
-            radius = topBlobRadius,
-            center = topBlobCenter
-        )
-
-        val bottomBlobRadius = width * 0.72f
-        val bottomBlobCenter = Offset(width * 0.06f, height * 0.94f)
-        drawCircle(
-            brush = Brush.radialGradient(
-                colors = listOf(secondaryContainer.copy(alpha = 0.45f), background.copy(alpha = 0f)),
-                center = bottomBlobCenter,
-                radius = bottomBlobRadius
-            ),
-            radius = bottomBlobRadius,
-            center = bottomBlobCenter
-        )
-
-        val orbitCenter = Offset(width / 2f, height * 0.28f)
-        drawCircle(color = primary.copy(alpha = 0.05f), radius = width * 0.42f, center = orbitCenter)
-        drawCircle(color = primary.copy(alpha = 0.04f), radius = width * 0.56f, center = orbitCenter)
     }
 }
 
@@ -420,14 +58,15 @@ fun AccountScreen(
     syncStatus: String,
     onSyncNow: () -> Unit,
     onSignOut: () -> Unit,
+    onGoogleSignIn: () -> Unit = {},
+    onOpenSignIn: () -> Unit = {},
+    googleSignInError: String? = null,
+    googleSignInBusy: Boolean = false,
+    googleSignInAvailable: Boolean = true,
 ) {
     val user by Clerk.userFlow.collectAsState(initial = null)
     val isSignedIn = authState == FocusAuthState.SignedIn && user != null
-    var showSignIn by remember { mutableStateOf(false) }
     var showSignOutConfirm by remember { mutableStateOf(false) }
-    LaunchedEffect(isSignedIn) {
-        if (isSignedIn) showSignIn = false
-    }
     // MainActivity surfaces SyncStatus.Syncing as "Syncing…" — use it to lock the button.
     val isSyncing = syncStatus.startsWith("Syncing")
     // No internal verticalScroll/fillMaxSize: renders at content height so it can be
@@ -630,36 +269,20 @@ fun AccountScreen(
 
                     HorizontalDivider(color = MaterialTheme.colorScheme.surfaceContainerHighest)
 
-                    Button(
-                        onClick = { showSignIn = true },
-                        shape = RoundedCornerShape(12.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.primary,
-                            contentColor = MaterialTheme.colorScheme.onPrimary
-                        ),
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)
-                    ) {
-                        Icon(Icons.Rounded.Stars, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            "Sign in to sync",
-                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold)
-                        )
+                    if (!googleSignInError.isNullOrBlank()) {
+                        Text(googleSignInError, color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall)
                     }
+                    GoogleSignInButton(
+                        onClick = onGoogleSignIn,
+                        enabled = googleSignInAvailable && !googleSignInBusy,
+                        busy = googleSignInBusy,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    TextButton(onClick = onOpenSignIn, enabled = !googleSignInBusy) { Text("Use email instead") }
                 }
             }
 
-        }
-    }
-
-    if (showSignIn && !isSignedIn) {
-        Dialog(
-            onDismissRequest = { showSignIn = false },
-            properties = DialogProperties(usePlatformDefaultWidth = false),
-        ) {
-            Box(Modifier.fillMaxSize()) {
-                SignInScreen(onContinueOffline = { showSignIn = false })
-            }
         }
     }
 
@@ -692,38 +315,5 @@ fun AccountScreen(
             },
             shape = MaterialTheme.shapes.large
         )
-    }
-}
-
-@Composable
-private fun PriorityFeatureRow(
-    icon: ImageVector,
-    title: String,
-    description: String
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.Top,
-        horizontalArrangement = Arrangement.spacedBy(12.dp)
-    ) {
-        IconBadge(
-            icon = icon,
-            size = 40.dp,
-            containerColor = MaterialTheme.colorScheme.primaryContainer,
-            contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-        )
-
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Text(
-                text = description,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
     }
 }

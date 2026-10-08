@@ -1,9 +1,17 @@
 # Android Google sign-in
 
-Both onboarding and the signed-out Account screen use Clerk's in-app `AuthView`
-with `preferGoogleOneTap = true`. Google sign-in uses Android Credential Manager
-when Clerk's environment provides `display_config.google_one_tap_client_id`.
-Clerk still handles email sign-in, sign-up, MFA, and session continuation.
+Both onboarding and the signed-out Account screen expose a direct **Continue
+with Google** action. Android Credential Manager's explicit Google button flow
+(`GetSignInWithGoogleOption`) opens the system account picker. The app then
+passes the ID token to Clerk for validation and account/session creation.
+There is no Clerk sign-in modal or browser fallback. Email, verification codes,
+required profile fields, passwords, and supported second factors use FocusLock's
+own full-screen Compose UI.
+
+The Google Web client ID is public configuration, supplied through
+`google.webClientId` in ignored `local.properties` or `GOOGLE_WEB_CLIENT_ID` in
+the build environment. It must match the Web client configured in Clerk.
+The existing distribution worker copies `local.properties` into each build.
 
 ## Google and Clerk configuration
 
@@ -30,10 +38,26 @@ configuration.
 - On an Android device with a Google account and Google Play services, open
   sign-in from onboarding and Account, then select Google. Verify the native
   account picker appears and completes a Clerk session.
-- Verify the signed-in account and a real sync round trip. The Account dialog
-  should dismiss after sign-in; Continue offline and Back should close it.
+- Verify the signed-in account and a real sync round trip. Google cancellation
+  should stay on the originating screen without an error. Back from Account's
+  email route should return to Account. Continue offline should preserve the
+  offline workflow at startup.
 
-`AccountSignInUiTest` verifies the Account action opens the in-app dialog and
-Continue offline returns to Account. It does not establish a completed Google
-sign-in. Clerk can fall back to browser OAuth when native Google credentials
-are unavailable or the device has no eligible Google account.
+`AccountSignInUiTest` verifies the direct Google callback, inline errors, and
+the full-screen screen fixture. `MainAccountSignInRouteTest` launches the actual
+MainActivity and verifies Account's email route and system back navigation.
+`GoogleTokenExchangeTest` verifies that existing
+accounts retain their required verification and only the explicit unknown
+external account response can create a new account. These tests do not
+establish a completed Google sign-in on a real device. An unavailable Google
+account/provider yields an inline hint with an email alternative.
+
+On October 8, 2026, the debug build, lint, 216 unit tests, and seven targeted
+emulator UI tests passed. Tapping the actual Account Google button opened
+Google Play services directly. The emulator had no Google account, so completed
+Google authentication and a signed-in sync round trip remain device checks.
+The custom flow gates sessions that require post-sign-in organization selection
+or security enrollment; those tasks are not enabled in the current instance.
+
+The Google mark is Google's unmodified [official PNG asset](https://developers.google.com/static/identity/images/g-logo.png).
+The native button follows [Google's Android button-flow guidance](https://developer.android.com/identity/sign-in/credential-manager-siwg-implementation).

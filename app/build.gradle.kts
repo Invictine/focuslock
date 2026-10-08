@@ -8,6 +8,7 @@ val ticktickClientId: String = (localProps.getProperty("ticktick.clientId") ?: "
 val ticktickClientSecret: String = (localProps.getProperty("ticktick.clientSecret") ?: "").trim()
 val clerkPublishableKey: String = (localProps.getProperty("clerk.publishableKey") ?: System.getenv("CLERK_PUBLISHABLE_KEY") ?: "").trim()
 val convexUrl: String = (localProps.getProperty("convex.url") ?: System.getenv("CONVEX_URL") ?: "").trim()
+val googleWebClientId: String = (localProps.getProperty("google.webClientId") ?: System.getenv("GOOGLE_WEB_CLIENT_ID") ?: "").trim()
 
 plugins {
     alias(libs.plugins.android.application)
@@ -41,6 +42,7 @@ android {
         buildConfigField("String", "TICKTICK_CLIENT_SECRET", "\"$ticktickClientSecret\"")
         // Clerk auth + Convex sync (gitignored local.properties or env). Empty = auth-gated off.
         buildConfigField("String", "CLERK_PUBLISHABLE_KEY", "\"$clerkPublishableKey\"")
+        buildConfigField("String", "GOOGLE_WEB_CLIENT_ID", "\"$googleWebClientId\"")
         buildConfigField("String", "CONVEX_URL", "\"$convexUrl\"")
     }
 
@@ -98,6 +100,12 @@ dependencies {
     implementation(libs.androidx.lifecycle.viewmodel)
     implementation(libs.androidx.work.runtime)
     implementation(libs.clerk.android.ui)
+    // Google button flow uses the native Credential Manager UI; Clerk validates its ID token.
+    implementation("androidx.credentials:credentials:1.6.0")
+    implementation("androidx.credentials:credentials-play-services-auth:1.6.0")
+    implementation("com.google.android.libraries.identity.googleid:googleid:1.2.0")
+    // Keep Google's transitive Fragment dependency compatible with ActivityResult APIs.
+    implementation("androidx.fragment:fragment:1.8.9")
     implementation(libs.androidx.activity.compose)
 
     implementation(libs.androidx.compose.ui)

@@ -58,6 +58,9 @@ import com.focuslock.app.auth.AccountScreen
 import com.focuslock.app.auth.AuthViewModel
 import com.focuslock.app.auth.FocusLockStartupGate
 import com.focuslock.app.auth.FocusAuthState
+import com.focuslock.app.auth.NativeSignInScreen
+import com.focuslock.app.auth.NativeSignInStep
+import com.focuslock.app.auth.NativeSignInViewModel
 import com.focuslock.app.service.AppMonitorForegroundService
 import com.focuslock.app.sync.ConvexSyncClient
 import com.focuslock.app.sync.DeviceInfo
@@ -168,6 +171,13 @@ class MainActivity : ComponentActivity() {
             FocusLockTheme {
                 val authViewModel: AuthViewModel by viewModels()
                 val authState by authViewModel.state.collectAsStateWithLifecycle()
+                val nativeSignInViewModel: NativeSignInViewModel by viewModels()
+                val nativeSignInState by nativeSignInViewModel.uiState.collectAsStateWithLifecycle()
+                LaunchedEffect(authState) {
+                    if (authState == FocusAuthState.SignedOut && nativeSignInState.step == NativeSignInStep.Complete) {
+                        nativeSignInViewModel.backToOptions()
+                    }
+                }
 
                 val app = application as FocusLockApplication
                 // Offline mode is a persisted preference chosen on the auth gate; the
@@ -242,12 +252,24 @@ class MainActivity : ComponentActivity() {
                 FocusLockStartupGate(
                     authState = authState,
                     offlineMode = offlineMode,
+                    nativeSignInViewModel = nativeSignInViewModel,
+                    onGoogle = { nativeSignInViewModel.signInWithGoogle(this@MainActivity) },
                     onContinueOffline = {
                         offlineOverride = true
                         lifecycleScope.launch { app.settingsRepository.setOfflineMode(true) }
                     },
                 ) {
                     var currentTab by rememberSaveable { mutableStateOf(NavigationItem.DASHBOARD) }
+                    var showAccountSignIn by rememberSaveable { mutableStateOf(false) }
+                    LaunchedEffect(authState) {
+                        if (authState == FocusAuthState.SignedIn) showAccountSignIn = false
+                    }
+                    LaunchedEffect(nativeSignInState.step, authState, currentTab) {
+                        if (authState != FocusAuthState.SignedIn &&
+                            nativeSignInState.step != NativeSignInStep.Options &&
+                            currentTab == NavigationItem.ACCOUNT
+                        ) showAccountSignIn = true
+                    }
                     var showDebug by rememberSaveable { mutableStateOf(false) }
                     val onboardingStore = remember { ProductOnboardingStore(this@MainActivity) }
                     var onboardingPage by rememberSaveable { mutableIntStateOf(onboardingStore.pageIndex) }
@@ -272,15 +294,23 @@ class MainActivity : ComponentActivity() {
                     // in the Boundaries picker. Plain state; consumed (cleared) by the
                     // picker as soon as it opens the editor.
                     var pendingMergeTarget by remember { mutableStateOf<PendingMergeTarget?>(null) }
-                    val isSubScreen = showDebug ||
+                    val isSubScreen = !showAccountSignIn && (showDebug ||
                         currentTab == NavigationItem.SETTINGS ||
-                        currentTab == NavigationItem.ACCOUNT
+                        currentTab == NavigationItem.ACCOUNT)
                     val goBack = {
-                        if (showDebug) showDebug = false else currentTab = NavigationItem.DASHBOARD
+                        when {
+                            showAccountSignIn -> {
+                                showAccountSignIn = false
+                                nativeSignInViewModel.backToOptions()
+                            }
+                            showDebug -> showDebug = false
+                            else -> currentTab = NavigationItem.DASHBOARD
+                        }
                     }
                     // System back from Settings/Account/Debug returns to the Focus tab
                     // instead of exiting the app.
                     BackHandler(enabled = isSubScreen) { goBack() }
+                    BackHandler(enabled = showAccountSignIn) { goBack() }
                     // One-time self-heal: clamp legacy-inflated bank when today has zero work.
                     LaunchedEffect(Unit) {
                         try { app.creditBankRepository.reconcileBalanceWithFocus() } catch (_: Exception) { }
@@ -291,11 +321,15 @@ class MainActivity : ComponentActivity() {
                     containerColor = MaterialTheme.colorScheme.background,
                     snackbarHost = { SnackbarHost(snackbarHostState) },
                     topBar = {
-                        if (isSubScreen) {
+                        if (isSubScreen || showAccountSignIn) {
                             TopAppBar(
                                 title = {
                                     Text(
-                                        text = if (showDebug) "Debug data" else currentTab.title,
+                                        text = when {
+                                            showAccountSignIn -> "Sign in"
+                                            showDebug -> "Debug data"
+                                            else -> currentTab.title
+                                        },
                                         style = MaterialTheme.typography.titleLarge.copy(
                                             fontWeight = FontWeight.SemiBold,
                                             letterSpacing = (-0.2).sp
@@ -306,7 +340,7 @@ class MainActivity : ComponentActivity() {
                                     IconButton(onClick = goBack) {
                                         Icon(
                                             Icons.AutoMirrored.Filled.ArrowBack,
-                                            contentDescription = "Back to Focus"
+                                        contentDescription = if (showAccountSignIn) "Back to Account" else "Back to Focus"
                                         )
                                     }
                                 },
@@ -319,6 +353,7 @@ class MainActivity : ComponentActivity() {
                         }
                     },
                     bottomBar = {
+                        if (!showAccountSignIn) {
                         NavigationBar(
                             containerColor = MaterialTheme.colorScheme.surfaceContainer,
                             tonalElevation = 0.dp
@@ -358,6 +393,7 @@ class MainActivity : ComponentActivity() {
                                 )
                             }
                         }
+                        }
                     }
                 ) { innerPadding ->
                     Box(
@@ -369,7 +405,21 @@ class MainActivity : ComponentActivity() {
                     ) {
                         Box(Modifier.widthIn(max = 720.dp).fillMaxSize()) {
                         // The permission wizard starts after the product tour, avoiding stacked dialogs.
-                        if (showProductOnboarding) {
+                        if (showAccountSignIn) {
+                            NativeSignInScreen(
+                                state = nativeSignInState,
+                                onGoogle = { nativeSignInViewModel.signInWithGoogle(this@MainActivity) },
+                                onShowEmail = nativeSignInViewModel::showEmail,
+                                onEmail = nativeSignInViewModel::submitEmail,
+                                onPassword = nativeSignInViewModel::submitPassword,
+                                onCode = nativeSignInViewModel::submitCode,
+                                onProfile = nativeSignInViewModel::submitProfile,
+                                onResendCode = nativeSignInViewModel::resendCode,
+                                onChooseSecondFactor = nativeSignInViewModel::chooseSecondFactor,
+                                onBackToOptions = nativeSignInViewModel::backToOptions,
+                                onBack = goBack,
+                            )
+                        } else if (showProductOnboarding) {
                             // The guide occupies its own modal surface below.
                         } else if (showDebug) {
                             DebugDataScreen(onBack = { showDebug = false })
@@ -415,6 +465,12 @@ class MainActivity : ComponentActivity() {
                                     authViewModel.signOut()
                                 },
                                 authViewModel = authViewModel,
+                                nativeSignInState = nativeSignInState,
+                                onGoogleSignIn = { nativeSignInViewModel.signInWithGoogle(this@MainActivity) },
+                                onOpenSignIn = {
+                                    nativeSignInViewModel.showEmail()
+                                    showAccountSignIn = true
+                                },
                                 onOpenMergeInBoundaries = { target ->
                                     pendingMergeTarget = target
                                     currentTab = NavigationItem.APPS
@@ -498,6 +554,9 @@ class MainActivity : ComponentActivity() {
         onSyncNow: () -> Unit,
         onSignOut: () -> Unit,
         authViewModel: AuthViewModel,
+        nativeSignInState: com.focuslock.app.auth.NativeSignInUiState,
+        onGoogleSignIn: () -> Unit,
+        onOpenSignIn: () -> Unit,
         onOpenMergeInBoundaries: (PendingMergeTarget) -> Unit,
     ) {
         val syncStatus by syncStatusFlow.collectAsStateWithLifecycle(initialValue = SyncStatus.Idle)
@@ -576,6 +635,11 @@ class MainActivity : ComponentActivity() {
                     onSyncNow()
                 },
                 onSignOut = onSignOut,
+                onGoogleSignIn = onGoogleSignIn,
+                onOpenSignIn = onOpenSignIn,
+                googleSignInError = nativeSignInState.error,
+                googleSignInBusy = nativeSignInState.busy,
+                googleSignInAvailable = nativeSignInState.googleAvailable,
             )
             if (authState == FocusAuthState.SignedIn) {
                 CrossDeviceSection(
