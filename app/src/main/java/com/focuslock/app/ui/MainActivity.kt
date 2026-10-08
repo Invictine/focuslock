@@ -28,6 +28,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.GridView
 import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Person
@@ -70,8 +71,10 @@ import com.focuslock.app.ui.apps.BoundariesScreen
 import com.focuslock.app.ui.components.CrossDeviceUsageSection
 import com.focuslock.app.ui.components.PendingMergeTarget
 import com.focuslock.app.ui.components.SectionHeader
+import com.focuslock.app.ui.components.IconBadge
 import com.focuslock.app.ui.components.formatUsageSeconds
 import com.focuslock.app.ui.dashboard.DashboardScreen
+import com.focuslock.app.ui.nuke.NukeActionButton
 import com.focuslock.app.ui.onboarding.ProductOnboardingDialog
 import com.focuslock.app.ui.onboarding.ProductOnboardingStore
 import com.focuslock.app.ui.onboarding.ProductTourDestination
@@ -93,9 +96,10 @@ enum class NavigationItem(
     val selectedIcon: ImageVector,
     val unselectedIcon: ImageVector
 ) {
-    DASHBOARD("Focus", Icons.Rounded.Home, Icons.Rounded.Home),
+    DASHBOARD("Today", Icons.Rounded.Home, Icons.Rounded.Home),
     APPS("Boundaries", Icons.Rounded.GridView, Icons.Rounded.GridView),
-    STRICT("Strict", Icons.Rounded.Lock, Icons.Rounded.Lock),
+    ACTIVITY("Activity", Icons.Rounded.History, Icons.Rounded.History),
+    STRICT("Lock boundary changes", Icons.Rounded.Lock, Icons.Rounded.Lock),
     SETTINGS("Settings", Icons.Rounded.Settings, Icons.Rounded.Settings),
     ACCOUNT("Account", Icons.Rounded.Person, Icons.Rounded.Person)
 }
@@ -289,28 +293,36 @@ class MainActivity : ComponentActivity() {
                         onboardingStore.pause()
                         showProductOnboarding = false
                     }
+                    var settingsReturnTab by rememberSaveable { mutableStateOf(NavigationItem.DASHBOARD) }
+                    var accountReturnTab by rememberSaveable { mutableStateOf(NavigationItem.SETTINGS) }
+                    var settingsSection by rememberSaveable { mutableStateOf(com.focuslock.app.ui.settings.SettingsSection.OVERVIEW) }
+                    val openSettings: (com.focuslock.app.ui.settings.SettingsSection) -> Unit = { section ->
+                        if (currentTab != NavigationItem.SETTINGS) settingsReturnTab = currentTab
+                        settingsSection = section
+                        currentTab = NavigationItem.SETTINGS
+                    }
                     val tabStateHolder = rememberSaveableStateHolder()
                     // Cross-device "New bucket…": a usage row asks to open the merge editor
                     // in the Boundaries picker. Plain state; consumed (cleared) by the
                     // picker as soon as it opens the editor.
                     var pendingMergeTarget by remember { mutableStateOf<PendingMergeTarget?>(null) }
-                    val isSubScreen = !showAccountSignIn && (showDebug ||
+                    val isSubScreen = showDebug ||
                         currentTab == NavigationItem.SETTINGS ||
-                        currentTab == NavigationItem.ACCOUNT)
+                        currentTab == NavigationItem.ACCOUNT ||
+                        currentTab == NavigationItem.STRICT
                     val goBack = {
-                        when {
-                            showAccountSignIn -> {
-                                showAccountSignIn = false
-                                nativeSignInViewModel.backToOptions()
-                            }
-                            showDebug -> showDebug = false
-                            else -> currentTab = NavigationItem.DASHBOARD
+                        if (showAccountSignIn) {
+                            showAccountSignIn = false
+                            nativeSignInViewModel.backToOptions()
+                        } else if (showDebug) showDebug = false else currentTab = when (currentTab) {
+                            NavigationItem.SETTINGS -> settingsReturnTab
+                            NavigationItem.ACCOUNT -> accountReturnTab
+                            NavigationItem.STRICT -> NavigationItem.APPS
+                            else -> NavigationItem.DASHBOARD
                         }
                     }
-                    // System back from Settings/Account/Debug returns to the Focus tab
-                    // instead of exiting the app.
-                    BackHandler(enabled = isSubScreen) { goBack() }
-                    BackHandler(enabled = showAccountSignIn) { goBack() }
+                    // Nested screens register their own handler after this parent handler.
+                    BackHandler(enabled = showAccountSignIn || isSubScreen || currentTab != NavigationItem.DASHBOARD) { goBack() }
                     // One-time self-heal: clamp legacy-inflated bank when today has zero work.
                     LaunchedEffect(Unit) {
                         try { app.creditBankRepository.reconcileBalanceWithFocus() } catch (_: Exception) { }
@@ -321,15 +333,12 @@ class MainActivity : ComponentActivity() {
                     containerColor = MaterialTheme.colorScheme.background,
                     snackbarHost = { SnackbarHost(snackbarHostState) },
                     topBar = {
-                        if (isSubScreen || showAccountSignIn) {
                             TopAppBar(
                                 title = {
                                     Text(
-                                        text = when {
-                                            showAccountSignIn -> "Sign in"
-                                            showDebug -> "Debug data"
-                                            else -> currentTab.title
-                                        },
+                                        text = if (showAccountSignIn) "Sign in" else if (showDebug) "Debug data" else "FocusLock",
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
                                         style = MaterialTheme.typography.titleLarge.copy(
                                             fontWeight = FontWeight.SemiBold,
                                             letterSpacing = (-0.2).sp
@@ -337,11 +346,31 @@ class MainActivity : ComponentActivity() {
                                     )
                                 },
                                 navigationIcon = {
-                                    IconButton(onClick = goBack) {
+                                    if (isSubScreen) IconButton(onClick = { onBackPressedDispatcher.onBackPressed() }) {
                                         Icon(
                                             Icons.AutoMirrored.Filled.ArrowBack,
-                                        contentDescription = if (showAccountSignIn) "Back to Account" else "Back to Focus"
+                                            contentDescription = if (showAccountSignIn) "Back to Account" else "Back"
                                         )
+                                    }
+                                },
+                                actions = {
+                                    if (!isSubScreen && !showAccountSignIn) {
+                                        NukeActionButton(authViewModel = authViewModel)
+                                        IconButton(onClick = {
+                                            openSettings(com.focuslock.app.ui.settings.SettingsSection.OVERVIEW)
+                                        }) {
+                                            IconBadge(Icons.Rounded.Settings, contentDescription = "Settings", size = 40.dp,
+                                                containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                                                contentColor = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                        IconButton(onClick = {
+                                            accountReturnTab = currentTab
+                                            currentTab = NavigationItem.ACCOUNT
+                                        }) {
+                                            IconBadge(Icons.Rounded.Person, contentDescription = "Profile", size = 40.dp,
+                                                containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                                                contentColor = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
                                     }
                                 },
                                 colors = TopAppBarDefaults.topAppBarColors(
@@ -350,20 +379,17 @@ class MainActivity : ComponentActivity() {
                                     navigationIconContentColor = MaterialTheme.colorScheme.onSurface
                                 )
                             )
-                        }
                     },
                     bottomBar = {
-                        if (!showAccountSignIn) {
-                        NavigationBar(
+                        if (!isSubScreen && !showAccountSignIn) NavigationBar(
                             containerColor = MaterialTheme.colorScheme.surfaceContainer,
                             tonalElevation = 0.dp
                         ) {
-                            // Permanent blocks and blocking location live inside Boundaries.
-                            // Settings/Account are reached via the dashboard header (gear/avatar).
+                            // Daily actions, configuration, and review are peer destinations.
                             NavigationItem.entries.filter {
                                 it == NavigationItem.DASHBOARD ||
                                     it == NavigationItem.APPS ||
-                                    it == NavigationItem.STRICT
+                                    it == NavigationItem.ACTIVITY
                             }.forEach { item ->
                                 val isSelected = currentTab == item
                                 NavigationBarItem(
@@ -430,17 +456,26 @@ class MainActivity : ComponentActivity() {
                         // appearing weirdly" effect and extra composition cost.
                         // Keep each tab's scroll/form state while disposing its collectors
                         // and layout. Returning to a tab doesn't jump back to the top.
-                        tabStateHolder.SaveableStateProvider(currentTab.name) {
+                        // Today and Activity share the same producer and timer state.
+                        // A destination switch changes content without restarting work.
+                        val stateKey = if (currentTab == NavigationItem.DASHBOARD || currentTab == NavigationItem.ACTIVITY) "PRODUCTIVITY" else currentTab.name
+                        tabStateHolder.SaveableStateProvider(stateKey) {
                         when (currentTab) {
-                            NavigationItem.DASHBOARD -> DashboardScreen(
+                            NavigationItem.DASHBOARD, NavigationItem.ACTIVITY -> DashboardScreen(
                                 onOpenTickTick = { openTickTick() },
-                                onNavigatePermissions = { currentTab = NavigationItem.SETTINGS },
-                                onOpenSettings = { currentTab = NavigationItem.SETTINGS },
-                                onOpenAccount = { currentTab = NavigationItem.ACCOUNT }
+                                onNavigatePermissions = { openSettings(com.focuslock.app.ui.settings.SettingsSection.PROTECTION) },
+                                onOpenSettings = { openSettings(com.focuslock.app.ui.settings.SettingsSection.OVERVIEW) },
+                                onOpenConnections = { openSettings(com.focuslock.app.ui.settings.SettingsSection.CONNECTIONS) },
+                                showActivity = currentTab == NavigationItem.ACTIVITY,
+                                onOpenAccount = {
+                                    accountReturnTab = currentTab
+                                    currentTab = NavigationItem.ACCOUNT
+                                }
                             )
                             NavigationItem.APPS -> BoundariesScreen(
                                 pendingMergeTarget = pendingMergeTarget,
                                 onPendingMergeConsumed = { pendingMergeTarget = null },
+                                onOpenChanges = { currentTab = NavigationItem.STRICT },
                             )
                             NavigationItem.STRICT -> StrictModeScreen()
                             NavigationItem.SETTINGS -> SettingsScreen(
@@ -453,7 +488,12 @@ class MainActivity : ComponentActivity() {
                                     onboardingPage = onboardingStore.pageIndex
                                     showProductOnboarding = true
                                 },
-                                onboardingComplete = onboardingStore.isComplete
+                                onboardingComplete = onboardingStore.isComplete,
+                                initialSection = settingsSection,
+                                onOpenAccount = {
+                                    accountReturnTab = NavigationItem.SETTINGS
+                                    currentTab = NavigationItem.ACCOUNT
+                                },
                             )
                             NavigationItem.ACCOUNT -> AccountTab(
                                 authState = authState,
@@ -485,7 +525,7 @@ class MainActivity : ComponentActivity() {
 
                     // Google/Clerk may activate the session while their sign-in activity
                     // still owns the screen. Attach the guide only after this host resumes.
-                    if (showProductOnboarding && hostLifecycleState.isAtLeast(Lifecycle.State.RESUMED)) {
+                    if (showProductOnboarding && !showAccountSignIn && hostLifecycleState.isAtLeast(Lifecycle.State.RESUMED)) {
                         ProductOnboardingDialog(
                             pageIndex = onboardingPage,
                             onPageChange = { index ->
@@ -496,12 +536,15 @@ class MainActivity : ComponentActivity() {
                             onFinish = finishProductOnboarding,
                             onOpenDestination = { destination ->
                                 pauseProductOnboarding()
-                                currentTab = when (destination) {
-                                    ProductTourDestination.FOCUS -> NavigationItem.DASHBOARD
-                                    ProductTourDestination.BOUNDARIES -> NavigationItem.APPS
-                                    ProductTourDestination.STRICT -> NavigationItem.STRICT
-                                    ProductTourDestination.SETTINGS -> NavigationItem.SETTINGS
-                                    ProductTourDestination.ACCOUNT -> NavigationItem.ACCOUNT
+                                when (destination) {
+                                    ProductTourDestination.FOCUS -> currentTab = NavigationItem.DASHBOARD
+                                    ProductTourDestination.BOUNDARIES -> currentTab = NavigationItem.APPS
+                                    ProductTourDestination.STRICT -> currentTab = NavigationItem.STRICT
+                                    ProductTourDestination.SETTINGS -> openSettings(com.focuslock.app.ui.settings.SettingsSection.OVERVIEW)
+                                    ProductTourDestination.ACCOUNT -> {
+                                        accountReturnTab = currentTab
+                                        currentTab = NavigationItem.ACCOUNT
+                                    }
                                 }
                             }
                         )

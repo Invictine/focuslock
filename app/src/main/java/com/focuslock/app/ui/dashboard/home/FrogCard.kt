@@ -48,6 +48,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -147,9 +148,9 @@ fun FrogPickerBody(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 220.dp)
+                    .heightIn(max = if (LocalDensity.current.fontScale >= 1.3f) 320.dp else 220.dp)
                     .verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 openTasks.forEach { task ->
                     Surface(
@@ -158,7 +159,7 @@ fun FrogPickerBody(
                         shape = RoundedCornerShape(14.dp),
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+                        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(
                                 text = task.title,
                                 style = MaterialTheme.typography.titleSmall.copy(
@@ -176,7 +177,7 @@ fun FrogPickerBody(
                                     text = meta,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 2,
+                                    maxLines = 2,
                                     overflow = TextOverflow.Ellipsis,
                                 )
                             }
@@ -276,8 +277,8 @@ fun FrogCard(modifier: Modifier = Modifier, onOpenSettings: (() -> Unit)? = null
             modifier = modifier.fillMaxWidth(),
         ) {
             Column(Modifier.padding(16.dp)) {
-                Text("Eat the frog", style = MaterialTheme.typography.titleSmall)
-                Text("Off · Enable in settings", style = MaterialTheme.typography.bodyMedium,
+                Text("Daily priority", style = MaterialTheme.typography.titleSmall)
+                Text("Eat the Frog is off · Enable in settings", style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
@@ -310,7 +311,7 @@ fun FrogCard(modifier: Modifier = Modifier, onOpenSettings: (() -> Unit)? = null
                 Spacer(modifier = Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Eat the frog",
+                        text = "Daily priority",
                         style = MaterialTheme.typography.titleSmall.copy(
                             fontWeight = FontWeight.SemiBold,
                         ),
@@ -318,7 +319,7 @@ fun FrogCard(modifier: Modifier = Modifier, onOpenSettings: (() -> Unit)? = null
                     )
                     Text(
                         text = when (frogState?.phase) {
-                            null -> "Loading…"
+                            null -> "Eat the Frog · Loading…"
                             FrogPhase.NOT_ARMED -> "Starts at your wake hour; opens when you unlock"
                             FrogPhase.PICK_FROG -> "Pick today's frog"
                             FrogPhase.PICK_TOOLS -> "Choose the tools for today's frog"
@@ -381,9 +382,9 @@ fun FrogCard(modifier: Modifier = Modifier, onOpenSettings: (() -> Unit)? = null
                         },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.weight(1f).padding(end = 12.dp),
                 )
                 Text(
                     text = when (frogState.phase) {
@@ -405,7 +406,7 @@ fun FrogCard(modifier: Modifier = Modifier, onOpenSettings: (() -> Unit)? = null
                         }
                     },
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
-                    modifier = Modifier.heightIn(min = 40.dp),
+                    modifier = Modifier.heightIn(min = 48.dp),
                 ) {
                     Text("Prevent launcher escape", style = MaterialTheme.typography.labelMedium)
                 }

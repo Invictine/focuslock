@@ -76,7 +76,7 @@ import com.focuslock.app.service.InstalledAppsRepository
  */
 object UiTokens {
     // Shared edge rhythm keeps screens readable on compact phones.
-    val ScreenPadding = 20.dp
+    val ScreenPadding = 16.dp
     val SectionGap = 28.dp
     val ItemGap = 12.dp
     val IconTileSize = 40.dp

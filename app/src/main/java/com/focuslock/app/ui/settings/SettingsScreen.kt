@@ -42,6 +42,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -61,7 +62,6 @@ import com.focuslock.app.data.backup.ConfigBackupManager
 import com.focuslock.app.data.repository.BlockSchedule
 import com.focuslock.app.data.repository.FrogRepository
 import com.focuslock.app.data.repository.SettingsRepository
-import com.focuslock.app.ui.dashboard.home.FocusHomeStyle
 import com.focuslock.app.service.TickTickApiClient
 import com.focuslock.app.service.TickTickAuthConfig
 import com.focuslock.app.service.TickTickOAuthLoopbackServer
@@ -77,12 +77,22 @@ import java.util.Date
 import java.util.Locale
 import java.util.UUID
 
+enum class SettingsSection {
+    OVERVIEW,
+    CONNECTIONS,
+    ROUTINE,
+    PROTECTION,
+    PREFERENCES
+}
+
 @Composable
 fun SettingsScreen(
+    initialSection: SettingsSection = SettingsSection.OVERVIEW,
+    onOpenAccount: (() -> Unit)? = null,
     highlightKind: PermissionKind? = null,
     onOpenDebug: () -> Unit = {},
     onReplayOnboarding: () -> Unit = {},
-    onboardingComplete: Boolean = false,
+    onboardingComplete: Boolean = false
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -99,12 +109,21 @@ fun SettingsScreen(
     val tickTickUserName by settings.tickTickUserNameFlow.collectAsStateWithLifecycle(initialValue = "")
     val tickTickClientId by settings.tickTickClientIdFlow.collectAsStateWithLifecycle(initialValue = "")
     val tickTickClientSecret by settings.tickTickClientSecretFlow.collectAsStateWithLifecycle(initialValue = "")
-    val boundariesLock by settings.boundariesLockFlow.collectAsStateWithLifecycle(initialValue = false)
-    val focusHomeStyleKey by settings.focusHomeStyleFlow.collectAsStateWithLifecycle(
-        initialValue = SettingsRepository.DEFAULT_FOCUS_HOME_STYLE
-    )
-    var showHomeStyleDialog by remember { mutableStateOf(false) }
     var showFrogEssentialApps by rememberSaveable { mutableStateOf(false) }
+    var showAdvancedProviderOptions by rememberSaveable { mutableStateOf(false) }
+    var selectedSection by rememberSaveable { mutableStateOf(initialSection) }
+    var lastRequestedSection by rememberSaveable { mutableStateOf(initialSection) }
+
+    // Only an explicit parent destination change resets this local navigation state.
+    LaunchedEffect(initialSection) {
+        if (initialSection != lastRequestedSection) {
+            selectedSection = initialSection
+            lastRequestedSection = initialSection
+        }
+    }
+    LaunchedEffect(highlightKind) {
+        if (highlightKind != null) selectedSection = SettingsSection.PROTECTION
+    }
 
     var showOAuthCredentialsDialog by remember { mutableStateOf(false) }
     var showTokenField by remember { mutableStateOf(false) }
@@ -198,7 +217,7 @@ fun SettingsScreen(
                 context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
                 showOAuthCredentialsDialog = false
                 showManualCallback = true
-                syncMessage = "Browser opened. Approve TickTick — FocusLock catches the redirect automatically, or paste the link below."
+                syncMessage = "Browser opened. Finish TickTick login, then return here. If it does not connect, open Advanced provider options."
             } catch (_: android.content.ActivityNotFoundException) {
                 syncMessage = "Install a browser to connect to TickTick."
             } finally {
@@ -322,8 +341,11 @@ fun SettingsScreen(
         else -> null
     }
     val effectiveHighlight = highlightKind ?: resolvedHighlight
-    LaunchedEffect(effectiveHighlight) {
-        if (effectiveHighlight == PermissionKind.BATTERY || effectiveHighlight == PermissionKind.DEVICE_ADMIN) {
+    LaunchedEffect(effectiveHighlight, selectedSection) {
+        scrollState.scrollTo(0)
+        if (selectedSection == SettingsSection.PROTECTION &&
+            (effectiveHighlight == PermissionKind.BATTERY || effectiveHighlight == PermissionKind.DEVICE_ADMIN)
+        ) {
             scrollState.animateScrollTo(scrollState.maxValue)
         }
     }
@@ -343,8 +365,8 @@ fun SettingsScreen(
     suspend fun doSync(showToast: Boolean = true, tokenOverride: String? = null) {
         val effectiveToken = tokenOverride ?: tickTickToken
         if (effectiveToken.isBlank()) {
-            syncMessage = "Connect TickTick first — or use Focus Timer / Log Work on the Focus tab (works offline)."
-            if (showToast) Toast.makeText(context, "No TickTick token. Use built-in Log Work instead.", Toast.LENGTH_LONG).show()
+            syncMessage = "Connect TickTick first — or use Focus Timer or log work in Activity (works offline)."
+            if (showToast) Toast.makeText(context, "No TickTick token. Log work in Activity instead.", Toast.LENGTH_LONG).show()
             return
         }
         isSyncing = true
@@ -378,6 +400,9 @@ fun SettingsScreen(
     }
 
     BackHandler(enabled = showFrogEssentialApps) { showFrogEssentialApps = false }
+    BackHandler(enabled = selectedSection != SettingsSection.OVERVIEW && !showFrogEssentialApps) {
+        selectedSection = SettingsSection.OVERVIEW
+    }
     if (showFrogEssentialApps) {
         FrogEssentialAppsScreen(onBack = { showFrogEssentialApps = false })
         return
@@ -389,27 +414,91 @@ fun SettingsScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
             .verticalScroll(scrollState)
-            .padding(horizontal = 20.dp)
+            .padding(horizontal = 16.dp)
             .padding(top = 16.dp, bottom = 32.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Card(
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-            shape = MaterialTheme.shapes.large,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Explore FocusLock", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold))
-                    Text(if (onboardingComplete) "Replay the guide to every feature and setup." else "Continue the guide from where you left off.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (selectedSection == SettingsSection.OVERVIEW) {
+            Text(
+                text = "Settings",
+                style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.SemiBold),
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            SettingsDestinationRow(
+                title = "Account & devices",
+                subtitle = "Manage your account and signed-in devices",
+                onClick = { onOpenAccount?.invoke() }
+            )
+            SettingsDestinationRow(
+                title = "Connections",
+                subtitle = if (isTickTickConnected) "TickTick connected · $lastSyncText" else "Connect TickTick and manage sync",
+                onClick = { selectedSection = SettingsSection.CONNECTIONS }
+            )
+            SettingsDestinationRow(
+                title = "Daily priority routine",
+                subtitle = "Eat the Frog settings and essential apps",
+                onClick = { selectedSection = SettingsSection.ROUTINE }
+            )
+            val permissionStates = listOf(isAccessibilityOn, isUsageOn, isOverlayOn, isNotifOn, isBatteryIgnored, isDeviceAdminOn)
+            val permissionSummary = if (permissionStates.all { it != null }) {
+                "${permissionStates.count { it == true }} of ${permissionStates.size} permissions granted"
+            } else "Checking permissions"
+            SettingsDestinationRow(
+                title = "Permissions & protection",
+                subtitle = permissionSummary,
+                onClick = { selectedSection = SettingsSection.PROTECTION }
+            )
+            SettingsDestinationRow(
+                title = "Preferences",
+                subtitle = "Goals, conversion, reminders, and backups",
+                onClick = { selectedSection = SettingsSection.PREFERENCES }
+            )
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { selectedSection = SettingsSection.OVERVIEW }) {
+                    Text("‹  Settings")
                 }
-                TextButton(onClick = onReplayOnboarding) { Text(if (onboardingComplete) "Replay guide" else "Resume guide") }
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = when (selectedSection) {
+                        SettingsSection.OVERVIEW -> "Settings"
+                        SettingsSection.CONNECTIONS -> "Connections"
+                        SettingsSection.ROUTINE -> "Daily priority routine"
+                        SettingsSection.PROTECTION -> "Permissions & protection"
+                        SettingsSection.PREFERENCES -> "Preferences"
+                    },
+                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
             }
         }
+
+        if (selectedSection == SettingsSection.PREFERENCES) {
+
+
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+                shape = MaterialTheme.shapes.large,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text("Explore FocusLock", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold))
+                        Text(
+                            if (onboardingComplete) "Replay the guide to every feature and setup." else "Continue the guide from where you left off.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    TextButton(onClick = onReplayOnboarding) {
+                        Text(if (onboardingComplete) "Replay guide" else "Resume guide")
+                    }
+                }
+            }
 
         // 1. Productivity Conversion Rules Card — the ratio/bonus controls live in their own
         // composable so slider drag frames don't recompose the rest of this screen.
@@ -421,139 +510,25 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(
-                modifier = Modifier.padding(20.dp),
+                modifier = Modifier.padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
                 RatioSliderCard(authViewModel)
-
-                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceContainerHighest)
-
-                // Boundaries Lock
-                if (boundariesLock) {
-                    Card(
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
-                        ),
-                        shape = MaterialTheme.shapes.medium,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                Icons.Default.Lock,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                "Boundaries list is locked — removals disabled",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            "Boundaries Lock",
-                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            "When ON, blocked apps/websites can't be removed from Boundaries",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = boundariesLock,
-                        onCheckedChange = { checked ->
-                            scope.launch { settings.setBoundariesLock(checked) }
-                        }
-                    )
-                }
             }
         }
 
         // 2. Daily Goals Card — collects its own flows and draft state inside.
         DailyGoalsCard()
 
-        // 2b. Appearance Card — Focus home style switcher (which front page the
-        // Focus tab shows). Owns only the dialog flag; the current key is collected above.
-        Card(
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surfaceContainer
-            ),
-            shape = MaterialTheme.shapes.large,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(
-                modifier = Modifier.padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(38.dp)
-                            .background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            Icons.Default.Tune,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                            modifier = Modifier.size(18.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Text(
-                        text = "Appearance",
-                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                }
-
-                val currentStyle = FocusHomeStyle.fromKey(focusHomeStyleKey)
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable(onClick = { showHomeStyleDialog = true })
-                        .padding(vertical = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Focus home style",
-                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = "${currentStyle.title} — ${currentStyle.blurb}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Text(
-                        text = "›",
-                        style = MaterialTheme.typography.headlineSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
         }
 
-        // 2c. Eat the Frog Card — hard-lock toggle, required focus minutes, wake hour.
+        if (selectedSection == SettingsSection.ROUTINE) {
+        // Eat the Frog settings and the essential-app detail route belong to the daily routine.
         FrogSettingsCard(onOpenEssentialApps = { showFrogEssentialApps = true })
+        }
 
-        // 3. Block Schedules Card — owns its flow, editor state and dialogs.
+        if (selectedSection == SettingsSection.PREFERENCES) {
+        // Schedules and local configuration backups are preferences.
         BlockSchedulesCard()
 
         // 4. Data Card — JSON export/import of boundaries, limits, schedules, goals.
@@ -561,7 +536,9 @@ fun SettingsScreen(
 
         // 5. Daily Reminder Card — schedules a WorkManager notification.
         DailyReminderCard()
+        }
 
+        if (selectedSection == SettingsSection.CONNECTIONS) {
         // 6. TickTick Integration Card — simplified: token-first, OAuth advanced
         Card(
             colors = CardDefaults.cardColors(
@@ -571,7 +548,7 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(
-                modifier = Modifier.padding(20.dp),
+                modifier = Modifier.padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -697,7 +674,7 @@ fun SettingsScreen(
                     }
                     // TickTick only allows http(s) redirects, so the browser lands on a
                     // loopback address that can't load on-device. Paste it back here.
-                    if (showManualCallback) {
+                    if (showAdvancedProviderOptions && showManualCallback) {
                         Text(
                             "After approving in the browser you'll land on http://127.0.0.1:8080/?code=… which can't load on the phone — copy that full address and paste it here.",
                             style = MaterialTheme.typography.bodySmall,
@@ -720,29 +697,34 @@ fun SettingsScreen(
                         ) {
                             Text(if (isCompletingManual) "Connecting..." else "Complete connection")
                         }
-                    } else {
-                        TextButton(onClick = { showManualCallback = true }) {
-                            Text("Already approved? Paste the redirect address", style = MaterialTheme.typography.labelMedium)
-                        }
                     }
                     if (!canOAuth) {
                         Text(
-                            "Login not configured on this build — paste a personal token below instead.",
+                            "TickTick login is not configured on this build.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error
                         )
                     }
 
-                    if (!showTokenField) {
-                        TextButton(onClick = { showTokenField = true }) {
-                            Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(14.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Or paste a personal token (tp_...) instead")
+                    TextButton(onClick = { showAdvancedProviderOptions = !showAdvancedProviderOptions }) {
+                        Text(if (showAdvancedProviderOptions) "Hide advanced provider options" else "Advanced provider options")
+                    }
+                    if (showAdvancedProviderOptions) {
+                        if (!showManualCallback) {
+                            TextButton(onClick = { showManualCallback = true }) {
+                                Text("Need help finishing connection?", style = MaterialTheme.typography.labelMedium)
+                            }
                         }
-                        TextButton(onClick = { showOAuthCredentialsDialog = true }) {
-                            Text("Advanced: override OAuth credentials", style = MaterialTheme.typography.labelMedium)
-                        }
-                    } else {
+                        if (!showTokenField) {
+                            TextButton(onClick = { showTokenField = true }) {
+                                Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Connect with a personal token")
+                            }
+                            TextButton(onClick = { showOAuthCredentialsDialog = true }) {
+                                Text("Configure OAuth credentials", style = MaterialTheme.typography.labelMedium)
+                            }
+                        } else {
                         OutlinedTextField(
                             value = editPersonalToken,
                             onValueChange = { editPersonalToken = it.trim() },
@@ -800,9 +782,7 @@ fun SettingsScreen(
                                 editPersonalToken = tickTickToken
                             }) { Text("Cancel") }
                         }
-                        TextButton(onClick = { showOAuthCredentialsDialog = true }) {
-                            Text("Or configure OAuth instead", style = MaterialTheme.typography.labelMedium)
-                        }
+                    }
                     }
 
                     syncMessage?.let {
@@ -842,7 +822,10 @@ fun SettingsScreen(
             }
         }
 
-        // 5. System Permissions Checklist
+        }
+
+        if (selectedSection == SettingsSection.PROTECTION) {
+        // System permissions and uninstall protection.
         Card(
             colors = CardDefaults.cardColors(
                 containerColor = MaterialTheme.colorScheme.surfaceContainer
@@ -851,7 +834,7 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(
-                modifier = Modifier.padding(20.dp),
+                modifier = Modifier.padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -967,7 +950,9 @@ fun SettingsScreen(
         }
 
         RemovalReminderSettings()
+        }
 
+        if (selectedSection == SettingsSection.CONNECTIONS) {
         // Debug entry (totals, records, sync state)
         Card(
             colors = CardDefaults.cardColors(
@@ -980,7 +965,7 @@ fun SettingsScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable(onClick = onOpenDebug)
-                    .padding(20.dp),
+                    .padding(16.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -1003,65 +988,13 @@ fun SettingsScreen(
                 )
             }
         }
+        }
     }
         SnackbarHost(
             hostState = snackbarHostState,
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .padding(16.dp)
-        )
-    }
-
-    if (showHomeStyleDialog) {
-        AlertDialog(
-            onDismissRequest = { showHomeStyleDialog = false },
-            title = {
-                Text(
-                    "Focus home style",
-                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
-                )
-            },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    FocusHomeStyle.entries.forEach { style ->
-                        val selected = style == FocusHomeStyle.fromKey(focusHomeStyleKey)
-                        fun pick() {
-                            scope.launch { settings.setFocusHomeStyle(style.key) }
-                            showHomeStyleDialog = false
-                        }
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .clickable(onClick = ::pick)
-                                .padding(horizontal = 4.dp, vertical = 6.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(
-                                selected = selected,
-                                onClick = ::pick
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = style.title,
-                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
-                                    color = MaterialTheme.colorScheme.onSurface
-                                )
-                                Text(
-                                    text = style.blurb,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = { showHomeStyleDialog = false }) { Text("Done") }
-            },
-            shape = MaterialTheme.shapes.large
         )
     }
 
@@ -1197,6 +1130,47 @@ fun SettingsScreen(
                 TextButton(onClick = { showDeactivateAdminDialog = false }) { Text("Cancel") }
             }
         )
+    }
+}
+
+@Composable
+private fun SettingsDestinationRow(
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(role = Role.Button, onClick = onClick),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        shape = MaterialTheme.shapes.large
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Text(
+                text = "›",
+                style = MaterialTheme.typography.headlineSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
     }
 }
 
@@ -1348,7 +1322,7 @@ private fun DailyGoalsCard() {
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
-            modifier = Modifier.padding(20.dp),
+            modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1493,7 +1467,7 @@ private fun BlockSchedulesCard() {
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
-            modifier = Modifier.padding(20.dp),
+            modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1992,7 +1966,7 @@ private fun ConfigBackupCard(snackbarHostState: SnackbarHostState) {
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
-            modifier = Modifier.padding(20.dp),
+            modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2100,7 +2074,7 @@ private fun DailyReminderCard() {
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
-            modifier = Modifier.padding(20.dp),
+            modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2230,7 +2204,7 @@ private fun FrogSettingsCard(onOpenEssentialApps: () -> Unit) {
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
-            modifier = Modifier.padding(20.dp),
+            modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {

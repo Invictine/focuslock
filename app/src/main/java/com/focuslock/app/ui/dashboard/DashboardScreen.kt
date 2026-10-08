@@ -1,6 +1,5 @@
 package com.focuslock.app.ui.dashboard
 
-import android.content.Intent
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -25,6 +24,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -42,7 +42,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.clerk.api.Clerk
-import com.focuslock.app.BuildConfig
 import com.focuslock.app.FocusLockApplication
 import com.focuslock.app.ui.components.UiTokens
 import com.focuslock.app.auth.AuthViewModel
@@ -54,17 +53,15 @@ import com.focuslock.app.data.repository.CreditBankRepository
 import com.focuslock.app.data.repository.SettingsRepository
 import com.focuslock.app.service.DailyUsageSummary
 import com.focuslock.app.service.UsageStatsRepository
-import com.focuslock.app.sync.ConvexSyncClient
 import com.focuslock.app.sync.AccountPermanentTargetsSnapshot
 import com.focuslock.app.sync.SyncStatus
 import com.focuslock.app.sync.mergeTodayBoundaryUsageSeconds
 import com.focuslock.app.sync.summaryForAccountDate
-import com.focuslock.app.ui.dashboard.home.FocusHome
 import com.focuslock.app.ui.dashboard.home.FocusHomeCallbacks
 import com.focuslock.app.ui.dashboard.home.FocusHomeState
-import com.focuslock.app.ui.dashboard.home.FocusHomeStyle
 import com.focuslock.app.ui.dashboard.home.FocusHomeTasksState
-import com.focuslock.app.ui.nuke.NukeActivity
+import com.focuslock.app.ui.dashboard.home.TodayDestination
+import com.focuslock.app.ui.dashboard.home.ActivityDestination
 import com.focuslock.app.ui.permissions.PermissionHelper
 import com.focuslock.app.ui.permissions.PermissionKind
 import com.focuslock.app.ui.permissions.PermissionOnboardingDialog
@@ -115,7 +112,9 @@ fun DashboardScreen(
     onOpenTickTick: () -> Unit,
     onNavigatePermissions: () -> Unit,
     onOpenSettings: (() -> Unit)? = null,
-    onOpenAccount: (() -> Unit)? = null
+    onOpenAccount: (() -> Unit)? = null,
+    showActivity: Boolean = false,
+    onOpenConnections: (() -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -123,6 +122,7 @@ fun DashboardScreen(
     val app = FocusLockApplication.instance
     val bank = app.creditBankRepository
     val settings = app.settingsRepository
+    val nukeActive by settings.nukeActiveFlow.collectAsStateWithLifecycle(initialValue = false)
     // Activity-scoped ViewModel: reused by the activity's own `by viewModels()` instance.
     val authViewModel: AuthViewModel = viewModel()
 
@@ -131,6 +131,7 @@ fun DashboardScreen(
     val liveBalanceState = bank.liveBalanceSeconds.collectAsStateWithLifecycle()
     val historyState = bank.workHistoryFlow.collectAsStateWithLifecycle(initialValue = null)
     val bankStatsState = bank.statsFlow.collectAsStateWithLifecycle(initialValue = null)
+    val frogState by app.frogRepository.frogStateFlow.collectAsStateWithLifecycle(initialValue = null)
 
     // Goals come from Settings → Daily Goals (focus minutes / TickTick tasks goal).
     val focusGoalMinutes by settings.focusGoalMinutesFlow
@@ -146,10 +147,6 @@ fun DashboardScreen(
     var localUsageAvailable by remember { mutableStateOf<Boolean?>(null) }
     val workRatio by settings.workRatioFlow.collectAsStateWithLifecycle(initialValue = 4)
 
-    // Selected Focus-tab front page (see FocusHomeStyle; unknown keys use its safe fallback).
-    val homeStyleKey by settings.focusHomeStyleFlow
-        .collectAsStateWithLifecycle(initialValue = SettingsRepository.DEFAULT_FOCUS_HOME_STYLE)
-    val nukeActive by settings.nukeActiveFlow.collectAsStateWithLifecycle(initialValue = false)
     val clerkUser by Clerk.userFlow.collectAsStateWithLifecycle(initialValue = null)
     val signedInAccountId = clerkUser?.id
     val todayUsageSnapshot by app.syncManager.todayUsageSnapshot.collectAsStateWithLifecycle()
@@ -338,6 +335,9 @@ fun DashboardScreen(
     var showFocusTimerDialog by rememberSaveable { mutableStateOf(false) }
     var showAllHistory by rememberSaveable { mutableStateOf(false) }
     var isRefreshing by remember { mutableStateOf(false) }
+    val todayListState = rememberLazyListState()
+    val activityListState = rememberLazyListState()
+    val activeListState = if (showActivity) activityListState else todayListState
 
     // ---- Focus timer state, hoisted to screen level so a running countdown survives
     // tab switches (the dialog tears down with the Focus tab, but this state does not).
@@ -397,16 +397,6 @@ fun DashboardScreen(
         if (finishedNaturally) {
             timerJustCompleted = true
         }
-    }
-
-    // Playful Nuke launcher states (header button); nukeActive is collected above.
-    var showNukeConfirm by rememberSaveable { mutableStateOf(false) }
-    var showNukeInfo by rememberSaveable { mutableStateOf(false) }
-    var nuking by remember { mutableStateOf(false) }
-    fun launchNukeActivity() {
-        try {
-            context.startActivity(Intent(context, NukeActivity::class.java))
-        } catch (_: Exception) { }
     }
 
     val todayFormatted = remember(todayDateKey) {
@@ -522,6 +512,7 @@ fun DashboardScreen(
     }
     val openSettings: () -> Unit = onOpenSettings ?: onNavigatePermissions
     val openAccount: () -> Unit = onOpenAccount ?: openSettings
+    val openConnections: () -> Unit = onOpenConnections ?: openSettings
     // Stable callback object: remembered on the values the lambdas actually capture so a
     // 1-second tick (or any unrelated recomposition) doesn't rebuild fresh lambdas and
     // invalidate the whole home tree. The state-mutating lambdas close over `by remember`
@@ -530,20 +521,24 @@ fun DashboardScreen(
         onOpenTickTick,
         onNavigatePermissions,
         openSettings,
+        openConnections,
         openAccount,
     ) {
         FocusHomeCallbacks(
             onOpenTickTick = onOpenTickTick,
             onNavigatePermissions = onNavigatePermissions,
             onOpenSettings = openSettings,
+            onOpenConnections = openConnections,
             onOpenAccount = openAccount,
             onOpenLog = { showManualLogDialog = true },
             onOpenTimer = { showFocusTimerDialog = true },
             onToggleHistory = { showAllHistory = !showAllHistory },
             onRetryTasks = { startTickTickFetch(bypassCache = true) },
-            onShowNukeConfirm = { showNukeConfirm = true },
-            onShowNukeInfo = { showNukeInfo = true },
-            onLaunchNuke = { launchNukeActivity() },
+            // Legacy home-header affordances remain wired for API compatibility; the
+            // actual Nuke action and dialogs live in the app bar's NukeActionButton.
+            onShowNukeConfirm = {},
+            onShowNukeInfo = {},
+            onLaunchNuke = {},
         )
     }
 
@@ -595,87 +590,27 @@ fun DashboardScreen(
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize(),
+            state = activeListState,
             contentPadding = PaddingValues(
                 start = UiTokens.ScreenPadding,
                 end = UiTokens.ScreenPadding,
-                top = 4.dp,
+                top = 12.dp,
                 bottom = 24.dp
             ),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            FocusHome(
-                style = FocusHomeStyle.fromKey(homeStyleKey),
-                state = homeState,
-                callbacks = homeCallbacks,
-            )
+            if (showActivity) {
+                ActivityDestination(state = homeState, callbacks = homeCallbacks)
+            } else {
+                TodayDestination(
+                    state = homeState,
+                    callbacks = homeCallbacks,
+                    frogEnabled = frogState?.enabled,
+                    timerIsRunning = timerIsRunning,
+                    timerRemainingSeconds = timerRemainingSeconds,
+                )
+            }
         }
-    }
-
-    // Nuke confirm dialog: arm locally + sync to Convex, then launch NukeActivity.
-    if (showNukeConfirm) {
-        AlertDialog(
-            onDismissRequest = { if (!nuking) showNukeConfirm = false },
-            title = { Text("Detonate the Nuke?", fontWeight = FontWeight.SemiBold) },
-            text = {
-                Text(
-                    "Full phone lockdown until you finish a 10-minute meditation + check-in. " +
-                        "No escape hatch — long-press the Nuke button anytime to learn more.",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-            },
-            confirmButton = {
-                Button(
-                    enabled = !nuking,
-                    onClick = {
-                        scope.launch {
-                            nuking = true
-                            try {
-                                settings.setNukeActive(true)
-                                try {
-                                    val url = try { BuildConfig.CONVEX_URL.trim() } catch (_: Exception) { "" }
-                                    if (url.startsWith("http") && authViewModel.isConfigured()) {
-                                        ConvexSyncClient(url, authViewModel::getConvexToken).activateNuke()
-                                    }
-                                } catch (_: Exception) { }
-                                launchNukeActivity()
-                            } finally {
-                                nuking = false
-                                showNukeConfirm = false
-                            }
-                        }
-                    },
-                    colors = androidx.compose.material3.ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.error,
-                        contentColor = MaterialTheme.colorScheme.onError
-                    ),
-                    shape = RoundedCornerShape(20.dp)
-                ) { Text(if (nuking) "Detonating…" else "Detonate") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showNukeConfirm = false }) { Text("Cancel") }
-            },
-            shape = MaterialTheme.shapes.large
-        )
-    }
-
-    // Nuke explainer dialog (long-press).
-    if (showNukeInfo) {
-        AlertDialog(
-            onDismissRequest = { showNukeInfo = false },
-            title = { Text("What is the Nuke?", fontWeight = FontWeight.SemiBold) },
-            text = {
-                Text(
-                    "The Nuke locks your phone to one screen: 10 minutes of guided breathing, " +
-                        "then an AI check-in that only lifts when you commit to a real plan. " +
-                        "Tap the Nuke button to arm it; if a Nuke is already active, tapping jumps straight back in.",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-            },
-            confirmButton = {
-                TextButton(onClick = { showNukeInfo = false }) { Text("Got it") }
-            },
-            shape = MaterialTheme.shapes.large
-        )
     }
 
     // Manual work log dialog (fallback when TickTick API fails — core USP reliability fix)
@@ -850,7 +785,7 @@ private fun FocusTimerDialog(
     onDismiss: () -> Unit,
 ) {
     AlertDialog(
-        onDismissRequest = { if (!isRunning) onDismiss() },
+        onDismissRequest = onDismiss,
         title = { Text("Focus Timer", fontWeight = FontWeight.SemiBold) },
         text = {
             Column(
@@ -886,7 +821,7 @@ private fun FocusTimerDialog(
                         modifier = Modifier.fillMaxWidth()
                     )
                     Text(
-                        "Stay focused — leaving keeps the timer running here.",
+                        "Hide the timer dialog whenever you like; the countdown will keep running.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -901,7 +836,7 @@ private fun FocusTimerDialog(
             }
         },
         dismissButton = {
-            if (!isRunning) TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) { Text(if (isRunning) "Hide timer" else "Cancel") }
         },
         shape = MaterialTheme.shapes.large
     )

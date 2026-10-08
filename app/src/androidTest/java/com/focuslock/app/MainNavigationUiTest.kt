@@ -33,8 +33,10 @@ class MainNavigationUiTest {
         val settings = FocusLockApplication.instance.settingsRepository
         val previousOfflineMode = runBlocking { settings.offlineModeFlow.first() }
         var scenario: ActivityScenario<MainActivity>? = null
+        val onboarding = NavigationOnboardingFixture(FocusLockApplication.instance)
 
         try {
+            onboarding.prepare()
             runBlocking { settings.setOfflineMode(true) }
             scenario = ActivityScenario.launch(MainActivity::class.java)
             compose.waitForIdle()
@@ -42,8 +44,8 @@ class MainNavigationUiTest {
             assertBottomNavigation()
             compose.onNode(bottomNavItem("Boundaries")).performClick()
             compose.waitForIdle()
-            scrollBoundariesTo("Applications")
-            compose.onNodeWithText("Applications").assertIsDisplayed()
+            scrollBoundariesTo("Apps")
+            compose.onNodeWithText("Apps").assertIsDisplayed()
             saveScreenshot("main-boundaries")
 
             scrollBoundariesTo("Permanent blocks")
@@ -52,17 +54,19 @@ class MainNavigationUiTest {
             saveScreenshot("main-permanent")
 
             compose.onNodeWithContentDescription("Back").performClick()
-            scrollBoundariesTo("Blocking location")
-            compose.onNodeWithText("Blocking location").performClick()
+            scrollBoundariesTo("Where blocking applies")
+            compose.onNodeWithText("Where blocking applies").performClick()
             compose.onNodeWithText("Choose home location").performScrollTo().assertIsDisplayed()
             scenario.onActivity { activity ->
                 activity.onBackPressedDispatcher.onBackPressed()
             }
-            scrollBoundariesTo("Blocking location")
-            compose.onNodeWithText("Blocking location").assertIsDisplayed()
+            scrollBoundariesTo("Where blocking applies")
+            compose.onNodeWithText("Where blocking applies").assertIsDisplayed()
 
-            compose.onNode(bottomNavItem("Strict")).performClick()
+            scrollBoundariesTo("Lock boundary changes")
+            compose.onNodeWithText("Lock boundary changes").performClick()
             compose.waitForIdle()
+            assertStrictHasNoBottomNavigation()
             compose.onNodeWithText("Schedule", useUnmergedTree = true)
                 .performScrollTo().performClick()
             compose.onNodeWithText("Activate on a schedule").performScrollTo().assertIsDisplayed()
@@ -71,28 +75,43 @@ class MainNavigationUiTest {
                 .performScrollTo().performClick()
             compose.onNodeWithText("Activate at a place").performScrollTo().assertIsDisplayed()
 
-            compose.onNode(bottomNavItem("Focus")).performClick()
+            scenario.onActivity { activity ->
+                activity.onBackPressedDispatcher.onBackPressed()
+            }
+            compose.waitForIdle()
+            compose.onNode(bottomNavItem("Boundaries")).assertIsDisplayed()
+
+            compose.onNode(bottomNavItem("Today")).performClick()
             compose.onNode(bottomNavItem("Boundaries")).performClick()
-            compose.onNode(bottomNavItem("Strict")).performClick()
+            scrollBoundariesTo("Lock boundary changes")
+            compose.onNodeWithText("Lock boundary changes").performClick()
+            compose.waitForIdle()
+            assertStrictHasNoBottomNavigation()
             compose.onNodeWithText("Activate at a place").performScrollTo().assertIsDisplayed()
         } finally {
             try {
                 scenario?.close()
             } finally {
+                onboarding.restore()
                 runBlocking { settings.setOfflineMode(previousOfflineMode) }
             }
         }
     }
 
     private fun assertBottomNavigation() {
-        listOf("Focus", "Boundaries", "Strict").forEach { label ->
+        listOf("Today", "Boundaries", "Activity").forEach { label ->
             org.junit.Assert.assertEquals(
                 "Expected one clickable $label bottom navigation item",
                 1,
                 compose.onAllNodes(bottomNavItem(label)).fetchSemanticsNodes().size
             )
         }
-        compose.onNode(bottomNavItem("Permalock")).assertDoesNotExist()
+    }
+
+    private fun assertStrictHasNoBottomNavigation() {
+        listOf("Today", "Boundaries", "Activity").forEach { label ->
+            compose.onNode(bottomNavItem(label)).assertDoesNotExist()
+        }
     }
 
     private fun bottomNavItem(label: String) = hasClickAction() and hasText(label)

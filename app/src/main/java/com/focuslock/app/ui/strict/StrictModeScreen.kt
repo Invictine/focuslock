@@ -102,8 +102,6 @@ fun StrictModeScreen() {
     val settings = FocusLockApplication.instance.settingsRepository
     val strictMode by settings.lockdownModeFlow.collectAsStateWithLifecycle(initialValue = false)
     val boundariesLock by settings.boundariesLockFlow.collectAsStateWithLifecycle(initialValue = false)
-    val blockedApps by settings.blockedAppsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
-    val blockedWebsites by settings.blockedWebsitesFlow.collectAsStateWithLifecycle(initialValue = emptyList())
     val endsAt by settings.lockdownEndsAtFlow.collectAsStateWithLifecycle(initialValue = 0L)
     val preset by settings.lockdownPresetFlow.collectAsStateWithLifecycle(initialValue = "deep_work")
     val automation = FocusLockApplication.instance.strictModeAutomationRepository
@@ -134,7 +132,10 @@ fun StrictModeScreen() {
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         StaggeredFadeSlide(visible = entered, index = 0, screenKey = "strict") {
-            ScreenHeader(title = "Strict Mode", subtitle = "Protect your existing boundaries with a timed commitment.")
+            ScreenHeader(
+                title = "Lock boundary changes",
+                subtitle = "Strict Mode freezes boundary settings. App and website access still follows your existing rules."
+            )
         }
         if (strictMode) {
             StaggeredFadeSlide(visible = entered, index = 1, modifier = Modifier.fillMaxWidth(), screenKey = "strict") {
@@ -157,6 +158,14 @@ fun StrictModeScreen() {
 
         StaggeredFadeSlide(visible = entered, index = 2, modifier = Modifier.fillMaxWidth(), screenKey = "strict") {
             StrictActivationSwitcher(selected = activationMode, onSelect = { activationMode = it })
+        }
+
+        if (activationMode == "location") {
+            Text(
+                "This location controls when Strict Mode locks boundary changes. It does not change Home-only blocking.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
 
         StaggeredFadeSlide(visible = entered, index = 3, modifier = Modifier.fillMaxWidth(), screenKey = "strict") {
@@ -195,18 +204,19 @@ fun StrictModeScreen() {
         }
 
         StaggeredFadeSlide(visible = entered, index = 4, modifier = Modifier.fillMaxWidth(), screenKey = "strict") {
-            MoreProtectionOptions {
-              StrictProtectionCard(
-                appCount = blockedApps.count { it.isBlocked },
-                websiteCount = blockedWebsites.count { it.isBlocked },
+            StrictProtectionCard(
                 boundariesLock = boundariesLock,
                 strictMode = strictMode,
                 onBoundariesLockChange = { enabled ->
                     scope.launch { settings.setBoundariesLock(enabled) }
                 }
             )
-              StrictRulesCard()
-              ApprovalUnlockCard(settings)
+        }
+
+        StaggeredFadeSlide(visible = entered, index = 5, modifier = Modifier.fillMaxWidth(), screenKey = "strict") {
+            MoreProtectionOptions {
+                StrictRulesCard()
+                ApprovalUnlockCard(settings)
             }
         }
 
@@ -316,9 +326,9 @@ private fun StrictEnableOptions(
             val days = durationHours >= 24
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
                 FilterChip(selected = !days, onClick = { if (days) onDurationChange(1) },
-                    label = { Text("Hours") }, modifier = Modifier.weight(1f).height(48.dp))
+                    label = { Text("Hours") }, modifier = Modifier.weight(1f).heightIn(min = 48.dp))
                 FilterChip(selected = days, onClick = { if (!days) onDurationChange(24) },
-                    label = { Text("Days") }, modifier = Modifier.weight(1f).height(48.dp))
+                    label = { Text("Days") }, modifier = Modifier.weight(1f).heightIn(min = 48.dp))
             }
             Slider(
                 value = if (days) (durationHours / 24f).coerceIn(1f, 30f) else durationHours.toFloat().coerceIn(1f, 23f),
@@ -343,8 +353,6 @@ private fun StrictActivationSwitcher(selected: String, onSelect: (String) -> Uni
     ) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Activation", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text("Choose how you want to set up Strict Mode.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             StrictChoiceSelector(
                 options = listOf("manual" to "Manual", "schedule" to "Schedule", "location" to "Location"),
                 selected = selected,
@@ -372,7 +380,7 @@ private fun StrictManualActivation(
 @Composable
 private fun StrictPreferencesCard(preset: String, onPresetChange: (String) -> Unit) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer), shape = MaterialTheme.shapes.large, modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("Commitment style", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Text("Choose the kind of focus session. This preset is saved with your commitment.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -439,7 +447,7 @@ private fun StrictAutomationCard(
     var endMinute by rememberSaveable { mutableStateOf(17 * 60) }
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
         shape = MaterialTheme.shapes.large, modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (mode == StrictAutomationMode.LOCATION) {
                 Text("Activate at a place", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                 Text("With Location activation selected, Strict Mode stays active unless a fresh, precise fix confirms you are outside every enabled place. An uncertain boundary reading keeps Strict Mode active.",
@@ -450,25 +458,30 @@ private fun StrictAutomationCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Button(onClick = { showPlacePicker = true }, modifier = Modifier.fillMaxWidth()) { Text("Choose place") }
                 places.forEach { place ->
-                    Row(
-                        Modifier.fillMaxWidth().toggleable(value = place.enabled, role = Role.Switch) { onSavePlace(place.copy(enabled = it)) },
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
-                            Text(place.label, fontWeight = FontWeight.Medium)
-                            Text("Saved place", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(
+                            Modifier.fillMaxWidth().toggleable(value = place.enabled, role = Role.Switch) { onSavePlace(place.copy(enabled = it)) },
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
+                                Text(place.label, fontWeight = FontWeight.Medium)
+                                Text("Saved place", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Switch(
+                                checked = place.enabled,
+                                onCheckedChange = null,
+                                modifier = Modifier.semantics { contentDescription = "Activate Strict Mode at ${place.label}" }
+                            )
                         }
-                        Switch(
-                            checked = place.enabled,
-                            onCheckedChange = null,
-                            modifier = Modifier.semantics { contentDescription = "Activate Strict Mode at ${place.label}" }
-                        )
-                        TextButton(onClick = {
-                            editingPlace = place
-                            placeName = place.label
-                            showPlacePicker = true
-                        }) { Text("Edit") }
-                        TextButton(onClick = { onDeletePlace(place.id) }) { Text("Remove") }
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+                            TextButton(onClick = {
+                                editingPlace = place
+                                placeName = place.label
+                                showPlacePicker = true
+                            }) { Text("Edit") }
+                            TextButton(onClick = { onDeletePlace(place.id) }) { Text("Remove") }
+                        }
                     }
                 }
                 if (places.isEmpty()) Text("No places yet", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -478,30 +491,41 @@ private fun StrictAutomationCard(
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 OutlinedTextField(value = windowName, onValueChange = { windowName = it },
                     label = { Text("Schedule name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                listOf(
-                    listOf("Mon" to 1, "Tue" to 2, "Wed" to 3, "Thu" to 4),
-                    listOf("Fri" to 5, "Sat" to 6, "Sun" to 7)
-                ).forEach { rowDays ->
+                listOf("Mon" to 1, "Tue" to 2, "Wed" to 3, "Thu" to 4, "Fri" to 5, "Sat" to 6, "Sun" to 7)
+                    .chunked(if (LocalDensity.current.fontScale >= 1.3f) 2 else 4).forEach { rowDays ->
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         rowDays.forEach { (label, day) ->
                             FilterChip(
                                 selected = day in days,
                                 onClick = { days = if (day in days) days - day else days + day },
                                 label = { Text(label) },
-                                modifier = Modifier.weight(1f).height(48.dp)
+                                modifier = Modifier.weight(1f).heightIn(min = 48.dp)
                             )
                         }
                     }
                 }
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    TextButton(onClick = {
+                val startTimeButton: @Composable (Modifier) -> Unit = { modifier ->
+                    TextButton(modifier = modifier, onClick = {
                         TimePickerDialog(context, { _, h, m -> startMinute = h * 60 + m },
                             startMinute / 60, startMinute % 60, true).show()
                     }) { Text("From %02d:%02d".format(startMinute / 60, startMinute % 60)) }
-                    TextButton(onClick = {
+                }
+                val endTimeButton: @Composable (Modifier) -> Unit = { modifier ->
+                    TextButton(modifier = modifier, onClick = {
                         TimePickerDialog(context, { _, h, m -> endMinute = h * 60 + m },
                             endMinute / 60, endMinute % 60, true).show()
                     }) { Text("To %02d:%02d".format(endMinute / 60, endMinute % 60)) }
+                }
+                if (LocalDensity.current.fontScale >= 1.3f) {
+                    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        startTimeButton(Modifier.fillMaxWidth())
+                        endTimeButton(Modifier.fillMaxWidth())
+                    }
+                } else {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        startTimeButton(Modifier.weight(1f))
+                        endTimeButton(Modifier.weight(1f))
+                    }
                 }
                 TextButton(onClick = {
                     if (days.isNotEmpty() && startMinute != endMinute) {
@@ -511,18 +535,21 @@ private fun StrictAutomationCard(
                     }
                 }, enabled = days.isNotEmpty() && startMinute != endMinute) { Text("Add weekly window") }
                 windows.forEach { window ->
-                    Row(
-                        Modifier.fillMaxWidth().toggleable(value = window.enabled, role = Role.Switch) { onSaveWindow(window.copy(enabled = it)) },
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
-                            Text(window.label, fontWeight = FontWeight.Medium)
-                            Text("${window.daysOfWeek.size} days · %02d:%02d–%02d:%02d".format(window.startMinuteOfDay / 60, window.startMinuteOfDay % 60, window.endMinuteOfDay / 60, window.endMinuteOfDay % 60),
-                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(
+                            Modifier.fillMaxWidth().toggleable(value = window.enabled, role = Role.Switch) { onSaveWindow(window.copy(enabled = it)) },
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f).padding(vertical = 8.dp)) {
+                                Text(window.label, fontWeight = FontWeight.Medium)
+                                Text("${window.daysOfWeek.size} days · %02d:%02d–%02d:%02d".format(window.startMinuteOfDay / 60, window.startMinuteOfDay % 60, window.endMinuteOfDay / 60, window.endMinuteOfDay % 60),
+                                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Switch(checked = window.enabled, onCheckedChange = null,
+                                modifier = Modifier.semantics { contentDescription = "Enable schedule ${window.label}" })
                         }
-                        Switch(checked = window.enabled, onCheckedChange = null,
-                            modifier = Modifier.semantics { contentDescription = "Enable schedule ${window.label}" })
-                        TextButton(onClick = { onDeleteWindow(window.id) }) { Text("Remove") }
+                        TextButton(onClick = { onDeleteWindow(window.id) }, modifier = Modifier.align(Alignment.End)) { Text("Remove") }
                     }
                 }
                 if (windows.isEmpty()) Text("No weekly windows yet", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -562,8 +589,6 @@ private fun formatDurationHours(hours: Int): String = when {
 
 @Composable
 private fun StrictProtectionCard(
-    appCount: Int,
-    websiteCount: Int,
     boundariesLock: Boolean,
     strictMode: Boolean,
     onBoundariesLockChange: (Boolean) -> Unit
@@ -574,36 +599,28 @@ private fun StrictProtectionCard(
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
-            modifier = Modifier.padding(20.dp),
+            modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Text(
-                "Your protection",
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
-            )
-            Text(
-                "$appCount blocked ${if (appCount == 1) "app" else "apps"} · " +
-                    "$websiteCount blocked ${if (websiteCount == 1) "website" else "websites"}",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .heightIn(min = 56.dp)
                     .toggleable(value = boundariesLock, role = Role.Switch, onValueChange = onBoundariesLockChange),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        "Boundaries Lock",
+                        "Keep removals locked",
                         style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold)
                     )
                     Text(
-                        if (strictMode) {
-                            "Keep removals locked after Strict Mode ends. You can still add blocks."
-                        } else {
-                            "Prevent removing blocked apps and websites. You can still add blocks."
+                        when {
+                            boundariesLock && strictMode -> "When Strict Mode ends, removals stay locked and new blocks can be added."
+                            boundariesLock -> "Existing blocks stay protected from removal. New blocks can still be added."
+                            strictMode -> "Strict Mode locks boundary edits now. Turn this on to keep removals locked after it ends."
+                            else -> "Turn this on to prevent removing blocked apps and websites. New blocks can still be added."
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -612,7 +629,7 @@ private fun StrictProtectionCard(
                 Switch(
                     checked = boundariesLock,
                     onCheckedChange = null,
-                    modifier = Modifier.semantics { contentDescription = "Boundaries Lock" }
+                    modifier = Modifier.semantics { contentDescription = "Keep removals locked" }
                 )
             }
         }
@@ -632,7 +649,7 @@ private fun MoreProtectionOptions(content: @Composable () -> Unit) {
                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button) { expanded = !expanded },
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("More protection options", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold))
+                Text("More about Strict Mode", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold))
                 Icon(
                     imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
                     contentDescription = if (expanded) "Collapse protection options" else "Expand protection options"
@@ -654,7 +671,7 @@ private fun StrictOffCard(onEnableClick: () -> Unit) {
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
-            modifier = Modifier.padding(20.dp),
+            modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Row(
@@ -688,7 +705,7 @@ private fun StrictOffCard(onEnableClick: () -> Unit) {
                 onClick = onEnableClick,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(52.dp),
+                    .heightIn(min = 52.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.error,
                     contentColor = MaterialTheme.colorScheme.onError
@@ -723,7 +740,7 @@ private fun StrictActiveCard(
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
-            modifier = Modifier.padding(20.dp),
+            modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Row(
@@ -751,7 +768,7 @@ private fun StrictActiveCard(
                 onClick = onDisableClick,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(52.dp),
+                    .heightIn(min = 52.dp),
                 colors = ButtonDefaults.buttonColors(
                 containerColor = MaterialTheme.colorScheme.onSecondaryContainer,
                     contentColor = MaterialTheme.colorScheme.secondaryContainer
@@ -776,7 +793,7 @@ private fun StrictRulesCard() {
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
-            modifier = Modifier.padding(20.dp),
+            modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             Text(
@@ -791,7 +808,7 @@ private fun StrictRulesCard() {
             )
             TextButton(
                 onClick = { expanded = !expanded },
-                modifier = Modifier.fillMaxWidth().height(48.dp)
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)
             ) { Text(if (expanded) "Hide rules" else "Read all rules") }
             // Show detail on request so the active state and primary action stay visible.
             val rules = listOf(

@@ -164,6 +164,7 @@ data class FocusHomeCallbacks(
     val onShowNukeConfirm: () -> Unit,
     val onShowNukeInfo: () -> Unit,
     val onLaunchNuke: () -> Unit,
+    val onOpenConnections: () -> Unit = onOpenSettings,
 )
 
 /** Dispatches the collected state to the selected home variation. */
@@ -405,6 +406,7 @@ fun SetupBannerCard(
                     color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.9f),
                 )
             }
+            Spacer(modifier = Modifier.width(12.dp))
             Text("Set up", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
         }
     }

@@ -23,6 +23,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.focuslock.app.ui.apps.BoundariesScreen
 import com.focuslock.app.ui.strict.StrictModeScreen
 import com.focuslock.app.ui.theme.FocusLockTheme
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -36,14 +37,14 @@ class BoundariesNavigationUiTest {
         compose.setContent { FocusLockTestSurface(fontScale = 1.5f) { BoundariesScreen() } }
 
         saveScreenshot("boundaries-hub")
-        scrollToText("Applications")
-        compose.onNodeWithText("Applications").assertIsDisplayed()
+        scrollToText("Apps")
+        compose.onNodeWithText("Apps").assertIsDisplayed()
         scrollToText("Websites")
         compose.onNodeWithText("Websites").assertIsDisplayed()
         scrollToText("Permanent blocks")
         compose.onNodeWithText("Permanent blocks").assertIsDisplayed()
-        scrollToText("Blocking location")
-        compose.onNodeWithText("Blocking location").assertIsDisplayed()
+        scrollToText("Where blocking applies")
+        compose.onNodeWithText("Where blocking applies").assertIsDisplayed()
 
         scrollToText("Permanent blocks")
         compose.onNodeWithText("Permanent blocks").performClick()
@@ -51,8 +52,8 @@ class BoundariesNavigationUiTest {
         saveScreenshot("boundaries-permanent")
 
         compose.onNodeWithContentDescription("Back").performClick()
-        scrollToText("Applications")
-        compose.onNodeWithText("Applications").assertIsDisplayed()
+        scrollToText("Apps")
+        compose.onNodeWithText("Apps").assertIsDisplayed()
         scrollToText("Permanent blocks")
         compose.onNodeWithText("Permanent blocks").assertIsDisplayed()
     }
@@ -61,16 +62,30 @@ class BoundariesNavigationUiTest {
     fun boundariesHubOpensLocationAndBackReturnsToHub() {
         compose.setContent { FocusLockTestSurface(fontScale = 1.5f) { BoundariesScreen() } }
 
-        scrollToText("Blocking location")
-        compose.onNodeWithText("Blocking location").performClick()
+        scrollToText("Where blocking applies")
+        compose.onNodeWithText("Where blocking applies").performClick()
         compose.onNodeWithText("Only block at home").assertIsDisplayed()
         saveScreenshot("boundaries-location")
 
         compose.onNodeWithContentDescription("Back").performClick()
-        scrollToText("Applications")
-        compose.onNodeWithText("Applications").assertIsDisplayed()
-        scrollToText("Blocking location")
-        compose.onNodeWithText("Blocking location").assertIsDisplayed()
+        scrollToText("Apps")
+        compose.onNodeWithText("Apps").assertIsDisplayed()
+        scrollToText("Where blocking applies")
+        compose.onNodeWithText("Where blocking applies").assertIsDisplayed()
+    }
+
+    @Test
+    fun lockBoundaryChangesRowInvokesCallbackAtLargeFontScale() {
+        var openedChanges = false
+        compose.setContent {
+            FocusLockTestSurface(fontScale = 1.5f) {
+                BoundariesScreen(onOpenChanges = { openedChanges = true })
+            }
+        }
+
+        scrollToText("Lock boundary changes")
+        compose.onNodeWithText("Lock boundary changes").assertIsDisplayed().performClick()
+        assertTrue("Lock boundary changes should open its supplied destination", openedChanges)
     }
 
     @Test
@@ -81,8 +96,8 @@ class BoundariesNavigationUiTest {
         compose.onNodeWithText("Manual", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Schedule", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Location", useUnmergedTree = true).performScrollTo().assertIsDisplayed()
-        compose.onNodeWithText("More protection options").performScrollTo()
-        compose.onNodeWithText("More protection options").assertIsDisplayed()
+        compose.onNodeWithText("More about Strict Mode").performScrollTo()
+        compose.onNodeWithText("More about Strict Mode").assertIsDisplayed()
         compose.waitForIdle()
         saveScreenshot("strict-hierarchy")
     }

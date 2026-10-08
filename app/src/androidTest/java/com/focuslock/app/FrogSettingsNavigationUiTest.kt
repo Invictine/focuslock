@@ -20,11 +20,14 @@ class FrogSettingsNavigationUiTest {
         val settings = FocusLockApplication.instance.settingsRepository
         val previousOffline = runBlocking { settings.offlineModeFlow.first() }
         var scenario: ActivityScenario<MainActivity>? = null
+        val onboarding = NavigationOnboardingFixture(FocusLockApplication.instance)
         try {
+            onboarding.prepare()
             runBlocking { settings.setOfflineMode(true) }
             scenario = ActivityScenario.launch(MainActivity::class.java)
             compose.waitForIdle()
             compose.onNodeWithContentDescription("Settings").performClick()
+            compose.onNodeWithText("Daily priority routine").performClick()
             compose.onNodeWithText("Essential apps").performScrollTo().performClick()
             compose.onNodeWithText("Choose apps available for every frog.").assertIsDisplayed()
             compose.onNodeWithText("Save").assertIsDisplayed()
@@ -32,6 +35,7 @@ class FrogSettingsNavigationUiTest {
             compose.onNodeWithText("Choose what's available each morning").performScrollTo().assertIsDisplayed()
         } finally {
             scenario?.close()
+            onboarding.restore()
             runBlocking { settings.setOfflineMode(previousOffline) }
         }
     }
