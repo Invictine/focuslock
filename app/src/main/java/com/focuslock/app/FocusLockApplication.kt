@@ -70,9 +70,6 @@ class FocusLockApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         instance = this
-        // Register Firebase's activity lifecycle observer before the first activity
-        // starts. Initializing it in onResume misses that activity's lifecycle.
-        com.focuslock.app.updates.PrivateBuildUpdater.initialize(this)
         creditBankRepository = CreditBankRepository(applicationContext)
         strictModeAutomationRepository = StrictModeAutomationRepository(applicationContext)
         val strictActivationActive: suspend () -> Boolean = {

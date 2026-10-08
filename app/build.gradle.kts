@@ -8,9 +8,6 @@ val ticktickClientId: String = (localProps.getProperty("ticktick.clientId") ?: "
 val ticktickClientSecret: String = (localProps.getProperty("ticktick.clientSecret") ?: "").trim()
 val clerkPublishableKey: String = (localProps.getProperty("clerk.publishableKey") ?: System.getenv("CLERK_PUBLISHABLE_KEY") ?: "").trim()
 val convexUrl: String = (localProps.getProperty("convex.url") ?: System.getenv("CONVEX_URL") ?: "").trim()
-// Private build update identifiers stay in the ignored local.properties copied by
-// the distribution worker. No Firebase login token is embedded in the app.
-fun firebaseSetting(name: String): String = (localProps.getProperty("firebase.$name") ?: "").trim()
 
 plugins {
     alias(libs.plugins.android.application)
@@ -45,17 +42,9 @@ android {
         // Clerk auth + Convex sync (gitignored local.properties or env). Empty = auth-gated off.
         buildConfigField("String", "CLERK_PUBLISHABLE_KEY", "\"$clerkPublishableKey\"")
         buildConfigField("String", "CONVEX_URL", "\"$convexUrl\"")
-        buildConfigField("String", "DISTRIBUTION_APP_ID", "\"${firebaseSetting("applicationId")}\"")
-        buildConfigField("String", "DISTRIBUTION_API_KEY", "\"${firebaseSetting("apiKey")}\"")
-        buildConfigField("String", "DISTRIBUTION_PROJECT_ID", "\"${firebaseSetting("projectId")}\"")
-        buildConfigField("String", "DISTRIBUTION_SENDER_ID", "\"${firebaseSetting("senderId")}\"")
-        buildConfigField("boolean", "PRIVATE_BUILD_UPDATES", "false")
     }
 
     buildTypes {
-        debug {
-            buildConfigField("boolean", "PRIVATE_BUILD_UPDATES", "true")
-        }
         release {
             // R8 shrinking (perf/build fix, item 12): shrinks the Compose
             // material-icons-extended dependency down to the icons actually used and
@@ -110,12 +99,6 @@ dependencies {
     implementation(libs.androidx.work.runtime)
     implementation(libs.clerk.android.ui)
     implementation(libs.androidx.activity.compose)
-    implementation("com.google.firebase:firebase-appdistribution-api:16.0.0-beta20")
-    // Self-update implementation belongs only in private distribution builds.
-    debugImplementation("com.google.firebase:firebase-appdistribution:16.0.0-beta20")
-    // App Distribution pulls Fragment 1.1.0, which is incompatible with our
-    // Activity Result permission APIs. Keep the private SDK's UI compatible.
-    debugImplementation("androidx.fragment:fragment:1.8.9")
 
     implementation(libs.androidx.compose.ui)
     implementation(libs.androidx.compose.ui.graphics)
