@@ -46,9 +46,14 @@ class DeviceLocationSource(context: Context) {
     ): Location? {
         if (!hasPrecisePermission() || !isLocationEnabled()) return null
         val lm = manager ?: return null
-        return enabledProviders(lm).mapNotNull { provider ->
+        val providerLocations = enabledProviders(lm).mapNotNull { provider ->
             try { lm.getLastKnownLocation(provider) } catch (_: SecurityException) { null } catch (_: IllegalArgumentException) { null }
-        }.filter { validFix(it, maxAgeMs, maxAccuracyMeters) && acceptLocation(it) }.maxByOrNull { it.time }
+        }
+        // Include the last fix returned by currentLocation() as well as Android's
+        // provider cache. This remains a synchronous read and never requests a fix.
+        return (providerLocations + listOfNotNull(cached?.let(::Location)))
+            .filter { validFix(it, maxAgeMs, maxAccuracyMeters) && acceptLocation(it) }
+            .maxByOrNull { it.time }
     }
 
     suspend fun currentLocation(

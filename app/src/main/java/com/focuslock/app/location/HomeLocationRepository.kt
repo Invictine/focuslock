@@ -17,6 +17,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 private val Context.homeLocationStore by preferencesDataStore(name = "focuslock_home_location")
+private const val MAX_FIX_AGE_MS = 60_000L
 
 /** Separate location preference store; saving a place enables home-only mode atomically. */
 class HomeLocationRepository(
@@ -92,6 +93,40 @@ class HomeLocationRepository(
         }
     }
 
+    /**
+     * Fast app-transition check. It reads saved policy and a fresh cached fix only;
+     * it never requests provider work and never waits behind the full-check mutex.
+     * Missing, stale, ambiguous, or inaccessible location fails closed.
+     */
+    suspend fun shouldEnforceOnAppSwitch(permanent: Boolean = false): Boolean {
+        if (permanent) return HomeLocationPolicy.shouldEnforceBlock(true, false)
+        return try {
+            val prefs = appContext.homeLocationStore.data.first()
+            if (prefs[enabledKey] != true) {
+                diagnosticSnapshot = DiagnosticSnapshot("DISABLED", "home_only_disabled", null, null, null, null)
+                return HomeLocationPolicy.shouldEnforce(false, false, false, HomeLocationStatus.DISABLED)
+            }
+            val place = decodePlace(prefs[placeKey])
+            if (place == null) {
+                diagnosticSnapshot = DiagnosticSnapshot("UNAVAILABLE", "home_place_missing_or_invalid", null, null, null, null)
+                return true
+            }
+            val status = statusFromRecentFix(place, requireBackgroundPermission = true)
+            HomeLocationPolicy.shouldEnforce(
+                homeOnlyEnabled = true,
+                precisePermission = locationSource.hasPrecisePermission(),
+                backgroundPermission = locationSource.hasBackgroundPermission(),
+                status = status,
+            )
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            Log.w("HomeLocation", "Could not check recent home location; keeping blocking active", error)
+            diagnosticSnapshot = DiagnosticSnapshot("UNAVAILABLE", "location_check_failed", null, null, null, null)
+            true
+        }
+    }
+
     private suspend fun checkEnforcementNow(): Boolean {
         val prefs = appContext.homeLocationStore.data.first()
         val enabled = prefs[enabledKey] == true
@@ -149,10 +184,10 @@ class HomeLocationRepository(
         val classifiesBoundary: (Location) -> Boolean = { HomeLocationPolicy.isInside(place, it) != null }
         val location = locationSource.currentLocation(maxAgeMs = 30_000L, timeoutMs = 12_000L,
             maxAccuracyMeters = maxAccuracyMeters, acceptLocation = classifiesBoundary)
-            ?: locationSource.recentLocation(maxAgeMs = 60_000L, maxAccuracyMeters = maxAccuracyMeters,
+            ?: locationSource.recentLocation(maxAgeMs = MAX_FIX_AGE_MS, maxAccuracyMeters = maxAccuracyMeters,
                 acceptLocation = classifiesBoundary)
             ?: run {
-                val ambiguous = locationSource.recentLocation(maxAgeMs = 60_000L, maxAccuracyMeters = maxAccuracyMeters)
+                val ambiguous = locationSource.recentLocation(maxAgeMs = MAX_FIX_AGE_MS, maxAccuracyMeters = maxAccuracyMeters)
                 diagnosticSnapshot = if (ambiguous != null) snapshot("UNAVAILABLE",
                     "accuracy_circle_overlaps_home_boundary", ambiguous,
                     (System.currentTimeMillis() - ambiguous.time).coerceAtLeast(0L), ambiguous.accuracy,
@@ -164,11 +199,46 @@ class HomeLocationRepository(
             diagnosticSnapshot = DiagnosticSnapshot("UNAVAILABLE", "location_services_disabled_or_unavailable", null, null, null, null)
             return HomeLocationStatus.UNAVAILABLE
         }
-        val ageMs = (System.currentTimeMillis() - location.time).coerceAtLeast(0L)
+        return classifyLocation(place, location, maxAccuracyMeters)
+    }
+
+    private fun statusFromRecentFix(place: HomePlace, requireBackgroundPermission: Boolean): HomeLocationStatus {
+        if (!locationSource.hasPrecisePermission()) {
+            diagnosticSnapshot = DiagnosticSnapshot("UNAVAILABLE", "precise_location_permission_missing", null, null, null, null)
+            return HomeLocationStatus.UNAVAILABLE
+        }
+        if (requireBackgroundPermission && !locationSource.hasBackgroundPermission()) {
+            diagnosticSnapshot = DiagnosticSnapshot("UNAVAILABLE", "background_location_permission_missing", null, null, null, null)
+            return HomeLocationStatus.UNAVAILABLE
+        }
+        if (!locationSource.isLocationEnabled()) {
+            diagnosticSnapshot = DiagnosticSnapshot("UNAVAILABLE", "location_services_disabled_or_unavailable", null, null, null, null)
+            return HomeLocationStatus.UNAVAILABLE
+        }
+        val maxAccuracyMeters = minOf(100f, place.radiusMeters)
+        val location = locationSource.recentLocation(MAX_FIX_AGE_MS, maxAccuracyMeters)
+        if (location == null) {
+            diagnosticSnapshot = DiagnosticSnapshot("UNAVAILABLE", "no_fresh_accurate_fix", null, null, null, null)
+            return HomeLocationStatus.UNAVAILABLE
+        }
+        // Permissions and provider state can change between reading the fix and
+        // classifying it. Only an explicit AWAY result may relax enforcement.
+        if (!locationSource.hasPrecisePermission() ||
+            (requireBackgroundPermission && !locationSource.hasBackgroundPermission()) ||
+            !locationSource.isLocationEnabled()) {
+            diagnosticSnapshot = DiagnosticSnapshot("UNAVAILABLE", "location_access_changed_during_check", null, null, null, null)
+            return HomeLocationStatus.UNAVAILABLE
+        }
+        return classifyLocation(place, location, maxAccuracyMeters)
+    }
+
+    private fun classifyLocation(place: HomePlace, location: Location, maxAccuracyMeters: Float): HomeLocationStatus {
+        val now = System.currentTimeMillis()
+        val ageMs = (now - location.time).coerceAtLeast(0L)
         val accuracy = if (location.hasAccuracy()) location.accuracy else Float.NaN
         val distance = distanceFromHomeMeters(place, location)
         if (!HomeLocationPolicy.isUsable(location.latitude, location.longitude,
-                accuracy, location.time, System.currentTimeMillis(), 60_000L)) {
+                accuracy, location.time, now, MAX_FIX_AGE_MS)) {
             diagnosticSnapshot = snapshot("UNAVAILABLE", "fix_stale_or_invalid", location, ageMs, accuracy, distance)
             return HomeLocationStatus.UNAVAILABLE
         }

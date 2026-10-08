@@ -55,10 +55,21 @@ class FrogHomeActivity : ComponentActivity() {
             repeatOnLifecycle(Lifecycle.State.RESUMED) {
                 leaving = false
                 val app = FocusLockApplication.instance
-                app.frogRepository.armIfDue()
-                app.frogRepository.frogStateFlow.collectLatest { state ->
+                // Arming may write settings; Home's first frame need not wait for it.
+                val arming = launch { app.frogRepository.armIfDue() }
+                launch {
                     while (true) {
-                        val enforce = app.homeLocationRepository.shouldEnforceNow()
+                        app.homeLocationRepository.shouldEnforceNow()
+                        delay(10_000)
+                    }
+                }
+                app.frogRepository.frogStateFlow.collectLatest { state ->
+                    if (!state.locked) {
+                        arming.join()
+                        if (app.frogRepository.currentState().locked) return@collectLatest
+                    }
+                    while (true) {
+                        val enforce = app.homeLocationRepository.shouldEnforceOnAppSwitch()
                         locked = state.locked && enforce
                         if (!locked) { openRegularHome(); return@collectLatest }
                         locationChecked = true
