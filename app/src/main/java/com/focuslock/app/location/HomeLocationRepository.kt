@@ -2,6 +2,7 @@ package com.focuslock.app.location
 
 import android.content.Context
 import android.location.Location
+import android.os.SystemClock
 import android.util.Log
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
@@ -12,6 +13,8 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -29,6 +32,17 @@ class HomeLocationRepository(
     private val json = Json { ignoreUnknownKeys = true }
     private val placeKey = stringPreferencesKey("home_place")
     private val enabledKey = booleanPreferencesKey("home_only_enabled")
+    private val enforcementMutex = Mutex()
+
+    // Foreground enforcement can ask the same location question several times while
+    // one app transition is being processed. Reuse a just-completed verdict so those
+    // checks do not each start a fresh provider request or briefly disagree.
+    @Volatile
+    private var cachedEnforcement: Pair<Long, Boolean>? = null
+
+    private companion object {
+        const val ENFORCEMENT_CACHE_MS = 3_000L
+    }
 
     /** Safe, in-memory diagnostic summary. Never contains saved or device coordinates. */
     data class DiagnosticSnapshot(
@@ -69,6 +83,7 @@ class HomeLocationRepository(
             prefs[placeKey] = json.encodeToString(place)
             prefs[enabledKey] = true
         }
+        cachedEnforcement = null
     }
 
     suspend fun setHomeOnly(enabled: Boolean) {
@@ -77,19 +92,28 @@ class HomeLocationRepository(
             require(!enabled || decodePlace(prefs[placeKey]) != null) { "Choose a home location before enabling home-only mode" }
             prefs[enabledKey] = enabled
         }
+        cachedEnforcement = null
     }
 
     /** Permanent blocks bypass location; other rules pause only when reliably away. */
     suspend fun shouldEnforceNow(permanent: Boolean = false): Boolean {
         if (permanent) return HomeLocationPolicy.shouldEnforceBlock(true, false)
-        return try {
-            checkEnforcementNow()
-        } catch (error: CancellationException) {
-            throw error
-        } catch (error: Exception) {
-            Log.w("HomeLocation", "Could not check home location; keeping blocking active", error)
-            diagnosticSnapshot = DiagnosticSnapshot("UNAVAILABLE", "location_check_failed", null, null, null, null)
-            true
+        val now = SystemClock.elapsedRealtime()
+        cachedEnforcement?.takeIf { now - it.first in 0..ENFORCEMENT_CACHE_MS }?.let { return it.second }
+        return enforcementMutex.withLock {
+            val checkedAt = SystemClock.elapsedRealtime()
+            cachedEnforcement?.takeIf { checkedAt - it.first in 0..ENFORCEMENT_CACHE_MS }?.let { return@withLock it.second }
+            val allowed = try {
+                checkEnforcementNow()
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                Log.w("HomeLocation", "Could not check home location; keeping blocking active", error)
+                diagnosticSnapshot = DiagnosticSnapshot("UNAVAILABLE", "location_check_failed", null, null, null, null)
+                true
+            }
+            cachedEnforcement = SystemClock.elapsedRealtime() to allowed
+            allowed
         }
     }
 

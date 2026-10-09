@@ -6,6 +6,7 @@ import {
   useFrogState,
   type FrogTask,
 } from "./frog";
+import { useVoidLauncherUi, voidLauncherAvailable } from "./voidLauncher";
 import "./frog.css";
 
 /** Apps and websites the picker offers, assembled by the Focus page from the
@@ -148,7 +149,9 @@ function AllowlistChips({ frog }: { frog: FrogTask }) {
 
 export default function FrogCard({ catalog }: { catalog: FrogCatalog }) {
   const { state, actions } = useFrogState();
+  const voidUi = useVoidLauncherUi();
   const [pickerOpen, setPickerOpen] = useState(false);
+  const desktopLauncherAvailable = voidLauncherAvailable();
 
   // Feature off: no card at all (mirrors Android's FrogCard).
   if (!state.enabled) return null;
@@ -262,6 +265,17 @@ export default function FrogCard({ catalog }: { catalog: FrogCatalog }) {
           <div className="frog-actions">
             <button
               type="button"
+              className="primary-button void-launcher-button"
+              disabled={!desktopLauncherAvailable || !voidUi.ready || voidUi.busy || !state.enabled}
+              onClick={() => window.dispatchEvent(new Event("focuslock:void-open"))}
+              title={!desktopLauncherAvailable ? "The Frog launcher runs in the Windows app." : !voidUi.ready ? "Connecting to the Frog launcher…" : undefined}
+            >
+              {voidUi.busy
+                ? voidUi.active ? "Returning to Frog launcher…" : "Opening Frog launcher…"
+                : voidUi.active ? "Return to Frog launcher" : "Open Frog launcher"}
+            </button>
+            <button
+              type="button"
               className="primary-button"
               disabled={state.tickedOff}
               onClick={() => actions.tickOffFrog(true)}
@@ -276,6 +290,15 @@ export default function FrogCard({ catalog }: { catalog: FrogCatalog }) {
               Change frog
             </button>
           </div>
+        )}
+        {state.phase === "working" && !desktopLauncherAvailable && (
+          <p className="frog-launcher-note">The Frog launcher is available in the Windows desktop app.</p>
+        )}
+        {state.phase === "working" && desktopLauncherAvailable && !voidUi.ready && !voidUi.error && (
+          <p className="frog-launcher-note">Connecting to the Frog launcher…</p>
+        )}
+        {state.phase === "working" && voidUi.error && (
+          <p className="frog-launcher-error" role="alert">{voidUi.error}</p>
         )}
         {state.phase === "working" && (
           <p className="frog-hint">

@@ -14,3 +14,20 @@ export function browserProtectionPolicy(dashboard: any, groups: any[], frogLocke
   void now;
   return { required, lockedUntilMs: 0 };
 }
+
+/** Describe the opt-in browser checker without guessing from a missing browser row. */
+export function browserProtectionStatusLabel(status: any, signedIn: boolean): string {
+  if (!status?.browserProtectionEnabled) return "Off";
+  if (!signedIn) return "On · paused until sign-in";
+  if (!status.browserProtectionRequired) return "On · no website rules to monitor";
+  if (status.browserProtection) {
+    const browser = status.browserProtection;
+    if (browser.healthy) return `${browser.browser} · Connected`;
+    if (browser.reason === "browser_unsupported") return "Supported browser unavailable";
+    if (browser.graceRemainingSeconds > 0) return `Connection unavailable · ${browser.graceRemainingSeconds}s`;
+    return "Connection unavailable";
+  }
+  if (status.browserProtectionScanState === "no_browser") return "On · no browser window open";
+  if (status.browserProtectionScanState === "scan_error") return "Browser check unavailable";
+  return "On · checking browser status";
+}

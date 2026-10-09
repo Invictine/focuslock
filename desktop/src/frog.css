@@ -106,6 +106,36 @@
 .frog-actions .secondary-button {
   padding: 10px 14px;
 }
+.void-launcher-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 190px;
+}
+.void-launcher-button:disabled {
+  opacity: .58;
+  cursor: not-allowed;
+}
+.frog-launcher-note,
+.frog-launcher-error {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.frog-launcher-note {
+  color: var(--fl-on-surface-variant);
+}
+.frog-launcher-error {
+  color: var(--fl-error);
+}
+.void-launcher-live-status {
+  position: fixed;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
 .frog-hint {
   margin: 0;
   color: var(--fl-on-surface-variant);

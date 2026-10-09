@@ -24,6 +24,7 @@
     },
     "icon": ["icons/icon.ico", "icons/icon.icns", "icons/icon.png"],
     "resources": {
+      "resources/void/FocusLock.Void.exe": "void/FocusLock.Void.exe",
       "installer/cleanup.ps1": "installer/cleanup.ps1"
     }
   }

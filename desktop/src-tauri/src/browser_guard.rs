@@ -143,9 +143,9 @@ impl BrowserGuard {
 
         let state = self
             .pending
-            .values()
-            .min_by_key(|pending| pending.started_at_ms)
-            .map(|pending| BrowserRepairState {
+            .iter()
+            .min_by_key(|(hwnd, pending)| (pending.started_at_ms, **hwnd))
+            .map(|(_, pending)| BrowserRepairState {
                 browser: pending.browser.clone(),
                 app_id: pending.app_id.clone(),
                 grace_remaining_seconds: GRACE_MS
@@ -166,6 +166,13 @@ impl BrowserGuard {
             .iter()
             .map(|(hwnd, pending)| (*hwnd, pending.process_id, pending.app_id.clone()))
             .collect()
+    }
+
+    /// Select the same window as the repair notice, including deterministic
+    /// ordering when multiple windows started their countdown together.
+    pub fn repair_window_handle(&self) -> Option<isize> {
+        self.pending.iter().min_by_key(|(hwnd, pending)| (pending.started_at_ms, **hwnd))
+            .map(|(hwnd, _)| *hwnd)
     }
 
     pub fn retry_close(&mut self, hwnd: isize) {

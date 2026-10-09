@@ -27,9 +27,10 @@ import { boundaryLeisureSeconds, formatTimeDuration, mergeLiveTodayUsage, timeRa
 import { accountClient, flushMutations, useDurableMutation, useMutationReplay } from "./durableSync";
 import { claimPermanentTargets, discoverPermanentTargets, permanentTargetsOwnedByAccount } from "./permanentSync";
 import { useFocusAuth } from "./auth";
-import { browserProtectionPolicy } from "./browserProtection";
+import { browserProtectionPolicy, browserProtectionStatusLabel } from "./browserProtection";
 import { DESKTOP_FROG_ENABLED } from "./features";
 import FrogCard from "./FrogCard";
+import { VoidLauncherBridge } from "./voidLauncher";
 import ApprovalUnlockPanel from "./ApprovalUnlockPanel";
 import { useStrictActive } from "./useStrictActive";
 import { useStrictUninstallGuard } from "./strictUninstall";
@@ -117,6 +118,8 @@ type NativeStatus = {
   browserProtectionRequired?: boolean;
   browserProtectionEnabled?: boolean;
   browserProtection?: { browser: string; healthy: boolean; graceRemainingSeconds: number; reason?: string | null } | null;
+  browserProtectionScanState?: "idle" | "checking" | "no_browser" | "browser" | "scan_error";
+  browserProtectionError?: string | null;
 };
 
 function Icon({
@@ -770,6 +773,8 @@ export const FROG_NEVER_BLOCK_APP_IDS: ReadonlySet<string> = new Set([
   "logonui.exe",
   "shellhost.exe",
   "searchapp.exe",
+  // Exact helper emitted by the bundled Void build.
+  "focuslock.void.exe",
 ]);
 
 // Browsers the Windows tracker recognizes (`windows_capture::is_supported_browser`),
@@ -1775,6 +1780,9 @@ function DesktopApp() {
   return (
     <div className="app-frame">
       {uninstallGuardError && <p role="alert" className="error-text">{uninstallGuardError}</p>}
+      {DESKTOP_FROG_ENABLED && (
+        <VoidLauncherBridge frog={frog.state} actions={frog.actions} workRatio={workRatio} />
+      )}
       <aside className="rail">
         <div className="brand">
           <span className="brand-mark">
@@ -2891,8 +2899,8 @@ function FocusTimer({
   const ratioRef = useRef(workRatio);
   ratioRef.current = workRatio;
   useEffect(() => {
-    if (!running) setLeft(minutes * 60);
-  }, [minutes, running]);
+    setLeft(minutes * 60);
+  }, [minutes]);
   useEffect(() => {
     if (!running) return;
     const id = window.setInterval(
@@ -2904,8 +2912,15 @@ function FocusTimer({
   // FROG METERING: while the timer runs, credit the armed frog one second at a
   // time in ~5s batches (and flush on pause/stop/unmount), so localStorage is
   // not written every tick. addTrackedSeconds itself ignores frogs that are not
-  // armed+selected+unticked, so an idle frog never accrues.
+  // armed+selected+incomplete, so an idle frog never accrues.
   const frogPendingRef = useRef(0);
+  const flushFrogPendingRef = useRef(() => {});
+  flushFrogPendingRef.current = () => {
+    if (frogPendingRef.current > 0) {
+      addTrackedSeconds(frogPendingRef.current);
+      frogPendingRef.current = 0;
+    }
+  };
   useEffect(() => {
     if (!running) return;
     const id = window.setInterval(() => {
@@ -2917,11 +2932,20 @@ function FocusTimer({
     }, 1000);
     return () => {
       window.clearInterval(id);
-      if (frogPendingRef.current > 0) {
-        addTrackedSeconds(frogPendingRef.current);
-        frogPendingRef.current = 0;
+      flushFrogPendingRef.current();
+    };
+  }, [running]);
+  useEffect(() => {
+    const onExclusiveTimer = (event: Event) => {
+      const owner = (event as CustomEvent<{ owner?: string }>).detail?.owner;
+      if (owner === "focus" && !running) return;
+      if (owner !== "focus" && running) {
+        flushFrogPendingRef.current();
+        setRunning(false);
       }
     };
+    window.addEventListener("focuslock:exclusive-timer", onExclusiveTimer);
+    return () => window.removeEventListener("focuslock:exclusive-timer", onExclusiveTimer);
   }, [running]);
   // The history entry and earned credit commit atomically and deduplicate by record ID.
   useEffect(() => {
@@ -2963,6 +2987,9 @@ function FocusTimer({
       <button
         className="primary-button"
         onClick={() => {
+          if (!running) {
+            window.dispatchEvent(new CustomEvent("focuslock:exclusive-timer", { detail: { owner: "focus" } }));
+          }
           if (left === 0) {
             setLeft(minutes * 60);
             setSaved(false);
@@ -5124,14 +5151,7 @@ function SettingsPage({
         >
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <span className="setting-value" role="status">
-              {!status?.browserProtectionEnabled ? "Off" :
-                !auth.user ? "On · paused until sign-in" :
-                !status.browserProtectionRequired ? "On · no website rules to monitor" :
-                !status.browserProtection ? "On · checking browser" :
-                status.browserProtection.healthy ? `${status.browserProtection.browser} · Connected` :
-                status.browserProtection.reason === "browser_unsupported" ? "Supported browser unavailable" :
-                status.browserProtection.graceRemainingSeconds > 0 ? `Connection unavailable · ${status.browserProtection.graceRemainingSeconds}s` :
-                "Connection unavailable"}
+              {browserProtectionStatusLabel(status, Boolean(auth.user))}
             </span>
             <button
               className={`switch ${status?.browserProtectionEnabled ? "on" : ""}`}
@@ -5159,6 +5179,11 @@ function SettingsPage({
             </button>
           </div>
         </SettingRow>
+        {status?.browserProtectionEnabled && auth.user && status.browserProtectionScanState === "scan_error" && (
+          <p className="boundary-notice" role="alert">
+            Browser check unavailable: {status.browserProtectionError || "Could not inspect browser windows."}
+          </p>
+        )}
         <SettingRow
           icon="clock"
           title="Idle timeout"

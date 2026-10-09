@@ -1,4 +1,14 @@
-# Eat the Frog on Android
+# Eat the Frog
+
+## Windows launcher
+
+The Windows desktop app embeds Void as its native Frog launcher. Pick a task and approved tools in the desktop Frog card, then choose **Open Frog launcher** for a quiet fullscreen task/tool surface. Its timer and task-done action are owned by FocusLock; both the required focus time and the task check-off are still needed. A finished block never automatically marks the task complete.
+
+Closing the launcher pauses its timer while FocusLock's blocking stays active. Approved executable/site buttons help open work tools; existing permanent blocks and browser boundaries retain precedence. The integrated launcher has no competing Void guard and does not switch displays or hide Windows taskbars. The desktop's explicit timer supplies progress; it does not verify that an approved app remained foreground. Morning auto-launch and a shared Android/Windows Frog session are not part of this integration: the current Frog task/progress remains device-local.
+
+See `desktop/README.md` for native builds, recovery shortcuts, and usage. `windows/void/` is shared with standalone `Invictine/Void`; both repositories' `AGENTS.md` files require same-task backports, source parity checks, and validation.
+
+## Android
 
 Frog starts at the configured local wake hour. On the first usable unlock, FocusLock opens a quiet black screen. If the display stays on across the wake hour, the accessibility monitor checks again without needing an app switch.
 

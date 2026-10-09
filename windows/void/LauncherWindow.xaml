@@ -1,0 +1,214 @@
+<Window x:Class="VoidApp.LauncherWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Void Launcher" Width="158" Height="42" MinWidth="158" MaxWidth="158" MinHeight="42" MaxHeight="42"
+        WindowStyle="None" ResizeMode="NoResize" AllowsTransparency="True" Background="Transparent"
+        ShowInTaskbar="False" ShowActivated="False" Topmost="True" WindowStartupLocation="Manual"
+        FontFamily="Segoe UI" Foreground="White" Loaded="Window_Loaded" Closing="Window_Closing">
+    <Window.Resources>
+        <Style x:Key="LauncherMenu" TargetType="ContextMenu">
+            <Setter Property="Background" Value="#0A0A0A" />
+            <Setter Property="Foreground" Value="#E0E0E0" />
+            <Setter Property="BorderBrush" Value="#2A2A2A" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="4" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ContextMenu">
+                        <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8" Padding="{TemplateBinding Padding}">
+                            <Border.Effect>
+                                <DropShadowEffect Color="Black" BlurRadius="16" ShadowDepth="4" Opacity="0.85" />
+                            </Border.Effect>
+                            <ItemsPresenter />
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="LauncherSeparator" TargetType="Separator">
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Separator">
+                        <Border Height="1" Background="#1E1E1E" Margin="6,4" />
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="LauncherMenuItem" TargetType="MenuItem">
+            <Setter Property="Foreground" Value="#D4D4D4" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="Padding" Value="14,8" />
+            <Setter Property="FontSize" Value="12.5" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="MenuItem">
+                        <Border x:Name="Frame" Background="{TemplateBinding Background}" CornerRadius="5" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter ContentSource="Header" RecognizesAccessKey="True" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsHighlighted" Value="True">
+                                <Setter TargetName="Frame" Property="Background" Value="#1A1A1A" />
+                                <Setter Property="Foreground" Value="#FFFFFF" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Foreground" Value="#555555" />
+                                <Setter Property="Cursor" Value="Arrow" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="VoidCapsuleButton" TargetType="Button">
+            <Setter Property="Foreground" Value="#CCCCCC" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="6,0" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Frame" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="12" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Frame" Property="Background" Value="#161616" />
+                                <Setter TargetName="Frame" Property="BorderBrush" Value="#2A2A2A" />
+                                <Setter Property="Foreground" Value="#FFFFFF" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Frame" Property="Background" Value="#222222" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="Frame" Property="BorderBrush" Value="#666666" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="Frame" Property="Opacity" Value="0.4" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="PresetsMenuButton" TargetType="Button">
+            <Setter Property="Foreground" Value="#888888" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Frame" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="12" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Frame" Property="Background" Value="#161616" />
+                                <Setter TargetName="Frame" Property="BorderBrush" Value="#2A2A2A" />
+                                <Setter Property="Foreground" Value="#FFFFFF" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Frame" Property="Background" Value="#222222" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="Frame" Property="BorderBrush" Value="#666666" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="Frame" Property="Opacity" Value="0.4" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+    <Grid Margin="2">
+        <Border x:Name="Capsule" CornerRadius="18" BorderThickness="1"
+                MouseLeftButtonDown="Capsule_MouseLeftButtonDown" Cursor="SizeAll">
+            <Border.Background>
+                <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                    <GradientStop Color="#0F0F0F" Offset="0.0" />
+                    <GradientStop Color="#070707" Offset="1.0" />
+                </LinearGradientBrush>
+            </Border.Background>
+            <Border.BorderBrush>
+                <SolidColorBrush Color="#262626" />
+            </Border.BorderBrush>
+            <Border.Effect>
+                <DropShadowEffect Color="Black" BlurRadius="12" ShadowDepth="2" Opacity="0.85" />
+            </Border.Effect>
+            <Grid Margin="4,2">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="28" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="1" />
+                    <ColumnDefinition Width="26" />
+                </Grid.ColumnDefinitions>
+
+                <!-- Black Hole / Singularity Vector Anchor (Drag Handle) -->
+                <Border Grid.Column="0" Width="26" Height="26" CornerRadius="13" Background="Transparent"
+                        ToolTip="Drag to move Void" Cursor="SizeAll"
+                        MouseLeftButtonDown="Capsule_MouseLeftButtonDown"
+                        AutomationProperties.Name="Move Void Launcher">
+                    <Viewbox Width="20" Height="20" IsHitTestVisible="False">
+                        <Canvas Width="24" Height="24">
+                            <!-- Gravitational Lensing Arc (Back Accretion Glow) -->
+                            <Path Data="M 4,12 C 4,5.5 20,5.5 20,12"
+                                  Stroke="#353535" StrokeThickness="1.3" StrokeStartLineCap="Round" StrokeEndLineCap="Round" />
+
+                            <!-- Accretion Disk (Tilted Elliptical Ring) -->
+                            <Ellipse Canvas.Left="2" Canvas.Top="8" Width="20" Height="8" StrokeThickness="1.2">
+                                <Ellipse.Stroke>
+                                    <LinearGradientBrush StartPoint="0,0.5" EndPoint="1,0.5">
+                                        <GradientStop Color="#181818" Offset="0.0"/>
+                                        <GradientStop Color="#4A4A4A" Offset="0.25"/>
+                                        <GradientStop Color="#8C8C8C" Offset="0.5"/>
+                                        <GradientStop Color="#4A4A4A" Offset="0.75"/>
+                                        <GradientStop Color="#181818" Offset="1.0"/>
+                                    </LinearGradientBrush>
+                                </Ellipse.Stroke>
+                            </Ellipse>
+
+                            <!-- Event Horizon (The Void Singularity) -->
+                            <Ellipse Canvas.Left="7" Canvas.Top="7" Width="10" Height="10" Fill="#000000" Stroke="#202020" StrokeThickness="0.8"/>
+
+                            <!-- Photon Ring Crescent -->
+                            <Path Data="M 8.2,10.5 A 3.8,3.8 0 0,1 15.8,10.5"
+                                  Stroke="#9E9E9E" StrokeThickness="0.9" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Opacity="0.75" />
+                        </Canvas>
+                    </Viewbox>
+                </Border>
+
+                <!-- VOID Home Button -->
+                <Button x:Name="HomeButton" Grid.Column="1" Style="{StaticResource VoidCapsuleButton}"
+                        Margin="2,0" Click="Home_Click"
+                        AutomationProperties.Name="Open Void homepage" ToolTip="Open Void homepage">
+                    <TextBlock Text="V O I D" FontSize="11" FontWeight="SemiBold"
+                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                </Button>
+
+                <!-- Subtle Hairline Divider -->
+                <Rectangle Grid.Column="2" Width="1" Height="14" Fill="#1E1E1E" VerticalAlignment="Center" />
+
+                <!-- Recent Presets Trigger -->
+                <Button x:Name="RecentButton" Grid.Column="3" Style="{StaticResource PresetsMenuButton}"
+                        Click="Recent_Click"
+                        AutomationProperties.Name="Recent focus presets" ToolTip="Recent focus presets">
+                    <Path Data="M 0,0 L 3.5,3.5 L 7,0" Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"
+                          StrokeThickness="1.3" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                          HorizontalAlignment="Center" VerticalAlignment="Center" />
+                </Button>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

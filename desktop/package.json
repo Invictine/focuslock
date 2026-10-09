@@ -9,8 +9,9 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "void:build": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/build-focuslock-void.ps1",
+    "tauri:dev": "npm run void:build && tauri dev",
+    "tauri:build": "npm run void:build && tauri build"
   },
   "dependencies": {
     "@clerk/clerk-react": "^5.61.3",

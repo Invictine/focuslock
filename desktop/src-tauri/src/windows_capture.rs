@@ -121,7 +121,7 @@ mod platform {
                 WindowsAndMessaging::{
                     EnumWindows, GetForegroundWindow, GetWindowRect, GetWindowTextLengthW,
                     GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
-                    PostMessageW, SetForegroundWindow, SetWindowPos, ShowWindow, HWND_TOPMOST,
+                    IsIconic, PostMessageW, SetForegroundWindow, SetWindowPos, ShowWindow, HWND_TOPMOST,
                     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SW_MINIMIZE,
                     SW_SHOWNOACTIVATE, WM_CLOSE,
                 },
@@ -237,6 +237,33 @@ mod platform {
                 app_id,
             })
         }
+    }
+
+    /// Enumerate browser windows independently of the foreground window.
+    /// Minimized windows are excluded because browser bridge discovery does
+    /// not consider them actionable; this also avoids treating minimized
+    /// windows as extension failures during initial discovery.
+    pub fn get_browser_windows() -> Result<Vec<BrowserWindowIdentity>, String> {
+        unsafe extern "system" fn callback(hwnd: HWND, lparam: LPARAM) -> BOOL {
+            unsafe {
+                if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+                    return BOOL(1);
+                }
+                let windows = &mut *(lparam.0 as *mut Vec<BrowserWindowIdentity>);
+                if let Some(identity) = browser_window_identity(hwnd.0 as isize) {
+                    windows.push(identity);
+                }
+                BOOL(1)
+            }
+        }
+
+        let mut windows: Vec<BrowserWindowIdentity> = Vec::new();
+        unsafe {
+            EnumWindows(Some(callback), LPARAM(&mut windows as *mut _ as isize))
+                .map_err(|error| format!("Could not enumerate browser windows: {error}"))?;
+        }
+        windows.sort_by_key(|window| window.window_handle);
+        Ok(windows)
     }
 
     /// Request a normal close only after revalidating the current HWND, PID,
@@ -504,6 +531,9 @@ mod platform {
     pub fn browser_window_identity(_: isize) -> Option<BrowserWindowIdentity> {
         None
     }
+    pub fn get_browser_windows() -> Result<Vec<BrowserWindowIdentity>, String> {
+        Ok(Vec::new())
+    }
     pub fn request_browser_window_close(_: isize, _: u32, _: &str) -> Result<(), String> {
         Err("Browser window close is only available on Windows".into())
     }
@@ -523,7 +553,7 @@ mod platform {
 }
 pub use platform::{
     browser_window_identity, capture_foreground, focus_window, foreground_window,
-    get_running_windows, idle_seconds, minimize_foreground, minimize_window,
+    get_browser_windows, get_running_windows, idle_seconds, minimize_foreground, minimize_window,
     request_browser_window_close, show_nonactivating_topmost, window_rect,
 };
 

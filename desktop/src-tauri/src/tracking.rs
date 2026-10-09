@@ -3,7 +3,7 @@ use crate::{
     browser_guard::{BrowserGuard, BrowserWindowSample},
     browser_warning::BrowserRepairRuntime,
     windows_capture::{
-        browser_window_identity, capture_foreground, get_running_windows, idle_seconds,
+        browser_window_identity, capture_foreground, get_browser_windows, get_running_windows, idle_seconds,
         minimize_foreground, request_browser_window_close,
         CapturedWindow,
     },
@@ -69,6 +69,8 @@ const PROTECTED_APP_IDS: &[&str] = &[
     "logonui.exe",
     "shellhost.exe",
     "searchapp.exe",
+    // The bundled focus surface must remain reachable during Frog enforcement.
+    "focuslock.void.exe",
 ];
 
 /// Consecutive `capture_foreground` failures after which the blocker is hidden:
@@ -476,6 +478,8 @@ pub struct TrackerStatus {
     pub browser_protection_required: bool,
     pub browser_protection_enabled: bool,
     pub browser_protection: Option<BrowserProtectionStatus>,
+    pub browser_protection_scan_state: &'static str,
+    pub browser_protection_error: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -495,10 +499,21 @@ pub struct BrowserProtectionStatus {
     checked_at_ms: u64,
 }
 
+#[derive(Clone, Debug)]
+struct BrowserProtectionScan {
+    state: &'static str,
+    browser: Option<BrowserProtectionStatus>,
+    error: Option<String>,
+}
+
+impl Default for BrowserProtectionScan {
+    fn default() -> Self { Self { state: "checking", browser: None, error: None } }
+}
+
 pub struct TrackerRuntime {
     browser_repair_resets: Arc<Mutex<Vec<String>>>,
     browser_paths: Arc<Mutex<HashMap<String, String>>>,
-    browser_protection: Arc<Mutex<Option<BrowserProtectionStatus>>>,
+    browser_protection: Arc<Mutex<BrowserProtectionScan>>,
     running: Arc<AtomicBool>,
     store: Arc<Mutex<TrackingStore>>,
     current: Arc<Mutex<Option<ActivityObservation>>>,
@@ -530,7 +545,7 @@ impl TrackerRuntime {
         Ok(Self {
             browser_repair_resets: Arc::new(Mutex::new(Vec::new())),
             browser_paths: Arc::new(Mutex::new(HashMap::new())),
-            browser_protection: Arc::new(Mutex::new(None)),
+            browser_protection: Arc::new(Mutex::new(BrowserProtectionScan::default())),
             running: Arc::new(AtomicBool::new(false)),
             store: Arc::new(Mutex::new(store)),
             current: Arc::new(Mutex::new(None)),
@@ -591,7 +606,7 @@ impl TrackerRuntime {
                             guard.reset_browser(&app_id, guard_started.elapsed().as_millis() as u64);
                         }
                     }
-                    update_browser_repair_guard(
+                    let scan = update_browser_repair_guard(
                         &app,
                         repair_runtime.as_ref(),
                         &mut guard,
@@ -599,9 +614,9 @@ impl TrackerRuntime {
                         protection_required,
                         guard_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
                         now_ms(),
-                        foreground.as_ref().ok().and_then(|window| window.as_ref()),
                         &last_error,
                     );
+                    if let Ok(mut status) = browser_protection.lock() { *status = scan; }
                     let matcher = match matcher.lock() {
                         Ok(value) => value.clone(),
                         Err(_) => break,
@@ -612,31 +627,6 @@ impl TrackerRuntime {
                     match foreground {
                         Ok(Some(captured)) => {
                             consecutive_capture_errors = 0;
-                            let healthy = protection_required && crate::browser_bridge::read_window_health(
-                                &lease_dir, captured.window_handle, captured.process_id,
-                                &captured.app_id, now_ms());
-                            if crate::browser_guard::is_browser(&captured.app_id) {
-                                let repair_state = repair_runtime.as_ref().and_then(|runtime| {
-                                    runtime.shared_state().lock().ok().and_then(|value| value.clone())
-                                });
-                                if let Ok(mut status) = browser_protection.lock() {
-                                    *status = Some(BrowserProtectionStatus {
-                                        browser: captured.app_name.clone(), healthy,
-                                        grace_remaining_seconds: repair_state.as_ref()
-                                            .filter(|state| state.app_id.eq_ignore_ascii_case(&captured.app_id))
-                                            .map(|state| state.grace_remaining_seconds).unwrap_or(0),
-                                        reason: repair_state.as_ref()
-                                            .filter(|state| state.app_id.eq_ignore_ascii_case(&captured.app_id))
-                                            .map(|state| state.reason.to_string()),
-                                        window_handle: captured.window_handle,
-                                        process_id: captured.process_id,
-                                        app_id: captured.app_id.clone(),
-                                        checked_at_ms: now_ms(),
-                                    });
-                                }
-                            } else {
-                                if let Ok(mut status) = browser_protection.lock() { *status = None; }
-                            }
                             // Explicit app blocks keep precedence (including Frog and permanent).
                             let blocked_match = matcher.match_target(&captured);
                             let observation = ActivityObservation {
@@ -799,7 +789,10 @@ impl TrackerRuntime {
             .lock()
             .map(|s| !s.blocked_targets.app_ids.is_empty() || !s.blocked_targets.domains.is_empty() || s.browser_protection_active())
             .unwrap_or(false);
-        let mut browser_protection = self.browser_protection.lock().ok().and_then(|v| v.clone());
+        let scan = self.browser_protection.lock().map(|v| v.clone()).unwrap_or_else(|_| BrowserProtectionScan {
+            state: "scan_error", browser: None, error: Some("Browser status is unavailable".into()),
+        });
+        let mut browser_protection = scan.browser;
         if let Some(browser) = browser_protection.as_mut() {
             browser.healthy = browser_protection_required && crate::browser_bridge::read_window_health(
                 self.store_path.parent().unwrap_or(Path::new(".")), browser.window_handle,
@@ -816,6 +809,8 @@ impl TrackerRuntime {
             browser_protection_required,
             browser_protection_enabled,
             browser_protection,
+            browser_protection_scan_state: scan.state,
+            browser_protection_error: scan.error,
         }
     }
     /// Pausing the tracker is refused while device-local permanent blocks
@@ -1185,15 +1180,34 @@ fn update_browser_repair_guard(
     required: bool,
     guard_now: u64,
     wall_now: u64,
-    foreground: Option<&CapturedWindow>,
     last_error: &Arc<Mutex<Option<String>>>,
-) {
+) -> BrowserProtectionScan {
     let mut known_windows = HashMap::new();
     let mut samples = HashMap::new();
+    let mut scan_error = None;
+    // Discover open browser windows independently of usage capture. Looking
+    // at Settings, another app, or an unreadable foreground must not erase the
+    // checker's status or prevent a newly opened browser from being checked.
+    if required {
+        match get_browser_windows() {
+            Ok(windows) => for window in windows {
+                known_windows.insert(window.window_handle, (window.process_id, window.app_id.clone()));
+                samples.insert(window.window_handle, BrowserWindowSample {
+                    healthy: crate::browser_bridge::read_window_health(
+                        lease_dir, window.window_handle, window.process_id, &window.app_id, wall_now),
+                    window_handle: window.window_handle,
+                    process_id: window.process_id,
+                    app_id: window.app_id,
+                    browser: window.app_name,
+                });
+            },
+            Err(error) => scan_error = Some(error),
+        }
+    }
     // Recheck already-pending handles even when a window is minimized or
     // has lost foreground. Invalid/reused handles are omitted and the policy
-    // drops their stale deadlines. New deadlines start only when a browser
-    // window is observed in the foreground.
+    // drops their stale deadlines. Newly discovered browser windows also get
+    // their own deadline even while FocusLock's Settings is foreground.
     for (hwnd, expected_pid, expected_app) in guard.pending_identities() {
         if let Some(identity) = browser_window_identity(hwnd) {
             if identity.process_id == expected_pid
@@ -1215,27 +1229,9 @@ fn update_browser_repair_guard(
         }
     }
 
-    if let Some(window) = foreground.filter(|window| crate::browser_guard::is_browser(&window.app_id)
-        && crate::browser_window::is_browser_content_window(window.window_handle)) {
-        known_windows.insert(window.window_handle, (window.process_id, window.app_id.clone()));
-        samples.insert(window.window_handle, BrowserWindowSample {
-            healthy: required
-                && crate::browser_bridge::supported_browser(&window.app_id)
-                && crate::browser_bridge::read_window_health(
-                    lease_dir,
-                    window.window_handle,
-                    window.process_id,
-                    &window.app_id,
-                    wall_now,
-                ),
-            window_handle: window.window_handle,
-            process_id: window.process_id,
-            app_id: window.app_id.clone(),
-            browser: window.app_name.clone(),
-        });
-    }
     let samples: Vec<_> = samples.into_values().collect();
-    let (repair_state, due) = guard.update(required, &samples, &known_windows, guard_now);
+    let (scan, repair_state, due) = observe_browser_samples(
+        guard, required, &samples, &known_windows, guard_now, wall_now, scan_error);
     if let Some(runtime) = runtime {
         runtime.set(repair_state.clone());
     }
@@ -1265,6 +1261,40 @@ fn update_browser_repair_guard(
             }
         }
     }
+    scan
+}
+
+/// Build both Settings status and the notice from one complete browser scan.
+/// There is deliberately no foreground-app input to this state transition.
+fn observe_browser_samples(
+    guard: &mut BrowserGuard,
+    required: bool,
+    samples: &[BrowserWindowSample],
+    known_windows: &HashMap<isize, (u32, String)>,
+    guard_now: u64,
+    wall_now: u64,
+    error: Option<String>,
+) -> (BrowserProtectionScan, Option<crate::browser_guard::BrowserRepairState>, Vec<BrowserWindowSample>) {
+    let (repair, due) = guard.update(required, samples, known_windows, guard_now);
+    let selected = if required {
+        guard.repair_window_handle().and_then(|hwnd| samples.iter().find(|window| window.window_handle == hwnd))
+            .or_else(|| samples.iter().min_by_key(|window| window.window_handle))
+    } else { None };
+    let browser = selected.map(|window| BrowserProtectionStatus {
+        browser: window.browser.clone(),
+        healthy: window.healthy,
+        grace_remaining_seconds: repair.as_ref().map(|state| state.grace_remaining_seconds).unwrap_or(0),
+        reason: repair.as_ref().map(|state| state.reason.to_string()),
+        window_handle: window.window_handle,
+        process_id: window.process_id,
+        app_id: window.app_id.clone(),
+        checked_at_ms: wall_now,
+    });
+    let state = if !required { "idle" }
+        else if error.is_some() { "scan_error" }
+        else if browser.is_some() { "browser" }
+        else { "no_browser" };
+    (BrowserProtectionScan { state, browser, error }, repair, due)
 }
 
 #[cfg(test)]

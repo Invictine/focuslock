@@ -1,0 +1,9 @@
+{
+  "title": "Migrated",
+  "lockMinutes": 0,
+  "apps": [
+    { "name": "Relative app", "path": "tools\\app.exe" },
+    { "name": "Packaged app", "appUserModelId": "Vendor.App!Main" },
+    { "name": "Environment path", "path": "%LOCALAPPDATA%\\VoidTest\\app.exe" }
+  ]
+}

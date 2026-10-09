@@ -1,0 +1,14 @@
+{
+  "title": "FOCUS",
+  "guard": false,
+  "startWithWindows": false,
+  "primaryMonitorOnly": true,
+  "lockMinutes": 25,
+  "apps": [
+    { "name": "Chemistry", "appUserModelId": "OpenAI.Codex_2p2nqsd0c76g0!App", "args": "" },
+    { "name": "Physics", "path": "%PROGRAMFILES%\\Google\\Chrome\\Application\\chrome.exe", "args": "--profile-directory=\"Work\"" },
+    { "name": "Coding", "path": "%LOCALAPPDATA%\\Programs\\Microsoft VS Code\\Code.exe", "args": "" },
+    { "name": "Editing", "path": "%PROGRAMFILES%\\Adobe\\Adobe Premiere Pro 2026\\Adobe Premiere Pro.exe", "args": "" },
+    { "name": "Writing", "path": "%WINDIR%\\System32\\notepad.exe", "args": "" }
+  ]
+}

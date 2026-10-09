@@ -11,6 +11,7 @@ mod browser_warning;
 mod browser_window;
 mod tracking;
 mod uninstall_guard;
+mod void_launcher;
 mod windows_capture;
 
 use tauri::Manager;
@@ -46,6 +47,7 @@ fn main() {
             ));
             app.manage(blocker::BlockerRuntime::new());
             app.manage(browser_warning::BrowserRepairRuntime::default());
+            app.manage(void_launcher::VoidSessionState::default());
             app.manage(runtime);
             app.manage(background::BackgroundRuntime::default());
             // The blocker window exists for the whole app lifetime, hidden.
@@ -93,9 +95,7 @@ fn main() {
                     // `closable(false)`), otherwise the user could leave the
                     // block by closing the window.
                     api.prevent_close();
-                    if let Some(state) = window
-                        .app_handle()
-                        .try_state::<blocker::BlockerRuntime>()
+                    if let Some(state) = window.app_handle().try_state::<blocker::BlockerRuntime>()
                     {
                         if state.is_permanent_active() {
                             return;
@@ -134,6 +134,11 @@ fn main() {
             tracking::clear_tracking_data,
             blocker::get_blocker_state,
             blocker::blocker_action,
+            void_launcher::start_void_launcher,
+            void_launcher::update_void_launcher,
+            void_launcher::stop_void_launcher,
+            void_launcher::get_void_launcher_status,
+            void_launcher::show_void_launcher,
         ])
         .build(context)
         .expect("error while running FocusLock desktop");
@@ -150,6 +155,9 @@ fn main() {
         ) {
             if let Some(state) = app_handle.try_state::<blocker::BlockerRuntime>() {
                 state.hide(app_handle);
+            }
+            if let Some(state) = app_handle.try_state::<void_launcher::VoidSessionState>() {
+                let _ = void_launcher::stop_void_launcher(state);
             }
         }
     });

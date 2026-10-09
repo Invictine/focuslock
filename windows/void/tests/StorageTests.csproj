@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\Config.cs" Link="Config.cs" />
+    <Compile Include="..\SessionHistory.cs" Link="SessionHistory.cs" />
+    <Compile Include="..\RecentPresets.cs" Link="RecentPresets.cs" />
+    <Compile Include="..\FocusLock.cs" Link="FocusLock.cs" />
+    <Compile Include="..\FocusLockSession.cs" Link="FocusLockSession.cs" />
+    <Compile Include="..\InstalledApps.cs" Link="InstalledApps.cs" />
+    <Compile Include="..\DisplaySession.cs" Link="DisplaySession.cs" />
+    <None Update="legacy-config.json" CopyToOutputDirectory="PreserveNewest" Link="config.json" />
+  </ItemGroup>
+</Project>

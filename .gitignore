@@ -26,6 +26,7 @@ design/home-lab/offline-results.json
 .idea/
 *.iml
 .DS_Store
+.unsnooze/
 
 # Node / Convex / Tauri
 node_modules/
@@ -40,6 +41,16 @@ desktop/src-tauri/gen/
 desktop/desktop.log
 desktop/tracking-store.json
 *.node
+
+# Bundled Void source builds and generated Windows helper
+windows/void/bin/
+windows/void/obj/
+windows/void/tests/bin/
+windows/void/tests/obj/
+windows/void/work/
+windows/void/portable/
+windows/void/outputs/
+desktop/src-tauri/resources/void/
 desktop/vite*.log
 
 # Chrome extension local build/auth files

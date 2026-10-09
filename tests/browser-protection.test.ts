@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { browserProtectionPolicy } from "../desktop/src/browserProtection";
+import { browserProtectionPolicy, browserProtectionStatusLabel } from "../desktop/src/browserProtection";
 
 describe("native browser protection policy", () => {
   it("requires the extension while a selected site still has earned time", () => {
@@ -22,5 +22,43 @@ describe("native browser protection policy", () => {
   });
   it("clears the required policy when no signed-in dashboard is available", () => {
     expect(browserProtectionPolicy(undefined, [], false).required).toBe(false);
+  });
+});
+
+describe("browser protection status label", () => {
+  it("shows a connected background browser supplied by the native monitor", () => {
+    expect(browserProtectionStatusLabel({
+      browserProtectionEnabled: true,
+      browserProtectionRequired: true,
+      browserProtectionScanState: "browser",
+      browserProtection: { browser: "Chrome", healthy: true, graceRemainingSeconds: 0 },
+    }, true)).toBe("Chrome · Connected");
+  });
+
+  it("distinguishes a completed scan with no browser window", () => {
+    expect(browserProtectionStatusLabel({
+      browserProtectionEnabled: true,
+      browserProtectionRequired: true,
+      browserProtectionScanState: "no_browser",
+      browserProtection: null,
+    }, true)).toBe("On · no browser window open");
+  });
+
+  it("reports scan errors without pretending the browser is missing", () => {
+    expect(browserProtectionStatusLabel({
+      browserProtectionEnabled: true,
+      browserProtectionRequired: true,
+      browserProtectionScanState: "scan_error",
+      browserProtectionError: "Window enumeration failed",
+      browserProtection: null,
+    }, true)).toBe("Browser check unavailable");
+  });
+
+  it("reports an enabled checker as paused while signed out", () => {
+    expect(browserProtectionStatusLabel({ browserProtectionEnabled: true }, false)).toBe("On · paused until sign-in");
+  });
+
+  it("shows Off when the optional checker is disabled", () => {
+    expect(browserProtectionStatusLabel({ browserProtectionEnabled: false }, true)).toBe("Off");
   });
 });

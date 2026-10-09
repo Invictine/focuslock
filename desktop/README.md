@@ -40,6 +40,20 @@ npm run tauri:dev      # needs Rust
 npm run tauri:build    # installer in src-tauri/target/release/bundle
 ```
 
+## Windows Frog launcher (Void)
+
+Pick today's Frog and its approved apps/websites on the Focus page, then choose **Open Frog launcher**. FocusLock opens a quiet native black screen with the task, approved tool shortcuts, a configurable focus block, progress, and a task-done action. You can return to FocusLock to change tools or settings. The launcher is Windows-only; the web preview keeps the dashboard available.
+
+Frog completion still requires both ticking off the task and meeting its focus-time requirement. Timer completion does not mark the task done. Only one desktop focus timer can run at a time. Closing the launcher pauses its timer and leaves FocusLock's blocking rules active. Progress comes from the explicit focus timer, not verified foreground activity in a tool. Frog task/allowlist/progress remains local to this PC; existing account sync does not make it a shared phone/PC Frog session.
+
+The native launcher uses shared standalone Void source in `../windows/void/`, packaged as `FocusLock.Void.exe` with a versioned local pipe. FocusLock owns policy, Frog state, and credit; the helper owns the quiet Windows surface and tool launching. Existing permanent blocks and website boundaries keep their precedence. Integrated mode does not run a second foreground guard or change monitor/taskbar configuration. The return shortcut is **Ctrl+Alt+Space**; the emergency exit is **Ctrl+Alt+Shift+F12**. Shortcut conflicts are shown in the launcher. Loss of the host connection closes the helper safely.
+
+`npm run tauri:dev` and `npm run tauri:build` first publish the helper with the .NET SDK. `npm run void:build` prepares it separately. Plain `npm run build` remains a web-only build. Native builds require the .NET 8 SDK as well as the Rust toolchain. Generated helper files are ignored by Git and bundled into the Windows installer.
+
+If the SDK is installed in a custom directory, set `FOCUSLOCK_DOTNET` to its `dotnet.exe` path before the native build. A runtime-only installation cannot compile the helper.
+
+Shared launcher changes must be backported to `Invictine/Void` in the same task. Follow the root `AGENTS.md` and run `node scripts/sync-void.mjs --void-root <standalone-checkout>` from the FocusLock root to verify source parity.
+
 ## Windows installation and shortcuts
 
 The per-user NSIS installer registers **FocusLock** in Windows Settings > Apps > Installed apps and installs to `%LOCALAPPDATA%\FocusLock` by default. Every install, including silent/passive installs and `/UPDATE`, creates or repairs the Start menu and desktop shortcuts. Both open the normal app window, with no `--background` argument. Explicit `/NS` installs opt out of shortcuts.
