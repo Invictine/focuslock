@@ -22,6 +22,9 @@
         "installerHooks": "installer-hooks.nsh"
       }
     },
-    "icon": ["icons/icon.ico", "icons/icon.icns", "icons/icon.png"]
+    "icon": ["icons/icon.ico", "icons/icon.icns", "icons/icon.png"],
+    "resources": {
+      "installer/cleanup.ps1": "installer/cleanup.ps1"
+    }
   }
 }

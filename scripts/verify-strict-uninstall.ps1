@@ -11,7 +11,8 @@ if (!$EvidenceRoot) { $EvidenceRoot = Join-Path ([IO.Path]::GetTempPath()) ('foc
 $exe = [IO.Path]::GetFullPath($ExePath)
 $makensis = [IO.Path]::GetFullPath($MakensisPath)
 $hook = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\desktop\src-tauri\installer-hooks.nsh'))
-foreach ($path in @($exe,$makensis,$hook)) { if (!(Test-Path -LiteralPath $path)) { throw "Required path missing: $path" } }
+$cleanup = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\desktop\src-tauri\installer\cleanup.ps1'))
+foreach ($path in @($exe,$makensis,$hook,$cleanup)) { if (!(Test-Path -LiteralPath $path)) { throw "Required path missing: $path" } }
 New-Item -ItemType Directory -Force -Path $EvidenceRoot | Out-Null
 $oldAppData = $env:APPDATA; $oldLocalAppData = $env:LOCALAPPDATA
 $results = [Collections.Generic.List[object]]::new()
@@ -21,21 +22,36 @@ function Invoke-Case([string]$Name, [string]$State, [bool]$ShouldBlock, [bool]$U
   New-Item -ItemType Directory -Force -Path $install,$appData | Out-Null
   Copy-Item -LiteralPath $exe -Destination (Join-Path $install 'focuslock-desktop.exe')
   Set-Content -LiteralPath (Join-Path $install 'sentinel.txt') -Value 'sentinel' -NoNewline
+  $recoveryMarker = Join-Path $appData 'com.focuslock.desktop\recovery-owner.json'
+  New-Item -ItemType Directory -Force -Path (Split-Path $recoveryMarker) | Out-Null
+  Set-Content -LiteralPath $recoveryMarker -Value 'fixture' -NoNewline
   if (![string]::IsNullOrEmpty($State)) { $statePath = Join-Path $appData 'com.focuslock.desktop\strict-uninstall-v1.json'; New-Item -ItemType Directory -Force -Path (Split-Path $statePath) | Out-Null; Set-Content -LiteralPath $statePath -Value $State -NoNewline }
   $out = Join-Path $root 'setup.exe'; $script = Join-Path $root 'harness.nsi'; $hookPath = $hook; $exePath = $exe; $outPath = $out; $installPath = $install
   $scriptText = @"
 !include "LogicLib.nsh"
+!include "FileFunc.nsh"
 !define PRODUCTNAME "FocusLock QA"
 !define MAINBINARYNAME "focuslock-desktop"
+!define BUNDLEID "com.focuslock.desktop"
+Var UpdateMode
 !include "$hookPath"
 Name "FocusLock QA"
 OutFile "$outPath"
 InstallDir "$installPath"
 RequestExecutionLevel user
 SilentInstall silent
+Function un.onInit
+  StrCpy `$UpdateMode 0
+  `${GetOptions} `$CMDLINE "/UPDATE" `$UpdateMode
+  `${IfNot} `${Errors}
+    StrCpy `$UpdateMode 1
+  `${EndIf}
+FunctionEnd
 Section
   SetOutPath `$INSTDIR
   File /oname=focuslock-desktop.exe "$exePath"
+  SetOutPath `$INSTDIR\installer
+  File /oname=cleanup.ps1 "$cleanup"
   WriteUninstaller `$INSTDIR\uninstall.exe
 SectionEnd
 Section Uninstall
@@ -43,6 +59,7 @@ Section Uninstall
   Delete `$INSTDIR\sentinel.txt
   Delete `$INSTDIR\focuslock-desktop.exe
   Delete `$INSTDIR\uninstall.exe
+  Delete `$INSTDIR\installer\cleanup.ps1
 SectionEnd
 "@
   Set-Content -LiteralPath $script -Value $scriptText
@@ -60,6 +77,8 @@ SectionEnd
   $p = Start-Process -FilePath (Join-Path $install 'uninstall.exe') -ArgumentList $args -WindowStyle Hidden -Wait -PassThru
   $exeStill = Test-Path -LiteralPath (Join-Path $install 'focuslock-desktop.exe'); $sentinelStill = Test-Path -LiteralPath (Join-Path $install 'sentinel.txt'); $blocked = $exeStill -and $sentinelStill
   $ok = if ($Name -eq 'missing-executable') { $p.ExitCode -ne 0 -and $sentinelStill } elseif ($ShouldBlock) { $p.ExitCode -ne 0 -and $blocked } else { $p.ExitCode -eq 0 -and !$exeStill -and !$sentinelStill }
+  $markerPresent = Test-Path -LiteralPath $recoveryMarker
+  if ($markerPresent -ne $ShouldBlock) { throw "Cleanup ran out of order: $Name, recovery marker=$markerPresent" }
   $results.Add([pscustomobject]@{case=$Name; exitCode=$p.ExitCode; passed=$ok; exePresent=$exeStill; sentinelPresent=$sentinelStill})
   if (!$ok) { throw "Case $Name failed: exit=$($p.ExitCode), exe=$exeStill, sentinel=$sentinelStill" }
 }
@@ -69,6 +88,7 @@ try {
   Invoke-Case 'active-update' ('{"locks":[{"accountId":"qa","sessionId":"qa-session","endsAt":' + $future + '}]}') $true $true
   Invoke-Case 'malformed' '{bad json' $true $false
   Invoke-Case 'expired' ('{"locks":[{"accountId":"qa","sessionId":"qa-session","endsAt":' + $past + '}]}') $false $false
+  Invoke-Case 'expired-update' ('{"locks":[{"accountId":"qa","sessionId":"qa-session","endsAt":' + $past + '}]}') $false $true
   Invoke-Case 'missing' $null $false $false
   Invoke-Case 'legacy-indefinite' '{"locks":[{"accountId":"qa","sessionId":"qa-session","endsAt":null}]}' $true $false
   Invoke-Case 'missing-executable' $null $true $false

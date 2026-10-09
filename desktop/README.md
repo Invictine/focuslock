@@ -40,6 +40,14 @@ npm run tauri:dev      # needs Rust
 npm run tauri:build    # installer in src-tauri/target/release/bundle
 ```
 
+## Windows installation and shortcuts
+
+The per-user NSIS installer registers **FocusLock** in Windows Settings > Apps > Installed apps and installs to `%LOCALAPPDATA%\FocusLock` by default. Every install, including silent/passive installs and `/UPDATE`, creates or repairs the Start menu and desktop shortcuts. Both open the normal app window, with no `--background` argument. Explicit `/NS` installs opt out of shortcuts.
+
+After the Strict Mode removal check succeeds, the uninstaller stops this installation's recovery task/processes and removes the legacy Startup-folder shortcut. Normal uninstall also removes its sign-in startup entry and browser native-host registrations; upgrades preserve those integrations. App data follows the uninstaller's existing **Delete application data** choice. These changes concern FocusLock's desktop packaging and recovery only; the shared Void launcher and standalone Void installer are unchanged.
+
+Native installer checks: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-installer-shortcuts.ps1`, `scripts/verify-installer-cleanup.ps1`, and `scripts/verify-strict-uninstall.ps1` from the repository root. The fixtures use disposable install/profile paths and do not uninstall the user's app.
+
 ## Windows Strict Mode uninstall protection
 
 The NSIS Windows installer refuses removal while a Strict Mode commitment saved on this PC is active. Windows Settings, the registered uninstaller, silent uninstall, and `/UPDATE` all use the same native check before any files are removed. Installer upgrades that need removal also wait until the commitment ends; `/UPDATE` is deliberately not an exemption. Windows builds publish NSIS installers only, because MSI removal does not run this hook. Existing installations need the new installer before their uninstall path is protected.
