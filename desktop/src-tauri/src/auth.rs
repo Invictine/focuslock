@@ -297,6 +297,31 @@ fn protected_sign_out(
     })
 }
 
+fn protected_sign_in(
+    runtime: &BrowserAuthRuntime,
+    protection: &crate::account_protection::AccountProtectionRuntime,
+    tracker: &crate::tracking::TrackerRuntime,
+    strict: &crate::uninstall_guard::UninstallGuardRuntime,
+    session: &StoredSession,
+) -> Result<(), String> {
+    let _guard = runtime.refresh_lock.lock().map_err(|_| "Auth refresh lock failed".to_string())?;
+    let recovering_owner = protection.owns_account(&session.profile.id)?;
+    protection.with_account_allowed(&session.profile.id, || {
+        let previous = runtime.session.lock().map_err(|_| "Auth session lock failed")?
+            .as_ref().map(|value| session_profile(value).id);
+        // A legacy installation already signed out has no recorded owner yet.
+        // Permit its first sign-in without clearing any native protection.
+        // Once an owner is persisted, with_account_allowed enforces recovery.
+        if previous.is_some() && !recovering_owner && previous.as_deref() != Some(session.profile.id.as_str()) {
+            tracker.ensure_pause_allowed()?;
+            if strict.check(now_ms())? {
+                return Err("Use the same account to resume your Strict Mode commitment.".into());
+            }
+        }
+        runtime.save(Some(session.clone()))
+    })
+}
+
 /// Persist configured restrictions, including rules whose allowance has not yet
 /// run out. Only the current native account can replace its protection policy.
 #[tauri::command]
@@ -358,23 +383,13 @@ pub fn start_browser_sign_in(app: AppHandle, runtime: State<'_, BrowserAuthRunti
         let result = wait_for_callback(listener, &redirect_uri, &verifier, &state);
         let managed = app_for_thread.state::<BrowserAuthRuntime>();
         let result = result.and_then(|session| {
-            let _guard = managed.refresh_lock.lock().map_err(|_| "Auth refresh lock failed".to_string())?;
-            let protection = app_for_thread.state::<crate::account_protection::AccountProtectionRuntime>();
-            let recovering_owner = protection.owns_account(&session.profile.id)?;
-            protection
-                .with_account_allowed(&session.profile.id, || {
-                    let previous = managed.session.lock().map_err(|_| "Auth session lock failed")?
-                        .as_ref().map(|value| session_profile(value).id);
-                    // Also cover legacy installs before their first protection
-                    // snapshot, without blocking recovery of the same account.
-                    if !recovering_owner && previous.as_deref() != Some(session.profile.id.as_str()) {
-                        app_for_thread.state::<crate::tracking::TrackerRuntime>().ensure_pause_allowed()?;
-                        if app_for_thread.state::<crate::uninstall_guard::UninstallGuardRuntime>().check(now_ms())? {
-                            return Err("Use the same account to resume your Strict Mode commitment.".into());
-                        }
-                    }
-                    managed.save(Some(session.clone()))
-                })?;
+            protected_sign_in(
+                &managed,
+                &app_for_thread.state::<crate::account_protection::AccountProtectionRuntime>(),
+                &app_for_thread.state::<crate::tracking::TrackerRuntime>(),
+                &app_for_thread.state::<crate::uninstall_guard::UninstallGuardRuntime>(),
+                &session,
+            )?;
             Ok(session)
         });
         if let Ok(mut running) = managed.flow_running.lock() { *running = false; }
@@ -636,5 +651,38 @@ mod sign_out_tests {
         let (auth, protection, tracker, strict) = runtimes(&temp);
         protection.update("user-a", false, Some(1)).unwrap();
         assert!(protected_sign_out(&auth, &protection, &tracker, &strict).is_ok());
+    }
+
+    #[test]
+    fn legacy_signed_out_install_can_sign_in_without_releasing_browser_protection() {
+        let temp = tempfile::tempdir().unwrap();
+        let (auth, protection, _tracker, strict) = runtimes(&temp);
+        auth.save(None).unwrap();
+        let path = temp.path().join("tracking.json");
+        let mut fixture: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        fixture["browserProtectionRequired"] = serde_json::json!(true);
+        fixture["browserProtectionEnabled"] = serde_json::json!(true);
+        fs::write(&path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        let tracker = TrackerRuntime::load(path).unwrap();
+        assert!(tracker.ensure_pause_allowed().is_err());
+        protected_sign_in(&auth, &protection, &tracker, &strict, &session()).unwrap();
+        assert!(auth.is_signed_in());
+        assert!(tracker.ensure_pause_allowed().is_err());
+    }
+
+    #[test]
+    fn revoked_protected_account_recovers_but_another_account_cannot_replace_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let (auth, protection, tracker, strict) = runtimes(&temp);
+        protection.update("user-a", true, None).unwrap();
+        strict.sync("user-a", true, Some(now_ms() + 60_000), Some("session"), None, None).unwrap();
+        auth.save(None).unwrap();
+        let mut other = session();
+        other.profile.id = "user-b".into();
+        assert!(protected_sign_in(&auth, &protection, &tracker, &strict, &other).is_err());
+        assert!(!auth.is_signed_in());
+        protected_sign_in(&auth, &protection, &tracker, &strict, &session()).unwrap();
+        assert!(auth.is_signed_in());
+        assert!(protected_sign_out(&auth, &protection, &tracker, &strict).is_err());
     }
 }
