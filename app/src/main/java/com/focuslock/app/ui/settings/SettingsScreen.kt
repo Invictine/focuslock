@@ -2317,7 +2317,7 @@ private fun FrogSettingsCard(onOpenEssentialApps: () -> Unit) {
                 }
 
                 Text(
-                    text = "On the first unlock after $wakeLabel, every boundary app locks " +
+                    text = "Your first unlock or interaction after $wakeLabel starts a five-minute countdown. Then every boundary app locks " +
                         "until today's frog is ticked off and $requiredMinutes minutes of focus " +
                         "are tracked. Progress resets at the next $wakeLabel.",
                     style = MaterialTheme.typography.bodySmall,

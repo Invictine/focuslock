@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DESKTOP_FROG_ENABLED } from "./features";
 
 // ---------------------------------------------------------------------------
@@ -24,7 +24,7 @@ export type FrogTask = {
 };
 
 /** Lifecycle of the day's frog (Android's FrogPhase enum). */
-export type FrogPhase = "not_armed" | "pick_frog" | "working" | "complete";
+export type FrogPhase = "not_armed" | "grace" | "pick_frog" | "working" | "complete";
 
 /** Snapshot for one cycle day, mirroring Android's FrogState data class. */
 export type FrogState = {
@@ -40,6 +40,7 @@ export type FrogState = {
   // Desktop-only display fields (Android reads them from separate flows).
   requiredMinutes: number;
   wakeHour: number;
+  graceRemainingSeconds: number;
 };
 
 export type FrogActions = {
@@ -62,6 +63,7 @@ export const FROG_KEYS = {
   enabled: `${FROG_STORAGE_PREFIX}enabled`,
   requiredMinutes: `${FROG_STORAGE_PREFIX}required_minutes`,
   wakeHour: `${FROG_STORAGE_PREFIX}wake_hour`,
+  graceStartedAtMs: `${FROG_STORAGE_PREFIX}grace_started_at_ms`,
   cycleDate: `${FROG_STORAGE_PREFIX}cycle_date`,
   armed: `${FROG_STORAGE_PREFIX}armed`,
   selected: `${FROG_STORAGE_PREFIX}selected`,
@@ -85,13 +87,15 @@ export const FROG_UI_MAX_REQUIRED_MINUTES = 180;
 /** Same-tab change signal; cross-webview changes arrive via the `storage` event. */
 const FROG_CHANGED_EVENT = "focuslock:frog-changed";
 /** How often the hook re-runs rollover + armIfDue, mirroring Android's lazy flows. */
-const FROG_TICK_MS = 30_000;
+const FROG_TICK_MS = 1_000;
+export const FROG_DAILY_GRACE_MS = 5 * 60_000;
 const INT_MAX = 2_147_483_647;
 
 type FrogPrefs = {
   enabled: boolean;
   requiredMinutes: number;
   wakeHour: number;
+  graceStartedAtMs: number;
   cycleDate: string;
   armed: boolean;
   selectedJson: string;
@@ -104,6 +108,7 @@ function defaultPrefs(): FrogPrefs {
     enabled: FROG_DEFAULT_ENABLED,
     requiredMinutes: FROG_DEFAULT_REQUIRED_MINUTES,
     wakeHour: FROG_DEFAULT_WAKE_HOUR,
+    graceStartedAtMs: 0,
     cycleDate: "",
     armed: false,
     selectedJson: "",
@@ -153,6 +158,7 @@ function readPrefs(): FrogPrefs {
         FROG_DEFAULT_REQUIRED_MINUTES,
       ),
       wakeHour: intValue(store.getItem(FROG_KEYS.wakeHour), FROG_DEFAULT_WAKE_HOUR),
+      graceStartedAtMs: Math.max(0, intValue(store.getItem(FROG_KEYS.graceStartedAtMs), 0)),
       cycleDate: store.getItem(FROG_KEYS.cycleDate) || "",
       armed: boolValue(store.getItem(FROG_KEYS.armed), false),
       selectedJson: store.getItem(FROG_KEYS.selected) || "",
@@ -170,6 +176,7 @@ function writePrefs(prefs: FrogPrefs): void {
     store.setItem(FROG_KEYS.enabled, prefs.enabled ? "1" : "0");
     store.setItem(FROG_KEYS.requiredMinutes, String(clampRequiredMinutes(prefs.requiredMinutes)));
     store.setItem(FROG_KEYS.wakeHour, String(clampWakeHour(prefs.wakeHour)));
+    store.setItem(FROG_KEYS.graceStartedAtMs, String(Math.max(0, prefs.graceStartedAtMs)));
     store.setItem(FROG_KEYS.cycleDate, prefs.cycleDate);
     store.setItem(FROG_KEYS.armed, prefs.armed ? "1" : "0");
     store.setItem(FROG_KEYS.selected, prefs.selectedJson);
@@ -367,6 +374,7 @@ export function readFrogState(nowMillis: number = Date.now()): FrogState {
       locked: false,
       requiredMinutes,
       wakeHour: clampWakeHour(prefs.wakeHour),
+      graceRemainingSeconds: 0,
     };
   }
   // Stale OR newer cycle date (clock moved back / wake hour moved forward):
@@ -385,6 +393,7 @@ export function readFrogState(nowMillis: number = Date.now()): FrogState {
       locked: false,
       requiredMinutes,
       wakeHour: clampWakeHour(prefs.wakeHour),
+      graceRemainingSeconds: 0,
     };
   }
   const frog = decodeFrog(prefs.selectedJson);
@@ -394,7 +403,8 @@ export function readFrogState(nowMillis: number = Date.now()): FrogState {
     cycleDate: today,
     enabled: prefs.enabled,
     armed: prefs.armed,
-    phase: frogPhaseFrom(prefs.armed, frog !== null, tickedOff, trackedSeconds, requiredSeconds),
+    phase: prefs.graceStartedAtMs > 0 && !prefs.armed && prefs.graceStartedAtMs + FROG_DAILY_GRACE_MS > nowMillis
+      ? "grace" : frogPhaseFrom(prefs.armed, frog !== null, tickedOff, trackedSeconds, requiredSeconds),
     frog,
     tickedOff,
     trackedSeconds,
@@ -402,6 +412,8 @@ export function readFrogState(nowMillis: number = Date.now()): FrogState {
     locked: computeFrogLocked(prefs.enabled, prefs.armed, tickedOff, trackedSeconds, requiredSeconds),
     requiredMinutes,
     wakeHour: clampWakeHour(prefs.wakeHour),
+    graceRemainingSeconds: prefs.graceStartedAtMs > 0
+      ? Math.max(0, Math.ceil((prefs.graceStartedAtMs + FROG_DAILY_GRACE_MS - nowMillis) / 1000)) : 0,
   };
 }
 
@@ -424,6 +436,7 @@ export function rolloverIfNeeded(nowMillis: number = Date.now()): boolean {
   writePrefs({
     ...prefs,
     cycleDate: today,
+    graceStartedAtMs: 0,
     armed: false,
     tickedOff: false,
     trackedSeconds: 0,
@@ -457,15 +470,27 @@ export function setWakeHour(hour: number): void {
  * hour, cycle date rolled to today. Idempotent. Returns true only when this call
  * actually flipped armed false -> true.
  */
-export function armIfDue(nowMillis: number = Date.now()): boolean {
+export function armIfDue(
+  nowMillis: number = Date.now(),
+  deviceIdle = true,
+  lastInputAtMs?: number,
+): boolean {
   if (!DESKTOP_FROG_ENABLED) return false;
   rolloverIfNeeded(nowMillis);
   const prefs = readPrefs();
-  if (
-    !canArmNow(nowMillis, prefs.wakeHour, prefs.cycleDate, prefs.enabled, prefs.armed)
-  ) {
+  if (!canArmNow(nowMillis, prefs.wakeHour, prefs.cycleDate, prefs.enabled, prefs.armed)) {
     return false;
   }
+  if (!prefs.graceStartedAtMs) {
+    if (deviceIdle || !Number.isFinite(lastInputAtMs)) return false;
+    const wakeBoundary = new Date(nowMillis);
+    wakeBoundary.setHours(prefs.wakeHour, 0, 0, 0);
+    const interactionAt = Math.trunc(lastInputAtMs!);
+    if (interactionAt < wakeBoundary.getTime() || interactionAt > nowMillis) return false;
+    writePrefs({ ...prefs, graceStartedAtMs: interactionAt });
+    return false;
+  }
+  if (nowMillis < prefs.graceStartedAtMs + FROG_DAILY_GRACE_MS) return false;
   writePrefs({ ...prefs, armed: true });
   return true;
 }
@@ -553,17 +578,19 @@ export function addTrackedSeconds(seconds: number, nowMillis: number = Date.now(
  * cross-webview `storage` event so the blocker window and the main window stay
  * in sync.
  */
-export function useFrogState(): { state: FrogState; actions: FrogActions } {
+export function useFrogState(deviceIdle = true, lastInputAtMs?: number): { state: FrogState; actions: FrogActions } {
+  const activityRef = useRef({ deviceIdle, lastInputAtMs });
+  activityRef.current = { deviceIdle, lastInputAtMs };
   const [state, setState] = useState<FrogState>(() => {
-    // Opening the app counts as the "first unlock": arm the day if it is due.
-    if (DESKTOP_FROG_ENABLED) armIfDue();
     return readFrogState();
   });
   const refresh = useCallback(() => setState(readFrogState()), []);
 
   useEffect(() => {
     const tick = () => {
-      if (DESKTOP_FROG_ENABLED) armIfDue();
+      if (DESKTOP_FROG_ENABLED) {
+        armIfDue(Date.now(), activityRef.current.deviceIdle, activityRef.current.lastInputAtMs);
+      }
       refresh();
     };
     tick();

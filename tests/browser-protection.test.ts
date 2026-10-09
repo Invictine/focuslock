@@ -11,9 +11,9 @@ describe("native browser protection policy", () => {
     expect(browserProtectionPolicy({}, groups, false).required).toBe(true);
     expect(browserProtectionPolicy({}, [{ ...groups[0], limitEnabled: false }], false).required).toBe(false);
   });
-  it("keeps application-only rules independent and ignores suspended desktop Frog", () => {
+  it("keeps application-only rules independent and requires protection for a locked Frog", () => {
     expect(browserProtectionPolicy({ apps: [{ isBlocked: true }], limits: [{ targetKind: "app", dailyLimitMinutes: 30 }] }, [], false).required).toBe(false);
-    expect(browserProtectionPolicy({}, [], true).required).toBe(false);
+    expect(browserProtectionPolicy({}, [], true).required).toBe(true);
   });
   it("does not lock the optional checker to a Strict Mode commitment", () => {
     const dashboard = { sites: [{ isBlocked: true }], prefs: { strictMode: true, strictEndsAt: 2000 } };

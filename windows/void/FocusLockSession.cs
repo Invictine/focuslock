@@ -17,6 +17,7 @@ public sealed class FocusLockSessionState
     public string Title { get; set; } = "";
     public string? ProjectName { get; set; }
     public string Phase { get; set; } = "";
+    public int GraceRemainingSeconds { get; set; }
     public string CycleDate { get; set; } = "";
     public long TrackedSeconds { get; set; }
     public long RequiredSeconds { get; set; }
@@ -54,7 +55,8 @@ public sealed class FocusLockSessionState
             throw new InvalidDataException("FocusLock state has a missing display field.");
         if (!BoundedText(Title, 1, 200) || (ProjectName is not null && !BoundedText(ProjectName, 0, 160)) ||
             !BoundedText(Phase, 1, 32) || !BoundedText(CycleDate, 1, 32) ||
-            Phase is not ("not_armed" or "pick_frog" or "working" or "complete"))
+            Phase is not ("not_armed" or "grace" or "pick_frog" or "working" or "complete") ||
+            GraceRemainingSeconds is < 0 or > 300)
             throw new InvalidDataException("FocusLock state has invalid display text or phase.");
         ProjectName = string.IsNullOrWhiteSpace(ProjectName) ? null : ProjectName;
         if (TrackedSeconds is < 0 or > 604800 || RequiredSeconds is < 1 or > 86400 ||
@@ -131,6 +133,9 @@ public sealed record FocusLockAction
     public string? Domain { get; init; }
     public int? Minutes { get; init; }
     public string? Message { get; init; }
+    public string? Title { get; init; }
+    public List<string>? AppIds { get; init; }
+    public List<string>? Domains { get; init; }
 }
 
 public sealed class FocusLockProtocol

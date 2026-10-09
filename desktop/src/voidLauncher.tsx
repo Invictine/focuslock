@@ -3,7 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useDurableMutation } from "./durableSync";
 import { api as convexApi } from "../../convex/_generated/api";
-import { frogTaskKey, type FrogActions, type FrogState } from "./frog";
+import { frogTaskKey, normalizeFrogDomain, type FrogActions, type FrogState } from "./frog";
 import { localDate } from "./sync";
 import { canAcceptVoidStart, claimVoidCompletion, sampleVoidClock } from "./voidTimer";
 
@@ -32,6 +32,7 @@ export type VoidLauncherState = {
   running: boolean;
   remainingSeconds: number;
   blockMinutes: number;
+  graceRemainingSeconds: number;
   tools: VoidTool[];
   domains: string[];
 };
@@ -41,6 +42,7 @@ export type VoidAction =
   | { action: "tick_off" }
   | { action: "open_focuslock" }
   | { action: "closed" }
+  | { action: "select_frog"; title: string; appIds: string[]; domains: string[] }
   | { action: "set_duration"; minutes: number }
   | { action: "launch_error"; message?: string };
 
@@ -69,6 +71,7 @@ export function isVoidLauncherState(value: unknown): value is VoidLauncherState 
     Number.isFinite(state.trackedSeconds) && Number.isFinite(state.requiredSeconds) &&
     typeof state.tickedOff === "boolean" && typeof state.running === "boolean" &&
     Number.isFinite(state.remainingSeconds) && Number.isFinite(state.blockMinutes) &&
+    (state.graceRemainingSeconds === undefined || (Number.isFinite(state.graceRemainingSeconds) && state.graceRemainingSeconds >= 0 && state.graceRemainingSeconds <= 300)) &&
     Array.isArray(state.tools) && Array.isArray(state.domains) &&
     state.tools.every((tool) => tool && typeof tool.id === "string" && typeof tool.label === "string") &&
     state.domains.every((domain) => typeof domain === "string");
@@ -76,7 +79,7 @@ export function isVoidLauncherState(value: unknown): value is VoidLauncherState 
 
 export function parseVoidAction(value: unknown): VoidAction | null {
   if (!value || typeof value !== "object") return null;
-  const event = value as { action?: unknown; minutes?: unknown; message?: unknown };
+  const event = value as { action?: unknown; minutes?: unknown; message?: unknown; title?: unknown; appIds?: unknown; domains?: unknown };
   switch (event.action) {
     case "toggle_timer":
     case "tick_off":
@@ -87,6 +90,14 @@ export function parseVoidAction(value: unknown): VoidAction | null {
       return Number.isFinite(event.minutes)
         ? { action: "set_duration", minutes: Math.min(MAX_BLOCK_MINUTES, Math.max(1, Math.trunc(Number(event.minutes)))) }
         : null;
+    case "select_frog": {
+      if (typeof event.title !== "string" || !event.title.trim() || event.title.trim().length > 200 ||
+          !Array.isArray(event.appIds) || event.appIds.length > 64 ||
+          !Array.isArray(event.domains) || event.domains.length > 64 ||
+          !event.appIds.every((id) => typeof id === "string" && /^[^\\/\x00]{1,260}\.exe$/i.test(id)) ||
+          !event.domains.every((domain) => typeof domain === "string" && domain.length <= 253 && normalizeFrogDomain(domain) === domain)) return null;
+      return { action: "select_frog", title: event.title.trim(), appIds: [...new Set(event.appIds)], domains: [...new Set(event.domains)] };
+    }
     case "launch_error":
       return typeof event.message === "string" && event.message.trim()
         ? { action: "launch_error", message: event.message.slice(0, 500) }
@@ -102,23 +113,24 @@ export function buildVoidLauncherState(
   remainingSeconds: number,
   blockMinutes: number,
 ): VoidLauncherState | null {
-  if (!frog.enabled || frog.phase !== "working" || !frog.frog) return null;
+  if (!frog.enabled || !["grace", "pick_frog", "working"].includes(frog.phase)) return null;
   return {
     protocolVersion: 1,
-    title: frog.frog.title,
-    ...(frog.frog.projectName ? { projectName: frog.frog.projectName } : {}),
+    title: frog.phase === "grace" ? "Get ready" : frog.frog?.title || "Pick one task",
+    ...(frog.frog?.projectName ? { projectName: frog.frog.projectName } : {}),
     phase: frog.phase,
     cycleDate: frog.cycleDate,
     trackedSeconds: frog.trackedSeconds,
     requiredSeconds: frog.requiredSeconds,
     tickedOff: frog.tickedOff,
-    running,
+    running: frog.phase === "working" && running,
     remainingSeconds: Math.max(0, Math.trunc(remainingSeconds)),
     blockMinutes: Math.min(MAX_BLOCK_MINUTES, Math.max(1, Math.trunc(blockMinutes))),
+    graceRemainingSeconds: frog.graceRemainingSeconds || 0,
     tools: [
-      ...frog.frog.neededAppIds.map((id) => ({ id, label: id })),
+      ...(frog.phase === "working" ? frog.frog?.neededAppIds || [] : []).map((id) => ({ id, label: id })),
     ],
-    domains: [...frog.frog.neededDomains],
+    domains: frog.phase === "working" ? [...frog.frog?.neededDomains || []] : [],
   };
 }
 
@@ -173,6 +185,8 @@ export function VoidLauncherBridge({ frog, actions, workRatio }: {
   const sessionTitleRef = useRef("");
   const recordIdsRef = useRef(new Set<string>());
   const closedDuringLaunchRef = useRef(false);
+  const openedCycleRef = useRef("");
+  const countdownCycleRef = useRef("");
   const uiRef = useRef(ui);
   uiRef.current = ui;
 
@@ -263,6 +277,20 @@ export function VoidLauncherBridge({ frog, actions, workRatio }: {
     }
   }, [currentState, pause, setUiState]);
 
+  // Present the daily picker once when this device's countdown expires.
+  useEffect(() => {
+    if (!ui.ready || !frog.enabled || !frog.locked || openedCycleRef.current === frog.cycleDate) return;
+    openedCycleRef.current = frog.cycleDate;
+    void launch();
+  }, [frog.cycleDate, frog.enabled, frog.locked, ui.ready, launch]);
+
+  // The native grace surface is a small draggable countdown, before any takeover.
+  useEffect(() => {
+    if (!ui.ready || !frog.enabled || frog.phase !== "grace" || countdownCycleRef.current === frog.cycleDate) return;
+    countdownCycleRef.current = frog.cycleDate;
+    void launch();
+  }, [frog.cycleDate, frog.enabled, frog.phase, ui.ready, launch]);
+
   const saveCompletedBlock = useCallback(() => {
     const seconds = sessionSecondsRef.current;
     const sessionId = sessionIdRef.current;
@@ -297,7 +325,7 @@ export function VoidLauncherBridge({ frog, actions, workRatio }: {
       sessionIdRef.current = "";
       sessionTitleRef.current = "";
       subsecondMsRef.current = 0;
-      if (activeRef.current) {
+      if (activeRef.current && !frog.enabled) {
         setUiState({ ...INITIAL_VOID_UI, ready: uiRef.current.ready });
         activeRef.current = false;
         void invoke("stop_void_launcher").catch(() => undefined);
@@ -312,8 +340,13 @@ export function VoidLauncherBridge({ frog, actions, workRatio }: {
         setUiState({ ...INITIAL_VOID_UI, ready: uiRef.current.ready });
         void invoke("stop_void_launcher").catch(() => undefined);
       }
-    } else if (activeRef.current && frog.phase === "working") {
+    } else if (activeRef.current && ["grace", "pick_frog", "working"].includes(frog.phase)) {
       void updateNative();
+    } else if (activeRef.current && (!frog.enabled || frog.phase === "not_armed")) {
+      pause(false);
+      activeRef.current = false;
+      setUiState({ ...INITIAL_VOID_UI, ready: uiRef.current.ready });
+      void invoke("stop_void_launcher").catch(() => undefined);
     }
   }, [frog.cycleDate, frog.enabled, frog.phase, frog.frog, pause, saveCompletedBlock, setUiState, updateNative]);
 
@@ -397,6 +430,11 @@ export function VoidLauncherBridge({ frog, actions, workRatio }: {
           break;
         case "tick_off":
           actionRef.current.tickOffFrog(true);
+          break;
+        case "select_frog":
+          if (frogRef.current.enabled && frogRef.current.phase === "pick_frog") {
+            actionRef.current.selectFrog({ title: event.title, neededAppIds: event.appIds, neededDomains: event.domains });
+          }
           break;
         case "open_focuslock":
           window.dispatchEvent(new CustomEvent("focuslock:open-main"));

@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import com.focuslock.app.FocusLockApplication
+import com.focuslock.app.data.repository.pendingFrogGraceDeadline
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -13,12 +14,10 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 
 /**
- * Belt-and-braces wake trigger for the "eat the frog" lock: arms the day's frog as soon
- * as the device becomes usable around the configured wake hour.
+ * Schedules the daily Frog wake and starts the local grace timer after device unlock.
  *
  * The receiver is deliberately self-contained — no state, no retries. It arms at most
- * once per cycle day ([com.focuslock.app.data.repository.FrogRepository.armIfDue] is
- * idempotent) and every failure is swallowed into a log line, so a DataStore hiccup can
+ * once per cycle day and every failure is swallowed into a log line, so a DataStore hiccup can
  * never crash the process (a crash on BOOT_COMPLETED would look like a boot loop).
  *
  * ## Manifest wiring (declared by the integrator, not in this file)
@@ -42,15 +41,14 @@ import kotlinx.coroutines.withContext
  *  - `android.intent.action.USER_PRESENT`
  *  - `android.intent.action.BOOT_COMPLETED`
  *  - `android.intent.action.MY_PACKAGE_REPLACED`
- *  - `android.intent.action.SCREEN_ON`
+ *  - `android.intent.action.SCREEN_ON` (schedules only; it does not start grace)
  *
  * Notes for the integrator:
  *  - `android.intent.action.BOOT_COMPLETED` additionally requires the
  *    `android.permission.RECEIVE_BOOT_COMPLETED` manifest permission (see snippet above).
  *  - `SCREEN_ON`/`USER_PRESENT` are not delivered to manifest receivers on all API
- *    levels; the recommended path is for the long-lived accessibility service to
- *    register those two at runtime, with this receiver as the belt-and-braces path
- *    (boot, package replace, unlock) — hence the redundancy.
+ *    levels; the accessibility service also registers them at runtime. Only USER_PRESENT
+ *    starts grace, since screen-on can occur while the device remains locked.
  *  - When this receiver actually arms the frog it re-broadcasts
  *    [FrogWakeReceiver.ACTION_FROG_ARMED] inside the app package so the running
  *    accessibility service can re-evaluate the foreground app immediately.
@@ -68,15 +66,30 @@ class FrogWakeReceiver : BroadcastReceiver() {
                 // Safe call: if the Application/repository has not been initialized yet,
                 // this throws (lateinit); the surrounding try/catch logs and swallows it.
                 val repo = FocusLockApplication.instance?.frogRepository ?: return@launch
-                if (repo.armIfDue()) {
-                    // Fresh state only for the log line; the accessibility service reads
-                    // the state itself after the broadcast below.
-                    val state = repo.currentState()
-                    Log.i(TAG, "frog armed for cycle ${state.cycleDate}")
-                    appContext.sendBroadcast(
-                        Intent(ACTION_FROG_ARMED).setPackage(appContext.packageName)
-                    )
+                if (action == FrogMorningScheduler.ACTION_FROG_GRACE_EXPIRED) {
+                    if (repo.armAfterGraceIfDue()) {
+                        appContext.sendBroadcast(Intent(ACTION_FROG_ARMED).setPackage(appContext.packageName))
+                    }
+                } else if (action == Intent.ACTION_USER_PRESENT) {
+                    if (repo.startGraceIfDue()) {
+                        appContext.sendBroadcast(Intent(ACTION_FROG_ARMED).setPackage(appContext.packageName))
+                    }
                 }
+                // Restore the persisted pending deadline after boot and clock/time-zone
+                // changes. Also catch an overdue deadline if the service was stopped.
+                if (action != FrogMorningScheduler.ACTION_FROG_GRACE_EXPIRED && repo.armAfterGraceIfDue()) {
+                    appContext.sendBroadcast(Intent(ACTION_FROG_ARMED).setPackage(appContext.packageName))
+                }
+                val state = repo.currentState()
+                val graceDeadline = pendingFrogGraceDeadline(
+                    enabled = state.enabled,
+                    armed = state.armed,
+                    deadlineMillis = state.graceEndsAtMillis,
+                    nowMillis = System.currentTimeMillis(),
+                )
+                FrogMorningScheduler.scheduleGraceExpiry(appContext, graceDeadline)
+                // Re-arm the next daily wake after boot, package replacement, time changes,
+                // and every interaction; merely reaching morning never starts grace.
                 FrogMorningScheduler.schedule(appContext, repo.wakeHourFlow.first(), repo.enabledFlow.first())
             } catch (t: Throwable) {
                 // Swallow everything: a receiver must never crash the process.
@@ -97,6 +110,7 @@ class FrogWakeReceiver : BroadcastReceiver() {
         /** Only these system actions may trigger an arm attempt. */
         private val SUPPORTED_ACTIONS = setOf(
             "com.focuslock.app.action.FROG_MORNING_ALARM",
+            FrogMorningScheduler.ACTION_FROG_GRACE_EXPIRED,
             Intent.ACTION_TIME_CHANGED,
             Intent.ACTION_TIMEZONE_CHANGED,
             Intent.ACTION_USER_PRESENT,

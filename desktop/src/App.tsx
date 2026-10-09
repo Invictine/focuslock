@@ -87,6 +87,7 @@ type NativeCurrent = {
   deviceId: string;
   deviceName: string;
   idle: boolean;
+  idleMillis?: number | null;
   blocked?: boolean;
 };
 type NativeUsage = {
@@ -1476,7 +1477,12 @@ function DesktopApp() {
   // "Eat the frog" is device-local (localStorage, like Android's DataStore).
   // This instance drives the hard-lock union and Settings; FrogCard owns its own
   // instance, so both re-read through the store's notifications.
-  const frog = useFrogState();
+  const frog = useFrogState(
+    snapshot?.current?.idle ?? true,
+    typeof snapshot?.current?.idleMillis === "number"
+      ? snapshot.current.capturedAtMs - snapshot.current.idleMillis
+      : undefined,
+  );
   const signOutStrictActive = useStrictActive(Boolean(configuration?.prefs?.strictMode), configuration?.prefs?.strictEndsAt);
   const signOutPolicy = useMemo(
     () => {
@@ -5347,8 +5353,8 @@ function SettingsPage({
               <div>
                 <strong>Wake hour</strong>
                 <p>
-                  24-hour clock (5 = 05:00). The frog arms on the first open at/after it, and
-                  progress resets at the next one.
+                  24-hour clock (5 = 05:00). The five-minute grace begins with your first
+                  device interaction at or after this time. Progress resets at the next one.
                 </p>
                 <input
                   type="range"
@@ -5364,8 +5370,9 @@ function SettingsPage({
               <span className="setting-value">{frogWakeLabel(frog?.state?.wakeHour)}</span>
             </div>
             <p className="frog-settings-note">
-              On the first open after {frogWakeLabel(frog?.state?.wakeHour)}, every boundary app
-              and website locks until today's frog is ticked off and{" "}
+              After your first interaction at or after {frogWakeLabel(frog?.state?.wakeHour)},
+              you get five minutes before boundary apps and websites lock. The lock then remains
+              until today's frog is ticked off and{" "}
               {clampFrogMinutes(frog?.state?.requiredMinutes)} minutes of focus are tracked.
               Progress resets at the next {frogWakeLabel(frog?.state?.wakeHour)}.
             </p>

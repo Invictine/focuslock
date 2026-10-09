@@ -28,6 +28,9 @@ public partial class FrogWindow : Window
     private long lastStateTimestamp;
     private string? toolLayoutKey;
     private string? domainLayoutKey;
+    private readonly Dictionary<string, FocusLockTool> essentialTools = new(StringComparer.OrdinalIgnoreCase);
+    private bool pickerLoaded;
+    private bool environmentStarted;
 
     public FrogWindow(FocusLockProtocol protocol, Config config)
     {
@@ -49,20 +52,47 @@ public partial class FrogWindow : Window
     public void ApplyState(FocusLockSessionState next)
     {
         applyingState = true;
+        var previousPhase = state?.Phase;
+        var previousCycle = state?.CycleDate;
         state = next;
+        if (previousCycle is not null && previousCycle != next.CycleDate)
+        {
+            TaskInput.Clear(); SitesInput.Clear();
+            essentialTools.Clear(); EssentialChoices.Children.Clear(); pickerLoaded = false;
+            toolLayoutKey = domainLayoutKey = null;
+            UseTaskButton.IsEnabled = true;
+            TaskStep.Visibility = Visibility.Visible; ToolsStep.Visibility = Visibility.Collapsed;
+            StatusText.Text = "";
+        }
         lastStateTimestamp = Stopwatch.GetTimestamp();
-        TitleText.Text = string.IsNullOrWhiteSpace(next.Title) ? "Your next task" : next.Title;
+        TitleText.Text = next.Phase == "pick_frog" ? "Pick one task" : next.Title;
         ProjectText.Text = next.ProjectName ?? "";
         PhaseText.Text = next.Phase switch
         {
             "not_armed" => "NOT ARMED",
-            "pick_frog" => "PICK YOUR FROG",
-            "working" => "WORKING",
-            "complete" => "COMPLETE",
+            "pick_frog" => "The one thing you want to finish today.",
+            "grace" => "Time to get ready",
+            "working" => "",
+            "complete" => "Done for today",
             _ => next.Phase.ToUpperInvariant(),
         };
-        TimerText.Text = FormatTime(next.RemainingSeconds);
-        ProgressText.Text = $"{FormatMinutes(next.TrackedSeconds)} / {FormatMinutes(next.RequiredSeconds)} minutes · {next.CycleDate}";
+        PickerPanel.Visibility = next.Phase == "pick_frog" ? Visibility.Visible : Visibility.Collapsed;
+        FocusPanel.Visibility = next.Phase == "pick_frog" ? Visibility.Collapsed : Visibility.Visible;
+        TimerControls.Visibility = next.Phase == "working" ? Visibility.Visible : Visibility.Collapsed;
+        TickBox.Visibility = next.Phase == "working" ? Visibility.Visible : Visibility.Collapsed;
+        TimerText.Text = FormatTime(next.Phase == "grace" ? next.GraceRemainingSeconds : next.RemainingSeconds);
+        GraceTimerText.Text = FormatTime(next.GraceRemainingSeconds);
+        if (previousPhase != next.Phase)
+        {
+            ConfigurePresentation();
+            if (IsLoaded && next.Phase is ("pick_frog" or "working")) { Show(); Topmost = true; Activate(); }
+            if (IsLoaded && next.Phase == "pick_frog") TaskInput.Focus();
+        }
+        ProgressText.Text = next.Phase == "grace" ? "Eat the frog starts after this countdown" : $"{FormatMinutes(next.TrackedSeconds)} / {FormatMinutes(next.RequiredSeconds)} minutes";
+        if (next.Phase == "pick_frog" && !pickerLoaded) LoadEssentialTools();
+        if (next.Phase == "working") { UseTaskButton.IsEnabled = true; if (StatusText.Text == "Saving your task…") StatusText.Text = ""; }
+        // A manually opened countdown does not change the desktop environment.
+        if (IsLoaded && next.Phase is ("pick_frog" or "working")) BeginEnvironment();
         TickBox.IsChecked = next.TickedOff;
         TickBox.IsEnabled = !next.TickedOff;
         TimerButton.Content = next.Running ? "Pause focus" : "Start focus";
@@ -88,10 +118,137 @@ public partial class FrogWindow : Window
         ToolsPanel.Children.Clear();
         foreach (var tool in next.Tools)
         {
-            var button = new Button { Content = tool.Label, Tag = tool, MinWidth = 112 };
+            var launchTool = essentialTools.GetValueOrDefault(tool.Id) ?? tool;
+            var button = new Button { Content = launchTool.Label, Tag = launchTool };
             button.Click += Tool_Click;
             ToolsPanel.Children.Add(button);
         }
+    }
+
+    private void BeginEnvironment()
+    {
+        if (environmentStarted) return;
+        if (!recoveryHotkeyAvailable || !emergencyHotkeyAvailable) return;
+        try
+        {
+            TaskbarSession.Begin();
+            DisplaySession.UsePrimaryOnly();
+            environmentStarted = true;
+            Left = 0; Top = 0;
+            Width = SystemParameters.PrimaryScreenWidth; Height = SystemParameters.PrimaryScreenHeight;
+        }
+        catch (Exception ex)
+        {
+            TaskbarSession.Restore();
+            StatusText.Text = "Could not enter single-monitor mode: " + ex.Message;
+        }
+    }
+
+    private void ConfigurePresentation()
+    {
+        bool grace = state?.Phase == "grace";
+        if (grace && environmentStarted)
+        {
+            TaskbarSession.Restore();
+            environmentStarted = false;
+        }
+        ShowInTaskbar = !grace; // The focus surface remains reachable through Alt+Tab.
+        GracePanel.Visibility = grace ? Visibility.Visible : Visibility.Collapsed;
+        ContentScroll.Visibility = grace ? Visibility.Collapsed : Visibility.Visible;
+        FooterPanel.Visibility = grace ? Visibility.Collapsed : Visibility.Visible;
+        RecoveryText.Visibility = grace ? Visibility.Collapsed : Visibility.Visible;
+        Width = grace ? 240 : SystemParameters.PrimaryScreenWidth;
+        Height = grace ? 120 : SystemParameters.PrimaryScreenHeight;
+        Left = grace ? Math.Max(0, SystemParameters.WorkArea.Right - Width - 24) : 0;
+        Top = grace ? SystemParameters.WorkArea.Top + 24 : 0;
+    }
+
+    private void Window_MouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (state?.Phase == "grace" && e.ChangedButton == System.Windows.Input.MouseButton.Left) DragMove();
+    }
+
+    private void LoadEssentialTools()
+    {
+        pickerLoaded = true;
+        foreach (var app in config.Apps.Where(app => !string.IsNullOrWhiteSpace(app.Path)))
+            AddEssential(new FocusLockTool { Id = Path.GetFileName(app.Path), Label = app.Name, ExecutablePath = app.Path, AppUserModelId = app.AppUserModelId });
+        foreach (var process in Process.GetProcesses())
+        {
+            using (process)
+            {
+                try
+                {
+                    if (process.MainWindowHandle == 0) continue;
+                    var path = process.MainModule?.FileName;
+                    if (path is null || process.Id == Environment.ProcessId || process.ProcessName.Equals("FocusLock", StringComparison.OrdinalIgnoreCase)) continue;
+                    AddEssential(new FocusLockTool { Id = Path.GetFileName(path), Label = process.ProcessName, ExecutablePath = path });
+                }
+                catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException or NotSupportedException) { }
+            }
+        }
+    }
+
+    private void AddEssential(FocusLockTool tool, bool selected = false)
+    {
+        if (essentialTools.ContainsKey(tool.Id))
+        {
+            if (selected) foreach (var box in EssentialChoices.Children.OfType<CheckBox>().Where(box => string.Equals((string)box.Tag, tool.Id, StringComparison.OrdinalIgnoreCase))) box.IsChecked = true;
+            return;
+        }
+        essentialTools.Add(tool.Id, tool);
+        EssentialChoices.Children.Add(new CheckBox { Content = tool.Label, Tag = tool.Id, IsChecked = selected });
+    }
+
+    private void Continue_Click(object sender, RoutedEventArgs e)
+    {
+        if (string.IsNullOrWhiteSpace(TaskInput.Text)) { StatusText.Text = "Enter a task first."; TaskInput.Focus(); return; }
+        StatusText.Text = "";
+        TaskStep.Visibility = Visibility.Collapsed; ToolsStep.Visibility = Visibility.Visible;
+    }
+
+    private void BackToTask_Click(object sender, RoutedEventArgs e)
+    {
+        ToolsStep.Visibility = Visibility.Collapsed; TaskStep.Visibility = Visibility.Visible;
+        TaskInput.Focus();
+    }
+
+    private void BrowseEssential_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new OpenFileDialog { Title = "Choose an essential app", Filter = "Applications (*.exe)|*.exe", CheckFileExists = true };
+        if (dialog.ShowDialog(this) == true)
+            AddEssential(new FocusLockTool { Id = Path.GetFileName(dialog.FileName), Label = Path.GetFileNameWithoutExtension(dialog.FileName), ExecutablePath = dialog.FileName }, true);
+    }
+
+    private async void InstalledEssential_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            StatusText.Text = "Finding installed apps…";
+            var apps = (await InstalledApps.LoadAsync()).Where(app => !string.IsNullOrWhiteSpace(app.ExecutableName)).ToList();
+            if (!CanUseLatestState() || state?.Phase != "pick_frog") return;
+            var selected = ChooseInstalledApp(apps);
+            if (selected is not null)
+                AddEssential(new FocusLockTool { Id = selected.ExecutableName!, Label = selected.Name, AppUserModelId = selected.AppUserModelId }, true);
+            StatusText.Text = "";
+        }
+        catch (Exception ex) { StatusText.Text = "Could not list apps: " + ex.Message; }
+    }
+
+    private void UseTask_Click(object sender, RoutedEventArgs e)
+    {
+        if (!CanUseLatestState() || state?.Phase != "pick_frog") return;
+        try
+        {
+            var domains = SitesInput.Text.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .Select(FocusLockSessionState.NormalizeHttpsDomain).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            var apps = EssentialChoices.Children.OfType<CheckBox>().Where(box => box.IsChecked == true).Select(box => (string)box.Tag).ToList();
+            if (apps.Count > 64 || domains.Count > 64) throw new InvalidDataException("Choose up to 64 essential apps and websites.");
+            protocol.WriteAction(new FocusLockAction { Action = "select_frog", Title = TaskInput.Text.Trim(), AppIds = apps, Domains = domains });
+            UseTaskButton.IsEnabled = false;
+            StatusText.Text = "Saving your task…";
+        }
+        catch (InvalidDataException ex) { StatusText.Text = ex.Message; }
     }
 
     private void RebuildDomainButtons(FocusLockSessionState next)
@@ -189,7 +346,7 @@ public partial class FrogWindow : Window
             Height = 300,
             WindowStartupLocation = WindowStartupLocation.CenterOwner,
             ResizeMode = ResizeMode.NoResize,
-            Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(10, 12, 10)),
+            Background = System.Windows.Media.Brushes.Black,
             Foreground = System.Windows.Media.Brushes.White,
         };
         var layout = new System.Windows.Controls.DockPanel { Margin = new Thickness(16) };
@@ -258,6 +415,7 @@ public partial class FrogWindow : Window
 
     private void Window_Loaded(object sender, RoutedEventArgs e)
     {
+        ConfigurePresentation();
         source = HwndSource.FromHwnd(new WindowInteropHelper(this).Handle);
         source?.AddHook(WindowMessage);
         heartbeat.Start();
@@ -265,6 +423,8 @@ public partial class FrogWindow : Window
         emergencyHotkeyAvailable = NativeMethods.RegisterHotKey(new WindowInteropHelper(this).Handle, EmergencyHotkey, ModControl | ModAlt | ModShift, 0x7B);
         if (!recoveryHotkeyAvailable || !emergencyHotkeyAvailable)
             RecoveryText.Text = $"Hotkey unavailable: {string.Join(" and ", new[] { !recoveryHotkeyAvailable ? "Ctrl+Alt+Space" : null, !emergencyHotkeyAvailable ? "Ctrl+Alt+Shift+F12" : null }.Where(x => x is not null))}. Use Back to desktop to close this screen.";
+        if (state?.Phase is "pick_frog" or "working") BeginEnvironment();
+        if (state?.Phase == "pick_frog") TaskInput.Focus();
     }
 
     public void ShowConnectionEnded(string reason) => StatusText.Text = reason;
@@ -298,7 +458,7 @@ public partial class FrogWindow : Window
     private void RestoreFrogSurface()
     {
         Show();
-        WindowState = WindowState.Maximized;
+        ConfigurePresentation();
         Topmost = true;
         Activate();
     }
@@ -342,6 +502,7 @@ public partial class FrogWindow : Window
         source?.RemoveHook(WindowMessage);
         protocol.RequestStop();
         heartbeat.Stop();
+        if (TaskbarSession.Active) TaskbarSession.Restore();
         base.OnClosed(e);
     }
 

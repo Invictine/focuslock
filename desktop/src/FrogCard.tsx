@@ -24,30 +24,7 @@ function wakeLabel(hour: number): string {
   return `${String(Math.min(23, Math.max(0, Math.trunc(hour)))).padStart(2, "0")}:00`;
 }
 
-// ---------------------------------------------------------------------------
-// Small glyphs (App.tsx's Icon is not exported and importing it would create a
-// cycle, so the frog surfaces keep their own minimal SVGs).
-// ---------------------------------------------------------------------------
-
-function FrogGlyph({ size = 20 }: { size?: number }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d="M5 14a7 7 0 0 1 14 0" />
-      <path d="M5 14v2a4 4 0 0 0 4 4h6a4 4 0 0 0 4-4v-2" />
-      <path d="M8.5 10.5h.01M15.5 10.5h.01" />
-    </svg>
-  );
-}
+// Small picker glyphs stay local to avoid importing App.tsx and creating a cycle.
 
 function AppGlyph({ size = 14 }: { size?: number }) {
   return (
@@ -124,202 +101,69 @@ function SearchGlyph({ size = 16 }: { size?: number }) {
   );
 }
 
-/** Allowlist chips shared by the working card and the bricked banner. */
-function AllowlistChips({ frog }: { frog: FrogTask }) {
-  if (!frog.neededAppIds.length && !frog.neededDomains.length) {
-    return <p className="frog-hint">No allowlist picked — nothing is allowed through.</p>;
-  }
-  return (
-    <div className="chip-row">
-      {frog.neededAppIds.map((key) => (
-        <span className="member-chip" key={`app:${key}`} title={`App · ${key}`}>
-          <AppGlyph />
-          {key}
-        </span>
-      ))}
-      {frog.neededDomains.map((key) => (
-        <span className="member-chip website" key={`site:${key}`} title={`Website · ${key}`}>
-          <SiteGlyph />
-          {key}
-        </span>
-      ))}
-    </div>
-  );
-}
-
 export default function FrogCard({ catalog }: { catalog: FrogCatalog }) {
   const { state, actions } = useFrogState();
   const voidUi = useVoidLauncherUi();
   const [pickerOpen, setPickerOpen] = useState(false);
   const desktopLauncherAvailable = voidLauncherAvailable();
 
+  useEffect(() => {
+    const openFallbackPicker = () => setPickerOpen(true);
+    window.addEventListener("focuslock:pick-frog", openFallbackPicker);
+    return () => window.removeEventListener("focuslock:pick-frog", openFallbackPicker);
+  }, []);
+
   // Feature off: no card at all (mirrors Android's FrogCard).
   if (!state.enabled) return null;
 
   const frog = state.frog;
-  const requiredMinutes = Math.round(state.requiredSeconds / 60);
   const trackedMinutes = Math.floor(state.trackedSeconds / 60);
-  const progress =
-    state.requiredSeconds > 0
-      ? Math.min(1, Math.max(0, state.trackedSeconds / state.requiredSeconds))
-      : 0;
   const wake = wakeLabel(state.wakeHour);
 
   const subtitle =
     state.phase === "not_armed"
-      ? `Frog arms at ${wake}`
+      ? `Arms at ${wake}`
+      : state.phase === "grace"
+        ? `Grace · ${formatFrogClock(state.graceRemainingSeconds)}`
       : state.phase === "pick_frog"
-        ? "Pick today's frog"
+        ? "Choose today's task"
         : state.phase === "complete"
-          ? "Done for today"
-          : frog?.title || "Pick today's frog";
+          ? "Complete for today"
+          : "In progress";
 
   return (
     <>
-      <section className={`frog-card ${state.locked ? "locked" : ""}`} aria-label="Eat the frog">
+      <section className="frog-card" aria-label="Eat the frog">
         <div className="frog-card-head">
-          <span className="frog-glyph">
-            <FrogGlyph />
-          </span>
           <div className="frog-card-title">
             <h2>Eat the frog</h2>
             <p>{subtitle}</p>
           </div>
-          <span
-            className={`frog-phase-pill ${state.locked ? "locked" : ""} ${
-              state.phase === "complete" ? "complete" : ""
-            }`}
-          >
-            {state.phase === "not_armed"
-              ? "Not armed"
-              : state.phase === "pick_frog"
-                ? "Pick a frog"
-                : state.phase === "complete"
-                  ? "Complete"
-                  : "In progress"}
-          </span>
         </div>
-
-        {state.phase === "not_armed" && (
-          <p className="frog-copy">
-            Before {wake} this PC stays on your normal rules. On the first open at/after your
-            wake hour the frog arms, and then every boundary app and website locks until today's
-            frog is ticked off with {requiredMinutes} minutes of focus.
-          </p>
-        )}
-
-        {state.phase === "pick_frog" && (
-          <p className="frog-copy">
-            Today's frog is armed. Every boundary app and website is locked until you pick a frog,
-            tick it off, and track {requiredMinutes} minutes on it.
-          </p>
-        )}
-
-        {state.phase === "working" && frog && (
-          <>
-            <div className="frog-focus">
-              <strong>{frog.title}</strong>
-              {frog.projectName && <small>{frog.projectName}</small>}
-              <small>
-                {trackedMinutes}m of {requiredMinutes}m tracked
-                {state.tickedOff ? " · ticked off" : ""}
-              </small>
-            </div>
-            <div
-              className="frog-progress"
-              role="progressbar"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={Math.round(progress * 100)}
-              aria-label={`Frog progress ${trackedMinutes} of ${requiredMinutes} minutes`}
-            >
-              <span style={{ width: `${Math.round(progress * 100)}%` }} />
-            </div>
-            <p className="frog-progress-copy">
-              <span>{formatFrogClock(state.trackedSeconds)}</span>
-              <span>{formatFrogClock(state.requiredSeconds)}</span>
-            </p>
-            <AllowlistChips frog={frog} />
-          </>
-        )}
-
-        {state.phase === "complete" && (
-          <div className="frog-complete">
-            <strong>{frog?.title || "Frog complete"}</strong>
-            <p>
-              Ticked off with {trackedMinutes} minutes tracked. Boundaries are back to your normal
-              rules until tomorrow's wake hour.
-            </p>
-          </div>
-        )}
-
-        {state.phase === "pick_frog" && (
-          <div className="frog-actions">
-            <button type="button" className="primary-button" onClick={() => setPickerOpen(true)}>
-              Pick your frog
-            </button>
-          </div>
-        )}
-
+        {frog && <p className="frog-task">{frog.title}{frog.projectName ? ` · ${frog.projectName}` : ""}</p>}
         {state.phase === "working" && (
-          <div className="frog-actions">
-            <button
-              type="button"
-              className="primary-button void-launcher-button"
-              disabled={!desktopLauncherAvailable || !voidUi.ready || voidUi.busy || !state.enabled}
-              onClick={() => window.dispatchEvent(new Event("focuslock:void-open"))}
-              title={!desktopLauncherAvailable ? "The Frog launcher runs in the Windows app." : !voidUi.ready ? "Connecting to the Frog launcher…" : undefined}
-            >
-              {voidUi.busy
-                ? voidUi.active ? "Returning to Frog launcher…" : "Opening Frog launcher…"
-                : voidUi.active ? "Return to Frog launcher" : "Open Frog launcher"}
-            </button>
-            <button
-              type="button"
-              className="primary-button"
-              disabled={state.tickedOff}
-              onClick={() => actions.tickOffFrog(true)}
-            >
-              {state.tickedOff ? "Frog ticked off" : "Tick off frog"}
-            </button>
-            <button
-              type="button"
-              className="secondary-button"
-              onClick={() => setPickerOpen(true)}
-            >
-              Change frog
-            </button>
-          </div>
+          <p className="frog-task-meta">
+            {trackedMinutes}m tracked{state.tickedOff ? " · ticked off" : ""}
+          </p>
         )}
-        {state.phase === "working" && !desktopLauncherAvailable && (
-          <p className="frog-launcher-note">The Frog launcher is available in the Windows desktop app.</p>
-        )}
-        {state.phase === "working" && desktopLauncherAvailable && !voidUi.ready && !voidUi.error && (
-          <p className="frog-launcher-note">Connecting to the Frog launcher…</p>
-        )}
-        {state.phase === "working" && voidUi.error && (
+        {state.phase !== "complete" && <div className="frog-actions">
+          <button
+            type="button"
+            className="frog-open-button"
+            disabled={state.phase !== "not_armed" && desktopLauncherAvailable && (!voidUi.ready || voidUi.busy)}
+            onClick={() => {
+              if (desktopLauncherAvailable && state.phase !== "not_armed") window.dispatchEvent(new Event("focuslock:void-open"));
+              else setPickerOpen(true);
+            }}
+            title={desktopLauncherAvailable && !voidUi.ready ? "Connecting to the Frog launcher…" : undefined}
+          >
+            {state.phase === "not_armed" ? "Prepare task" : desktopLauncherAvailable
+              ? voidUi.busy ? "Opening Frog…" : state.phase === "pick_frog" ? "Pick task" : "Open Frog"
+              : state.phase === "pick_frog" || !frog ? "Pick task" : "Open Frog"}
+          </button>
+        </div>}
+        {desktopLauncherAvailable && voidUi.error && (
           <p className="frog-launcher-error" role="alert">{voidUi.error}</p>
-        )}
-        {state.phase === "working" && (
-          <p className="frog-hint">
-            Changing the frog resets its tracked progress. Tick off only when the work itself is
-            done — the lock releases once {requiredMinutes} minutes are tracked.
-          </p>
-        )}
-
-        {state.locked && (
-          <div className="frog-lock-banner">
-            <strong>
-              <FrogGlyph size={15} />
-              Boundaries are bricked
-            </strong>
-            <p>
-              {frog
-                ? "Every app and website in Boundaries is blocked right now, except your frog allowlist:"
-                : "Every app and website in Boundaries is blocked until today's frog is picked. Nothing is allowed through yet."}
-            </p>
-            {frog && <AllowlistChips frog={frog} />}
-          </div>
         )}
       </section>
 

@@ -12,7 +12,24 @@ import java.time.ZonedDateTime
 /** Schedules the daily Frog wake trigger without requiring exact-alarm access. */
 object FrogMorningScheduler {
     const val ACTION_FROG_MORNING_ALARM = "com.focuslock.app.action.FROG_MORNING_ALARM"
+    const val ACTION_FROG_GRACE_EXPIRED = "com.focuslock.app.action.FROG_GRACE_EXPIRED"
     private const val REQUEST_CODE = 17421
+    private const val GRACE_REQUEST_CODE = 17422
+
+    fun scheduleGraceExpiry(context: Context, deadlineMillis: Long?) {
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
+        val pending = PendingIntent.getBroadcast(
+            context, GRACE_REQUEST_CODE,
+            Intent(context, FrogWakeReceiver::class.java).setAction(ACTION_FROG_GRACE_EXPIRED),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        try {
+            if (deadlineMillis == null) alarmManager.cancel(pending)
+            else alarmManager.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, deadlineMillis, pending)
+        } catch (e: Exception) {
+            android.util.Log.w("FrogMorningScheduler", "Grace expiry alarm unavailable", e)
+        }
+    }
 
     /** Schedule the next local wake-hour alarm, or cancel it while Frog is disabled. */
     fun schedule(context: Context, wakeHour: Int, enabled: Boolean) {

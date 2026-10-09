@@ -3,8 +3,8 @@ use crate::{
     browser_guard::{BrowserGuard, BrowserWindowSample},
     browser_warning::BrowserRepairRuntime,
     windows_capture::{
-        browser_window_identity, capture_foreground, get_browser_windows, get_running_windows, idle_seconds,
-        minimize_foreground, request_browser_window_close,
+        browser_window_identity, capture_foreground, get_browser_windows, get_running_windows,
+        idle_millis, minimize_foreground, request_browser_window_close,
         CapturedWindow,
     },
 };
@@ -25,8 +25,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 const DEFAULT_REASON: &str = "blocked";
-// Matches desktop/src/features.ts. Frog is temporarily suspended on desktop.
-const DESKTOP_FROG_ENABLED: bool = false;
+// Matches desktop/src/features.ts.
+const DESKTOP_FROG_ENABLED: bool = true;
 
 fn remove_disabled_frog_targets(targets: &mut BlockedTargets, reasons: &mut HashMap<String, String>) {
     if DESKTOP_FROG_ENABLED { return; }
@@ -323,6 +323,8 @@ pub struct ActivityObservation {
     pub device_id: String,
     pub device_name: String,
     pub idle: bool,
+    #[serde(default)]
+    pub idle_millis: Option<u64>,
     pub blocked: bool,
 }
 
@@ -613,9 +615,8 @@ impl TrackerRuntime {
                         Ok(value) => value.clone(),
                         Err(_) => break,
                     };
-                    let idle = idle_seconds()
-                        .map(|v| v >= config.idle_threshold_seconds)
-                        .unwrap_or(false);
+                    let idle_millis = idle_millis().ok();
+                    let idle = idle_millis.is_some_and(|v| v / 1_000 >= config.idle_threshold_seconds);
                     match foreground {
                         Ok(Some(captured)) => {
                             consecutive_capture_errors = 0;
@@ -631,6 +632,7 @@ impl TrackerRuntime {
                                 device_id: device.id,
                                 device_name: device.name,
                                 idle,
+                                idle_millis,
                                 blocked: blocked_match.is_some(),
                             };
                             let key = (
@@ -1294,8 +1296,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn suspended_frog_removes_legacy_blocks_without_releasing_permanent_targets() {
-        let path = std::env::temp_dir().join(format!("focuslock-frog-suspended-{}.json", Uuid::new_v4()));
+    fn enabled_frog_targets_survive_reload_alongside_permanent_targets() {
+        let path = std::env::temp_dir().join(format!("focuslock-frog-enabled-{}.json", Uuid::new_v4()));
         let mut store = TrackingStore::new();
         store.blocked_targets = BlockedTargets {
             app_ids: vec!["frog-only.exe".into(), "permanent.exe".into(), "limited.exe".into()],
@@ -1311,11 +1313,12 @@ mod tests {
         store.permanent_targets = vec!["permanent.exe".into()];
         persist_store(&path, &store).unwrap();
         let restored = load_store(&path).unwrap();
-        assert_eq!(restored.blocked_targets.app_ids, ["limited.exe", "permanent.exe"]);
-        assert_eq!(restored.blocked_targets.domains, ["boundary.example"]);
+        assert_eq!(restored.blocked_targets.app_ids, ["frog-only.exe", "limited.exe", "permanent.exe"]);
+        assert_eq!(restored.blocked_targets.domains, ["boundary.example", "frog.example"]);
         assert_eq!(restored.blocked_reasons.get("permanent.exe").map(String::as_str), Some(PERMANENT_REASON));
         assert_eq!(restored.blocked_reasons.get("limited.exe").map(String::as_str), Some("limit"));
-        assert!(!restored.blocked_reasons.values().any(|reason| reason == "frog"));
+        assert_eq!(restored.blocked_reasons.get("frog-only.exe").map(String::as_str), Some("frog"));
+        assert_eq!(restored.blocked_reasons.get("frog.example").map(String::as_str), Some("frog"));
         let _ = fs::remove_file(path);
     }
 
@@ -1330,6 +1333,7 @@ mod tests {
             device_id: "device-a".into(),
             device_name: "Desk".into(),
             idle,
+            idle_millis: Some(if idle { 90_000 } else { 0 }),
             blocked: false,
         }
     }

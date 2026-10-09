@@ -1,132 +1,69 @@
-/* "Eat the frog" home card + picker. Reuses the Boundaries dialog/picker classes
-   from styles.css; only frog-specific surfaces live here. */
-
+/* Compact monochrome Frog strip. The native launcher owns the full workflow. */
 .frog-card {
-  display: grid;
-  gap: 12px;
-  margin-bottom: 16px;
-  padding: 16px;
-  border: 1px solid var(--fl-outline-variant);
-  border-radius: var(--fl-radius-large);
-  background: var(--fl-surface-container);
-}
-.frog-card.locked {
-  border-color: var(--fl-error-container);
-}
-.frog-card-head {
-  display: grid;
-  grid-template-columns: 40px 1fr auto;
+  display: flex;
   align-items: center;
   gap: 12px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--fl-outline-variant);
+  border-radius: var(--fl-radius-medium);
+  background: var(--fl-surface);
 }
-.frog-glyph {
-  width: 40px;
-  height: 40px;
-  display: grid;
-  place-items: center;
-  border-radius: 13px;
-  color: var(--fl-on-primary-container);
-  background: var(--fl-primary-container);
+.frog-card-head {
+  min-width: 130px;
 }
 .frog-card-title h2 {
   margin: 0;
   color: var(--fl-on-surface);
-  font-size: 16px;
+  font-size: 13px;
+  font-weight: 650;
 }
-.frog-card-title p {
+.frog-card-title p,
+.frog-task,
+.frog-task-meta {
   margin: 2px 0 0;
   color: var(--fl-on-surface-variant);
-  font-size: 12px;
-  line-height: 1.45;
-}
-.frog-phase-pill {
-  padding: 5px 10px;
-  border-radius: 999px;
-  color: var(--fl-on-primary-container);
-  background: var(--fl-primary-container);
   font-size: 11px;
-  font-weight: 700;
+  line-height: 1.4;
+}
+.frog-task {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--fl-on-surface);
+  font-size: 12px;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
-.frog-phase-pill.complete {
-  color: var(--fl-on-tertiary-container);
-  background: var(--fl-tertiary-container);
-}
-.frog-phase-pill.locked {
-  color: var(--fl-on-error-container);
-  background: var(--fl-error-container);
-}
-.frog-copy {
-  margin: 0;
-  color: var(--fl-on-surface-variant);
-  font-size: 12px;
-  line-height: 1.5;
-}
-.frog-focus {
-  display: grid;
-  gap: 2px;
-  padding: 12px 14px;
-  border-radius: 14px;
-  background: var(--fl-surface-container-high);
-}
-.frog-focus strong {
-  color: var(--fl-on-surface);
-  font-size: 14px;
-}
-.frog-focus small {
-  color: var(--fl-on-surface-variant);
-  font-size: 11px;
-}
-.frog-progress {
-  height: 8px;
-  overflow: hidden;
-  border-radius: 99px;
-  background: var(--fl-surface-container-highest);
-}
-.frog-progress span {
-  display: block;
-  height: 100%;
-  background: var(--fl-primary);
-}
-.frog-progress-copy {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  margin: 0;
-  color: var(--fl-on-surface-variant);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
+.frog-task-meta {
+  white-space: nowrap;
 }
 .frog-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  flex: 0 0 auto;
 }
-.frog-actions .primary-button,
-.frog-actions .secondary-button {
-  padding: 10px 14px;
+.frog-open-button {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--fl-outline);
+  border-radius: var(--fl-radius-small);
+  color: var(--fl-on-surface);
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
 }
-.void-launcher-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 190px;
+.frog-open-button:hover:not(:disabled) {
+  background: var(--fl-surface-container-high);
 }
-.void-launcher-button:disabled {
-  opacity: .58;
-  cursor: not-allowed;
+.frog-open-button:disabled {
+  opacity: .55;
+  cursor: wait;
 }
-.frog-launcher-note,
 .frog-launcher-error {
   margin: 0;
-  font-size: 11px;
-  line-height: 1.45;
-}
-.frog-launcher-note {
-  color: var(--fl-on-surface-variant);
-}
-.frog-launcher-error {
   color: var(--fl-error);
+  font-size: 11px;
 }
 .void-launcher-live-status {
   position: fixed;
@@ -136,55 +73,19 @@
   clip-path: inset(50%);
   white-space: nowrap;
 }
-.frog-hint {
-  margin: 0;
-  color: var(--fl-on-surface-variant);
-  font-size: 11px;
-}
-.frog-lock-banner {
-  display: grid;
-  gap: 8px;
-  padding: 12px 14px;
-  border-radius: 14px;
-  color: var(--fl-on-error-container);
-  background: var(--fl-error-container);
-}
-.frog-lock-banner strong {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  font-size: 13px;
-}
-.frog-lock-banner p {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.45;
-}
-.frog-lock-banner .member-chip {
-  color: var(--fl-on-error-container);
-  background: transparent;
-  border-color: color-mix(in srgb, var(--fl-on-error-container) 35%, transparent);
-}
-.frog-complete {
-  display: grid;
-  gap: 2px;
-  padding: 12px 14px;
-  border-radius: 14px;
-  color: var(--fl-on-tertiary-container);
-  background: var(--fl-tertiary-container);
-}
-.frog-complete strong {
-  font-size: 14px;
-}
-.frog-complete p {
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.45;
-}
 .frog-dialog {
   width: min(620px, 100%);
   max-height: min(86vh, 760px);
   overflow-y: auto;
+}
+.frog-dialog .primary-button {
+  color: #111;
+  background: #eee;
+  border-color: #eee;
+}
+.frog-dialog :is(input, button):focus-visible {
+  outline: 2px solid #aaa;
+  outline-offset: 3px;
 }
 .frog-picker-section {
   display: grid;
@@ -193,9 +94,22 @@
 .frog-picker-section > .section-label {
   margin: 0;
 }
-.frog-settings-note {
-  margin: 10px 0 0;
-  color: var(--fl-on-surface-variant);
-  font-size: 12px;
-  line-height: 1.5;
+
+@media (max-width: 680px) {
+  .frog-card {
+    flex-wrap: wrap;
+  }
+  .frog-card-head {
+    flex: 1;
+  }
+  .frog-task {
+    order: 3;
+    flex-basis: 100%;
+  }
+  .frog-task-meta {
+    order: 4;
+  }
+  .frog-actions {
+    margin-left: auto;
+  }
 }

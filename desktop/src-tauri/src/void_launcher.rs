@@ -38,6 +38,8 @@ pub struct VoidSnapshot {
     #[serde(default)]
     pub project_name: Option<String>,
     pub phase: String,
+    #[serde(default)]
+    pub grace_remaining_seconds: u64,
     pub cycle_date: String,
     pub tracked_seconds: u64,
     pub required_seconds: u64,
@@ -66,6 +68,7 @@ enum VoidAction {
     Closed,
     SetDuration { minutes: u32 },
     LaunchError { message: String },
+    SelectFrog { title: String, #[serde(rename = "appIds")] app_ids: Vec<String>, domains: Vec<String> },
 }
 
 struct ManagedChild {
@@ -99,7 +102,7 @@ impl VoidSnapshot {
         bounded_text(&self.phase, 1, 32, "phase")?;
         if !matches!(
             self.phase.as_str(),
-            "not_armed" | "pick_frog" | "working" | "complete"
+            "not_armed" | "grace" | "pick_frog" | "working" | "complete"
         ) {
             return Err("Invalid Void phase".into());
         }
@@ -108,6 +111,7 @@ impl VoidSnapshot {
             || self.required_seconds == 0
             || self.required_seconds > 24 * 60 * 60
             || self.remaining_seconds > 24 * 60 * 60
+            || self.grace_remaining_seconds > 300
             || !(1..=480).contains(&self.block_minutes)
         {
             return Err("Void session duration is out of range".into());
@@ -622,6 +626,13 @@ fn fail_generation(app: &AppHandle, state: &VoidSessionState, pid: u32, error: S
 
 fn validate_action(action: &VoidAction) -> Result<(), ()> {
     match action {
+        VoidAction::SelectFrog { title, app_ids, domains } => {
+            if bounded_text(title, 1, 200, "title").is_err() || app_ids.len() > 64 || domains.len() > 64 ||
+                app_ids.iter().any(|id| id.is_empty() || id.len() > 260 || !id.to_lowercase().ends_with(".exe") || id.contains(['/', '\\', '\0'])) ||
+                domains.iter().any(|domain| !valid_domain(domain)) {
+                Err(())
+            } else { Ok(()) }
+        }
         VoidAction::SetDuration { minutes } if (1..=480).contains(minutes) => Ok(()),
         VoidAction::SetDuration { .. } => Err(()),
         VoidAction::LaunchError { message }
@@ -655,6 +666,7 @@ fn parse_action_frame(frame: &[u8]) -> Result<VoidAction, String> {
         "toggle_timer" | "tick_off" | "open_focuslock" | "closed" | "ready" => &["action"],
         "set_duration" => &["action", "minutes"],
         "launch_error" => &["action", "message"],
+        "select_frog" => &["action", "title", "appIds", "domains"],
         _ => return Err("Unknown Void launcher action".into()),
     };
     if object
@@ -715,6 +727,7 @@ mod tests {
             title: "Study".into(),
             project_name: Some(" ".into()),
             phase: phase.into(),
+            grace_remaining_seconds: if phase == "grace" { 300 } else { 0 },
             cycle_date: "2026-10-05".into(),
             tracked_seconds: 0,
             required_seconds: 1,
@@ -729,12 +742,15 @@ mod tests {
 
     #[test]
     fn accepts_frog_phases_and_duration_boundary() {
-        for phase in ["not_armed", "pick_frog", "working", "complete"] {
+        for phase in ["not_armed", "grace", "pick_frog", "working", "complete"] {
             let normalized = snapshot(phase, 480).validate_and_resolve().unwrap();
             assert_eq!(normalized.phase, phase);
             assert_eq!(normalized.project_name, None);
         }
         assert!(snapshot("working", 481).validate_and_resolve().is_err());
+        let mut invalid_grace = snapshot("grace", 25);
+        invalid_grace.grace_remaining_seconds = 301;
+        assert!(invalid_grace.validate_and_resolve().is_err());
         assert!(snapshot("short_break", 25).validate_and_resolve().is_err());
     }
 
@@ -773,6 +789,18 @@ mod tests {
 
     #[test]
     fn accepts_csharp_action_envelopes_and_rejects_bad_versions_or_frames() {
+        let selected = parse_action_frame(
+            br#"{"protocolVersion":1,"action":"select_frog","title":"Study chemistry","appIds":["Code.exe"],"domains":["docs.google.com"]}"#,
+        ).unwrap();
+        assert!(matches!(selected, VoidAction::SelectFrog { title, app_ids, domains }
+            if title == "Study chemistry" && app_ids == ["Code.exe"] && domains == ["docs.google.com"]));
+        for invalid in [
+            br#"{"protocolVersion":1,"action":"select_frog","title":"  ","appIds":[],"domains":[]}"#.as_slice(),
+            br#"{"protocolVersion":1,"action":"select_frog","title":"Study","appIds":["../Code.exe"],"domains":[]}"#.as_slice(),
+            br#"{"protocolVersion":1,"action":"select_frog","title":"Study","appIds":[],"domains":["https://docs.google.com/path"]}"#.as_slice(),
+        ] {
+            assert!(parse_action_frame(invalid).is_err(), "accepted invalid selection: {}", String::from_utf8_lossy(invalid));
+        }
         let frames = [
             br#"{"protocolVersion":1,"action":"ready"}"#.as_slice(),
             br#"{"protocolVersion":1,"action":"toggle_timer"}"#.as_slice(),
@@ -782,6 +810,7 @@ mod tests {
             br#"{"protocolVersion":1,"action":"set_duration","minutes":480}"#.as_slice(),
             br#"{"protocolVersion":1,"action":"launch_error","message":"Could not start."}"#
                 .as_slice(),
+            br#"{"protocolVersion":1,"action":"tick_off"}"#.as_slice(),
         ];
         for frame in frames {
             assert!(

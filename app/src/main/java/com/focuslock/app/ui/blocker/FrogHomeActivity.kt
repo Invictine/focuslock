@@ -55,8 +55,6 @@ class FrogHomeActivity : ComponentActivity() {
             repeatOnLifecycle(Lifecycle.State.RESUMED) {
                 leaving = false
                 val app = FocusLockApplication.instance
-                // Arming may write settings; Home's first frame need not wait for it.
-                val arming = launch { app.frogRepository.armIfDue() }
                 launch {
                     while (true) {
                         app.homeLocationRepository.shouldEnforceNow()
@@ -65,7 +63,6 @@ class FrogHomeActivity : ComponentActivity() {
                 }
                 app.frogRepository.frogStateFlow.collectLatest { state ->
                     if (!state.locked) {
-                        arming.join()
                         if (app.frogRepository.currentState().locked) return@collectLatest
                     }
                     while (true) {

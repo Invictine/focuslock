@@ -75,6 +75,7 @@ public partial class App : Application
             {
                 integratedWindow = new FrogWindow(integratedProtocol, settings);
                 MainWindow = integratedWindow;
+                integratedWindow.ApplyState(state);
                 integratedWindow.Show();
             }
             integratedWindow.ApplyState(state);

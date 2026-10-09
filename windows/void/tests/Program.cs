@@ -92,7 +92,7 @@ try
     try { new FocusLock(clock).Start(-1); throw new Exception("negative duration should be rejected"); }
     catch (ArgumentOutOfRangeException) { }
 
-    const string validFrogState = """{"protocolVersion":1,"title":"Study the chapter","projectName":"Chemistry","phase":"working","cycleDate":"2026-10-05","trackedSeconds":120,"requiredSeconds":600,"tickedOff":false,"running":true,"remainingSeconds":900,"blockMinutes":25,"tools":[{"id":"chrome.exe","label":"Chrome"}],"domains":["YouTube.com","https://youtube.com/"]}""";
+    const string validFrogState = """{"protocolVersion":1,"title":"Study the chapter","projectName":"Chemistry","phase":"working","graceRemainingSeconds":0,"cycleDate":"2026-10-05","trackedSeconds":120,"requiredSeconds":600,"tickedOff":false,"running":true,"remainingSeconds":900,"blockMinutes":25,"tools":[{"id":"chrome.exe","label":"Chrome"}],"domains":["YouTube.com","https://youtube.com/"]}""";
     var frogState = FocusLockSessionState.Parse(validFrogState);
     Check(frogState.Tools.Single().Id == "chrome.exe" && frogState.Domains.Count == 1 && frogState.Domains[0] == "youtube.com",
         "protocol parsing should validate tools and normalize duplicate HTTPS domains");
@@ -100,6 +100,23 @@ try
     Check(optionalProject.ProjectName is null, "a missing project name should remain optional");
     var missingProject = FocusLockSessionState.Parse(validFrogState.Replace("\"projectName\":\"Chemistry\",", ""));
     Check(missingProject.ProjectName is null, "a missing project name field should remain optional");
+    const string graceFrogState = """{"protocolVersion":1,"title":"Get ready","phase":"grace","graceRemainingSeconds":127,"cycleDate":"2026-10-05","trackedSeconds":0,"requiredSeconds":600,"tickedOff":false,"running":false,"remainingSeconds":900,"blockMinutes":25,"tools":[],"domains":[]}""";
+    var graceState = FocusLockSessionState.Parse(graceFrogState);
+    Check(graceState.Phase == "grace" && graceState.GraceRemainingSeconds == 127 && !graceState.Running && graceState.Tools.Count == 0 && graceState.Domains.Count == 0,
+        "grace snapshots should carry their countdown without timer work or allowlisted tools");
+    const string pickingFrogState = """{"protocolVersion":1,"title":"Pick one task","phase":"pick_frog","graceRemainingSeconds":0,"cycleDate":"2026-10-05","trackedSeconds":0,"requiredSeconds":600,"tickedOff":false,"running":false,"remainingSeconds":900,"blockMinutes":25,"tools":[],"domains":[]}""";
+    var pickingState = FocusLockSessionState.Parse(pickingFrogState);
+    Check(pickingState.Phase == "pick_frog" && !pickingState.Running && pickingState.Tools.Count == 0 && pickingState.Domains.Count == 0,
+        "task selection snapshots should not expose timer work or allowlisted tools before a task is saved");
+    ExpectInvalid(() => FocusLockSessionState.Parse(graceFrogState.Replace("\"graceRemainingSeconds\":127", "\"graceRemainingSeconds\":301")),
+        "grace countdowns longer than five minutes should be rejected");
+    var selectedFrog = FocusLockProtocol.SerializeAction(new FocusLockAction {
+        Action = "select_frog", Title = "Study chemistry", AppIds = ["Code.exe"], Domains = ["docs.google.com"]
+    });
+    Check(selectedFrog.Contains("\"action\":\"select_frog\"", StringComparison.Ordinal) &&
+          selectedFrog.Contains("\"appIds\":[\"Code.exe\"]", StringComparison.Ordinal) &&
+          selectedFrog.Contains("\"domains\":[\"docs.google.com\"]", StringComparison.Ordinal),
+        "task selection actions should send only the selected title and approved apps and sites");
     var readyEnvelope = FocusLockProtocol.SerializeAction(new FocusLockAction { Action = "ready" });
     Check(readyEnvelope.Contains("\"protocolVersion\":1", StringComparison.Ordinal) && readyEnvelope.Contains("\"action\":\"ready\"", StringComparison.Ordinal) && !readyEnvelope.Contains("toolId", StringComparison.Ordinal),
         "protocol events should use the versioned camel-case schema without unsupported fields");

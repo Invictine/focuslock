@@ -5,6 +5,9 @@ import com.focuslock.app.data.model.FrogTask
 import com.focuslock.app.data.repository.canArmNow
 import com.focuslock.app.data.repository.computeFrogLocked
 import com.focuslock.app.data.repository.frogCycleDate
+import com.focuslock.app.data.repository.frogGraceEndsAt
+import com.focuslock.app.data.repository.frogGraceExpired
+import com.focuslock.app.data.repository.pendingFrogGraceDeadline
 import com.focuslock.app.data.repository.shouldRolloverFrogCycle
 import com.focuslock.app.data.repository.sanitizeFrogToolPackages
 import java.time.LocalDateTime
@@ -28,6 +31,28 @@ class FrogStateTest {
 
     private fun millisAt(year: Int, month: Int, day: Int, hour: Int, minute: Int): Long =
         LocalDateTime.of(year, month, day, hour, minute).atZone(zone).toInstant().toEpochMilli()
+
+    @Test
+    fun dailyGraceStartsAtFirstInteractionAndExpiresAfterFiveMinutes() {
+        val interaction = millisAt(2026, 10, 4, 7, 12)
+        val deadline = frogGraceEndsAt(interaction)
+        assertEquals(millisAt(2026, 10, 4, 7, 17), deadline)
+        assertFalse(frogGraceExpired(interaction, deadline - 1))
+        assertTrue(frogGraceExpired(interaction, deadline))
+        assertTrue(frogGraceExpired(interaction, deadline + 1))
+        assertFalse(frogGraceExpired(null, deadline + 1))
+    }
+
+    @Test
+    fun onlyEnabledUnarmedFutureGraceDeadlinesAreScheduled() {
+        val now = millisAt(2026, 10, 4, 7, 12)
+        val future = now + 5 * 60_000L
+        assertEquals(future, pendingFrogGraceDeadline(true, false, future, now))
+        assertEquals(null, pendingFrogGraceDeadline(false, false, future, now))
+        assertEquals(null, pendingFrogGraceDeadline(true, true, future, now))
+        assertEquals(null, pendingFrogGraceDeadline(true, false, now, now))
+        assertEquals(null, pendingFrogGraceDeadline(true, false, null, now))
+    }
 
     // ------------------------------------------------------------------ frogCycleDate
 

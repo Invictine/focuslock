@@ -167,7 +167,7 @@ mod platform {
         }
     }
 
-    pub fn idle_seconds() -> Result<u64, String> {
+    pub fn idle_millis() -> Result<u64, String> {
         unsafe {
             let mut info = LASTINPUTINFO {
                 cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
@@ -177,7 +177,7 @@ mod platform {
                 return Err("GetLastInputInfo failed".into());
             }
             let now = windows::Win32::System::SystemInformation::GetTickCount();
-            Ok(now.wrapping_sub(info.dwTime) as u64 / 1_000)
+            Ok(now.wrapping_sub(info.dwTime) as u64)
         }
     }
 
@@ -519,9 +519,7 @@ mod platform {
     pub fn capture_foreground(_: bool) -> Result<Option<CapturedWindow>, String> {
         Ok(None)
     }
-    pub fn idle_seconds() -> Result<u64, String> {
-        Ok(0)
-    }
+    pub fn idle_millis() -> Result<u64, String> { Ok(0) }
     pub fn minimize_foreground() -> Result<(), String> {
         Ok(())
     }
@@ -553,7 +551,7 @@ mod platform {
 }
 pub use platform::{
     browser_window_identity, capture_foreground, focus_window, foreground_window,
-    get_browser_windows, get_running_windows, idle_seconds, minimize_foreground, minimize_window,
+    get_browser_windows, get_running_windows, idle_millis, minimize_foreground, minimize_window,
     request_browser_window_close, show_nonactivating_topmost, window_rect,
 };
 

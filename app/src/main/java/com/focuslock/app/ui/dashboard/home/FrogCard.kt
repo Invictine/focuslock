@@ -71,6 +71,7 @@ import com.focuslock.app.ui.components.IconBadge
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /**
@@ -268,6 +269,15 @@ fun FrogCard(modifier: Modifier = Modifier, onOpenSettings: (() -> Unit)? = null
     }
 
     val frogState = state
+    var graceRemainingSeconds by remember(frogState?.graceEndsAtMillis) { mutableStateOf(0L) }
+    LaunchedEffect(frogState?.graceEndsAtMillis) {
+        val deadline = frogState?.graceEndsAtMillis ?: return@LaunchedEffect
+        while (true) {
+            graceRemainingSeconds = ((deadline - System.currentTimeMillis()).coerceAtLeast(0L) + 999L) / 1000L
+            if (graceRemainingSeconds == 0L) break
+            delay(1_000)
+        }
+    }
     if (frogState?.enabled == false) {
         if (onOpenSettings != null) Surface(
             onClick = onOpenSettings,
@@ -319,7 +329,9 @@ fun FrogCard(modifier: Modifier = Modifier, onOpenSettings: (() -> Unit)? = null
                     Text(
                         text = when (frogState?.phase) {
                             null -> "Loading…"
-                            FrogPhase.NOT_ARMED -> "Starts at your wake hour; opens when you unlock"
+                            FrogPhase.NOT_ARMED -> if (graceRemainingSeconds > 0L) {
+                                "Starts in ${graceRemainingSeconds / 60}:${(graceRemainingSeconds % 60).toString().padStart(2, '0')}"
+                            } else "Starts at your wake hour; opens when you unlock"
                             FrogPhase.PICK_FROG -> "Pick today's frog"
                             FrogPhase.PICK_TOOLS -> "Choose the tools for today's frog"
                             FrogPhase.WORKING -> frogState.frog?.title ?: "Pick today's frog"

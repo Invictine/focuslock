@@ -2,6 +2,7 @@ package com.focuslock.app.service
 
 import android.accessibilityservice.AccessibilityService
 import android.app.ActivityOptions
+import android.app.KeyguardManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -27,6 +28,7 @@ import com.focuslock.app.data.repository.PermanentBlockPolicy
 import com.focuslock.app.data.repository.PermanentWebsitePolicy
 import com.focuslock.app.data.repository.SettingsRepository
 import com.focuslock.app.data.repository.frogCycleDate
+import com.focuslock.app.data.repository.pendingFrogGraceDeadline
 import com.focuslock.app.ui.blocker.BlockerActivity
 import com.focuslock.app.ui.permissions.PermissionHelper
 import com.focuslock.app.ui.permissions.PermissionReturnWatcher
@@ -199,6 +201,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     private var frogArmAttemptedCycle: String? = null
 
     private var frogLockJob: Job? = null
+    private var frogGraceDeadlineJob: Job? = null
     private var frogWakeReceiver: BroadcastReceiver? = null
 
     // Target-group membership mirror: a collector started in onServiceConnected keeps
@@ -427,8 +430,6 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 if (active && !wasActive) {
                     enforceScheduleOnCurrentForeground()
                 }
-                // Arm at the wake hour even when the screen stays on without an app switch.
-                armAndHandleFrog()
                 delay(SCHEDULE_REFRESH_INTERVAL_MS)
             }
         }
@@ -455,6 +456,23 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                         frogArmed = state.armed
                         frogStoredCycleDate = state.cycleDate
                         frogWakeHour = wakeHour
+                        val graceDeadline = pendingFrogGraceDeadline(
+                            enabled = state.enabled,
+                            armed = state.armed,
+                            deadlineMillis = state.graceEndsAtMillis,
+                            nowMillis = System.currentTimeMillis(),
+                        )
+                        FrogMorningScheduler.scheduleGraceExpiry(this@AppMonitorAccessibilityService, graceDeadline)
+                        frogGraceDeadlineJob?.cancel()
+                        val armDeadline = state.graceEndsAtMillis.takeIf { state.enabled && !state.armed }
+                        frogGraceDeadlineJob = armDeadline?.let { deadline ->
+                            serviceScope.launch {
+                                delay((deadline - System.currentTimeMillis()).coerceAtLeast(0L))
+                                if (FocusLockApplication.instance.frogRepository.armAfterGraceIfDue()) {
+                                    handleFrogArmed()
+                                }
+                            }
+                        }
                         if (state.locked && (previousState?.locked != true ||
                                 previousState.allowedToolPackages != state.allowedToolPackages ||
                                 previousState.toolsConfirmed != state.toolsConfirmed ||
@@ -468,11 +486,6 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 Log.w(TAG, "frog lock collector failed", e)
             }
         }
-        // First service connect after the wake hour: arm the day once. A screen kept on
-        // across the wake hour never fires USER_PRESENT/SCREEN_ON, so without this the
-        // frog would stay unarmed until an app switch (see maybeArmFrogOnForeground).
-        serviceScope.launch { armAndHandleFrog() }
-
         // Merged target groups: keep the repository's membership index warm off the event
         // path so the group-limit check on app entry never suspends on DataStore. Fail
         // open until the first emission (the repository itself falls back to one read).
@@ -541,8 +554,8 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 Log.w(TAG, "permanent-website collector failed", e)
             }
         }
-        // Runtime wake/unlock delivery: the manifest receiver covers boot/package
-        // replace only (USER_PRESENT/SCREEN_ON are not reliably manifest-delivered).
+        // Runtime unlock delivery: screen-on may happen while locked and never starts
+        // grace; actual touches/clicks also cover use inside an already-open app.
         registerFrogWakeReceiver()
         // Rebinding after an update/process restart may happen after the target's
         // window event. Inspect the existing window so a motionless foreground app
@@ -591,6 +604,16 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         // Everything else (focus, text selection, scroll notifications from all apps)
         // is dropped before even reading the package name off the parcel.
         val eventType = event.eventType
+        val isUserInputEvent = eventType == AccessibilityEvent.TYPE_TOUCH_INTERACTION_START ||
+            eventType == AccessibilityEvent.TYPE_VIEW_CLICKED ||
+            (eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED && event.source?.let { source ->
+                try { source.isEditable && source.isFocused }
+                finally { @Suppress("DEPRECATION") source.recycle() }
+            } == true)
+        if (isUserInputEvent) {
+            maybeArmFrogOnForeground()
+            return
+        }
         if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
             eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
         ) return
@@ -993,12 +1016,6 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         }
         latestAppCheckTarget = packageName
         latestAppCheckDecision = "checking"
-        // In-memory-only arm check (F1): a user who keeps the screen on across the wake
-        // hour never fires USER_PRESENT/SCREEN_ON, so the first app open after the wake
-        // hour must be able to arm the day. This path only reads volatiles; the actual
-        // DataStore work is launched off-thread by maybeArmFrogOnForeground.
-        maybeArmFrogOnForeground()
-
         if (previousPackage != packageName) stopTrackingForPreviousPackage(previousPackage)
 
         foregroundCheckJob?.cancel()
@@ -1351,6 +1368,8 @@ class AppMonitorAccessibilityService : AccessibilityService() {
      */
     private fun maybeArmFrogOnForeground() {
         if (!frogEnabled || frogArmed) return
+        val keyguard = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        if (keyguard?.isKeyguardLocked == true) return
         val now = System.currentTimeMillis()
         val wakeHour = frogWakeHour
         if (LocalTime.now().hour < wakeHour) return
@@ -1363,7 +1382,8 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         frogArmAttemptedCycle = cycle
         serviceScope.launch {
             try {
-                if (FocusLockApplication.instance.frogRepository.armIfDue(now)) handleFrogArmed()
+                val repo = FocusLockApplication.instance.frogRepository
+                if (repo.startGraceIfDue(now)) handleFrogArmed()
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 Log.w(TAG, "frog foreground arm attempt failed", e)
@@ -1383,8 +1403,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Registers the runtime frog wake receiver (belt-and-braces next to the manifest
-     * [FrogWakeReceiver]): USER_PRESENT/SCREEN_ON arm the day's frog, FROG_ARMED
+     * Registers the runtime Frog receiver: USER_PRESENT starts grace, while FROG_ARMED
      * re-evaluates the current foreground immediately. Never crashes the service.
      */
     private fun registerFrogWakeReceiver() {
@@ -1392,7 +1411,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 when (intent?.action) {
-                    Intent.ACTION_USER_PRESENT, Intent.ACTION_SCREEN_ON ->
+                    Intent.ACTION_USER_PRESENT ->
                         serviceScope.launch { armAndHandleFrog() }
                     FrogCoordinator.ACTION_FROG_ARMED ->
                         serviceScope.launch { handleFrogArmed() }
@@ -1405,7 +1424,6 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 receiver,
                 IntentFilter().apply {
                     addAction(Intent.ACTION_USER_PRESENT)
-                    addAction(Intent.ACTION_SCREEN_ON)
                     addAction(FrogCoordinator.ACTION_FROG_ARMED)
                 },
                 ContextCompat.RECEIVER_NOT_EXPORTED
@@ -1430,7 +1448,8 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     /** Arms today's frog when due, then runs the shared FROG_ARMED handling. */
     private suspend fun armAndHandleFrog() {
         try {
-            FocusLockApplication.instance.frogRepository.armIfDue()
+            val repo = FocusLockApplication.instance.frogRepository
+            repo.startGraceIfDue()
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             Log.w(TAG, "frog arm attempt failed", e)
@@ -1970,6 +1989,8 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         permissionReturnJob = null
         frogLockJob?.cancel()
         frogLockJob = null
+        frogGraceDeadlineJob?.cancel()
+        frogGraceDeadlineJob = null
         targetGroupsJob?.cancel()
         targetGroupsJob = null
         permanentBlocksJob?.cancel()

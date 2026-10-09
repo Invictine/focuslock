@@ -77,6 +77,22 @@ fun computeFrogLocked(
     requiredSeconds: Int,
 ): Boolean = enabled && armed && !(tickedOff && trackedSeconds >= requiredSeconds)
 
+/** Five-minute local-device grace, anchored to the first interaction in each cycle. */
+const val FROG_DAILY_GRACE_MILLIS: Long = 5 * 60 * 1000L
+
+fun frogGraceEndsAt(interactionAtMillis: Long): Long = interactionAtMillis + FROG_DAILY_GRACE_MILLIS
+
+fun frogGraceExpired(interactionAtMillis: Long?, nowMillis: Long): Boolean =
+    interactionAtMillis != null && nowMillis >= frogGraceEndsAt(interactionAtMillis)
+
+/** Deadline worth scheduling: only enabled, unarmed state with a future deadline. */
+fun pendingFrogGraceDeadline(
+    enabled: Boolean,
+    armed: Boolean,
+    deadlineMillis: Long?,
+    nowMillis: Long,
+): Long? = deadlineMillis?.takeIf { enabled && !armed && it > nowMillis }
+
 /**
  * Whether the frog may be armed right now: feature enabled, not already armed, at/after
  * [wakeHour] local time, and [cycleDate] already rolled to today's local date (a stale
@@ -179,6 +195,7 @@ class FrogRepository(
         val FROG_REQUIRED_MINUTES = intPreferencesKey("frog_required_minutes")
         val FROG_WAKE_HOUR = intPreferencesKey("frog_wake_hour")
         val FROG_CYCLE_DATE = stringPreferencesKey("frog_cycle_date")
+        val FROG_GRACE_STARTED_AT = longPreferencesKey("frog_grace_started_at")
         val FROG_ARMED = booleanPreferencesKey("frog_armed")
         val FROG_SELECTED_JSON = stringPreferencesKey("frog_selected_json")
         val FROG_TICKED_OFF = booleanPreferencesKey("frog_ticked_off")
@@ -308,23 +325,53 @@ class FrogRepository(
     }
 
     /**
-     * Arms today's frog when due ([canArmNow]): enabled, not already armed, at/after the
-     * wake hour, cycle date rolled to today. Idempotent.
-     * @return true only when this call actually flipped armed false -> true.
+     * Records first use for today's configured wake-hour cycle and starts the grace timer.
+     * A repeat call only arms after the persisted five-minute deadline.
      */
+    suspend fun startGraceIfDue(nowMillis: Long = System.currentTimeMillis()): Boolean = withFrogStore(false) {
+        rolloverIfNeeded(nowMillis)
+        var armedNow = false
+        val committed = editFrogPrefs { prefs ->
+            val currentWakeHour = wakeHour(prefs)
+            val cycle = prefs[Keys.FROG_CYCLE_DATE].orEmpty()
+            val enabled = prefs[Keys.FROG_ENABLED] ?: DEFAULT_ENABLED
+            val armed = prefs[Keys.FROG_ARMED] ?: false
+            if (!enabled || armed || !canArmNow(nowMillis, currentWakeHour, cycle, enabled, false)) return@editFrogPrefs
+            val startedAt = prefs[Keys.FROG_GRACE_STARTED_AT]
+            if (startedAt == null) {
+                prefs[Keys.FROG_GRACE_STARTED_AT] = nowMillis
+            } else if (frogGraceExpired(startedAt, nowMillis)) {
+                prefs[Keys.FROG_ARMED] = true
+                armedNow = true
+            }
+        }
+        committed && armedNow
+    }
+
+    /** Immediate arm primitive retained for controlled setup and test fixtures. */
     suspend fun armIfDue(nowMillis: Long = System.currentTimeMillis()): Boolean = withFrogStore(false) {
         rolloverIfNeeded(nowMillis)
         var armedNow = false
         val committed = editFrogPrefs { prefs ->
-            // Decide inside the (serialized) edit snapshot: two racing calls cannot both arm.
-            val mayArm = canArmNow(
-                nowMillis = nowMillis,
-                wakeHour = wakeHour(prefs),
-                cycleDate = prefs[Keys.FROG_CYCLE_DATE].orEmpty(),
-                enabled = prefs[Keys.FROG_ENABLED] ?: DEFAULT_ENABLED,
-                armed = prefs[Keys.FROG_ARMED] ?: false,
-            )
-            if (mayArm) {
+            val enabled = prefs[Keys.FROG_ENABLED] ?: DEFAULT_ENABLED
+            val armed = prefs[Keys.FROG_ARMED] ?: false
+            if (canArmNow(nowMillis, wakeHour(prefs), prefs[Keys.FROG_CYCLE_DATE].orEmpty(), enabled, armed)) {
+                prefs[Keys.FROG_ARMED] = true
+                armedNow = true
+            }
+        }
+        committed && armedNow
+    }
+
+    /** Arms only after a previously started local grace period expires. */
+    suspend fun armAfterGraceIfDue(nowMillis: Long = System.currentTimeMillis()): Boolean = withFrogStore(false) {
+        rolloverIfNeeded(nowMillis)
+        var armedNow = false
+        val committed = editFrogPrefs { prefs ->
+            val enabled = prefs[Keys.FROG_ENABLED] ?: DEFAULT_ENABLED
+            val armed = prefs[Keys.FROG_ARMED] ?: false
+            val startedAt = prefs[Keys.FROG_GRACE_STARTED_AT]
+            if (enabled && !armed && canArmNow(nowMillis, wakeHour(prefs), prefs[Keys.FROG_CYCLE_DATE].orEmpty(), enabled, armed) && frogGraceExpired(startedAt, nowMillis)) {
                 prefs[Keys.FROG_ARMED] = true
                 armedNow = true
             }
@@ -498,6 +545,7 @@ class FrogRepository(
                 editFrogPrefs { stored ->
                     stored[Keys.FROG_CYCLE_DATE] = today
                     stored[Keys.FROG_ARMED] = false
+                    stored.remove(Keys.FROG_GRACE_STARTED_AT)
                     stored[Keys.FROG_TICKED_OFF] = false
                     stored[Keys.FROG_TRACKED_SECONDS] = 0
                     stored[Keys.FROG_SELECTED_JSON] = ""
@@ -583,6 +631,7 @@ class FrogRepository(
             allowedToolPackages = sanitizeFrogToolPackages(prefs[Keys.FROG_ALLOWED_TOOL_PACKAGES] ?: emptySet()),
             toolsConfirmed = prefs[Keys.FROG_TOOLS_CONFIRMED] ?: false,
             essentialAppPackages = decodeEssentialApps(prefs[Keys.FROG_ESSENTIAL_APP_PACKAGES]),
+            graceEndsAtMillis = prefs[Keys.FROG_GRACE_STARTED_AT]?.let(::frogGraceEndsAt),
         )
     }
 
@@ -611,6 +660,7 @@ class FrogRepository(
             allowedToolPackages = sanitizeFrogToolPackages(prefs[Keys.FROG_ALLOWED_TOOL_PACKAGES] ?: emptySet()),
             toolsConfirmed = false,
             essentialAppPackages = decodeEssentialApps(prefs[Keys.FROG_ESSENTIAL_APP_PACKAGES]),
+            graceEndsAtMillis = null,
         )
     }
 
