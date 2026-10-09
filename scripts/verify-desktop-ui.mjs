@@ -217,8 +217,64 @@ try {
   assert.equal(await permanentDialog.count(), 0, "Permalock confirmation cancels");
   assert.equal(await page.evaluate(() => window.__calls.some(x => x.command === "add_permanent_targets")), false, "Cancel makes no native policy call");
 
-  // Strict until-time fields are exercised in Settings with an in-memory save.
+  // Settings overview routes to each category; account navigation returns to Settings.
   await page.getByRole("button", { name: "Settings", exact: true }).click();
+  for (const label of ["Account & devices", "Connections", "Daily priority routine", "Permissions & protection", "Preferences"]) {
+    await page.getByRole("button", { name: new RegExp(label) }).waitFor();
+  }
+  assert.equal(await page.getByLabel("Strict mode timing").count(), 0, "Settings overview keeps category controls nested");
+  await page.setViewportSize({ width: 390, height: 720 });
+  const largeTextStyle = await page.addStyleTag({ content: ".settings-page h1,.settings-page h2,.settings-page .settings-back,.settings-page .setting-copy strong,.settings-page .settings-group p,.settings-page .setting-value,.settings-page .settings-field{font-size:150%!important;line-height:1.5!important}.settings-page .settings-destination strong{font-size:150%!important}.settings-page .settings-destination small{font-size:130%!important;line-height:1.5!important}" });
+  const connectionsDestination = page.locator('[data-settings-section="connections"]');
+  await connectionsDestination.focus();
+  await page.keyboard.press("Enter");
+  await page.getByRole("heading", { name: "Connections", level: 1 }).waitFor();
+  assert.equal(await page.evaluate(() => document.activeElement?.tagName === "H1"), true, "Category navigation moves keyboard focus to its heading");
+  await page.getByRole("button", { name: /Sync Now/ }).waitFor();
+  await page.getByRole("link", { name: "Open TickTick" }).waitFor();
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, "Connections fit narrow viewport with enlarged text");
+  await page.screenshot({ path: path.join(out, "desktop-ui-settings-connections-390-large-text.png"), fullPage: true, animations: "disabled" });
+  await page.keyboard.press("Shift+Tab");
+  assert.equal(await page.getByRole("button", { name: "Back to Settings" }).evaluate(node => node === document.activeElement), true, "Back action is reachable from the focused category heading");
+  await page.keyboard.press("Enter");
+  await page.getByRole("heading", { name: "Settings", level: 1 }).waitFor();
+  assert.equal(await connectionsDestination.evaluate(node => node === document.activeElement), true, "Back returns keyboard focus to the originating category row");
+  await page.keyboard.press("Enter");
+  await page.getByRole("heading", { name: "Connections", level: 1 }).waitFor();
+  await page.getByRole("button", { name: "Back to Settings" }).click();
+  await page.getByRole("button", { name: /Daily priority routine/ }).click();
+  await page.getByRole("heading", { name: "Daily priority routine" }).waitFor();
+  assert.equal(await page.getByRole("switch", { name: "Toggle Eat the Frog" }).count(), 1, "Enabled desktop Frog settings remain available in their category");
+  await page.getByRole("button", { name: "Back to Settings" }).click();
+  await page.getByRole("button", { name: /Permissions & protection/ }).click();
+  await page.getByRole("heading", { name: "Permissions & protection" }).waitFor();
+  await page.getByRole("switch", { name: "App activity tracking" }).waitFor();
+  await page.getByRole("switch", { name: "Boundaries lock" }).waitFor();
+  const boundariesLock = page.getByRole("switch", { name: "Boundaries lock" });
+  const lockBefore = await boundariesLock.getAttribute("aria-checked");
+  await boundariesLock.click();
+  assert.notEqual(await boundariesLock.getAttribute("aria-checked"), lockBefore, "Boundaries Lock control still updates its setting");
+  await boundariesLock.click();
+  assert.equal(await boundariesLock.getAttribute("aria-checked"), lockBefore, "Boundaries Lock can return to its fixture value");
+  await page.getByRole("heading", { name: "System Protection Status" }).waitFor();
+  await page.locator(".nuke-action").waitFor();
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), true, "Protection category fits narrow viewport with enlarged text");
+  await page.screenshot({ path: path.join(out, "desktop-ui-settings-protection-390-large-text.png"), fullPage: true, animations: "disabled" });
+  await largeTextStyle.evaluate(node => node.remove());
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.getByRole("button", { name: "Back to Settings" }).click();
+  await page.getByRole("button", { name: /Preferences/ }).click();
+  await page.getByRole("heading", { name: "Preferences" }).waitFor();
+  await page.getByLabel("Work to leisure ratio").waitFor();
+  await page.getByLabel("Task completion bonus minutes").waitFor();
+  await page.getByRole("button", { name: "Back to Settings" }).click();
+  await page.getByRole("button", { name: /Account & devices/ }).click();
+  await page.getByRole("heading", { name: "Account" }).waitFor();
+  await page.getByRole("button", { name: "Back to Settings" }).click();
+  await page.getByRole("heading", { name: "Settings", exact: true }).waitFor();
+
+  // Strict until-time fields and protection guards are exercised with an in-memory save.
+  await page.getByRole("button", { name: /Permissions & protection/ }).click();
   await page.getByLabel("Strict mode timing").selectOption("until");
   const untilInTwoDays = await page.evaluate(() => {
     const date = new Date(Date.now() + 2 * 24 * 60 * 60_000);
@@ -405,7 +461,7 @@ try {
   const report = {
     fixtureData: true,
     routes: ["five main tabs", "auth loading/signed-out", "configuration error", "ErrorBoundary", "Nuke confirm/active/check-in", "blocker boundary/limit/permanent/Frog", "browser repair supported/unsupported"],
-    interactions: ["timer start/pause", "manual work log", "app/site switch", "add website", "create/edit group", "Permalock confirmation cancel", "Strict until-time form", "Nuke confirmation cancel", "check-in send", "browser repair extension action"],
+    interactions: ["timer start/pause", "manual work log", "app/site switch", "add website", "create/edit group", "Permalock confirmation cancel", "Settings category navigation", "Account back to Settings", "Boundaries Lock control", "Strict until-time form", "Nuke confirmation cancel", "check-in send", "browser repair extension action"],
     widths, overflowChecks, shortDialogHeights: [720, 480], screenshots: true, runtimeErrors: errors,
   };
   await writeFile(path.join(out, "desktop-ui-results.json"), JSON.stringify(report, null, 2));

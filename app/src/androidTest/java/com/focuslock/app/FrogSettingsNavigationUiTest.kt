@@ -17,14 +17,18 @@ class FrogSettingsNavigationUiTest {
     @get:Rule val compose = createEmptyComposeRule()
 
     @Test fun settingsOpensEssentialAppsAndBackReturnsToFrogSettings() {
+        val context = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().targetContext
         val settings = FocusLockApplication.instance.settingsRepository
         val previousOffline = runBlocking { settings.offlineModeFlow.first() }
+        val fixture = NavigationOnboardingFixture(context)
         var scenario: ActivityScenario<MainActivity>? = null
         try {
             runBlocking { settings.setOfflineMode(true) }
+            fixture.prepare()
             scenario = ActivityScenario.launch(MainActivity::class.java)
             compose.waitForIdle()
             compose.onNodeWithContentDescription("Settings").performClick()
+            compose.onNodeWithText("Daily priority routine").performClick()
             compose.onNodeWithText("Essential apps").performScrollTo().performClick()
             compose.onNodeWithText("Choose apps available for every frog.").assertIsDisplayed()
             compose.onNodeWithText("Save").assertIsDisplayed()
@@ -32,6 +36,7 @@ class FrogSettingsNavigationUiTest {
             compose.onNodeWithText("Choose what's available each morning").performScrollTo().assertIsDisplayed()
         } finally {
             scenario?.close()
+            fixture.restore()
             runBlocking { settings.setOfflineMode(previousOffline) }
         }
     }

@@ -78,6 +78,7 @@ import com.focuslock.app.ui.onboarding.ProductTourDestination
 import com.focuslock.app.ui.debug.DebugDataScreen
 import com.focuslock.app.ui.permissions.PermissionHelper
 import com.focuslock.app.ui.permissions.PermissionReturnWatcher
+import com.focuslock.app.ui.settings.SettingsSection
 import com.focuslock.app.ui.settings.SettingsScreen
 import com.focuslock.app.ui.strict.StrictModeScreen
 import com.focuslock.app.ui.theme.FocusLockTheme
@@ -260,6 +261,15 @@ class MainActivity : ComponentActivity() {
                     },
                 ) {
                     var currentTab by rememberSaveable { mutableStateOf(NavigationItem.DASHBOARD) }
+                    var settingsReturnTab by rememberSaveable { mutableStateOf(NavigationItem.DASHBOARD) }
+                    var accountReturnTab by rememberSaveable { mutableStateOf(NavigationItem.DASHBOARD) }
+                    var settingsHasDetail by remember { mutableStateOf(false) }
+                    var settingsSection by rememberSaveable { mutableStateOf(SettingsSection.OVERVIEW) }
+                    val openSettings: (SettingsSection) -> Unit = { section ->
+                        if (currentTab != NavigationItem.SETTINGS) settingsReturnTab = currentTab
+                        settingsSection = section
+                        currentTab = NavigationItem.SETTINGS
+                    }
                     var showAccountSignIn by rememberSaveable { mutableStateOf(false) }
                     LaunchedEffect(authState) {
                         if (authState == FocusAuthState.SignedIn) showAccountSignIn = false
@@ -304,6 +314,8 @@ class MainActivity : ComponentActivity() {
                                 nativeSignInViewModel.backToOptions()
                             }
                             showDebug -> showDebug = false
+                            currentTab == NavigationItem.SETTINGS -> currentTab = settingsReturnTab
+                            currentTab == NavigationItem.ACCOUNT -> currentTab = accountReturnTab
                             else -> currentTab = NavigationItem.DASHBOARD
                         }
                     }
@@ -337,10 +349,19 @@ class MainActivity : ComponentActivity() {
                                     )
                                 },
                                 navigationIcon = {
-                                    IconButton(onClick = goBack) {
+                                    IconButton(onClick = {
+                                        if (!showAccountSignIn && !showDebug && currentTab == NavigationItem.SETTINGS && settingsHasDetail) {
+                                            this@MainActivity.onBackPressedDispatcher.onBackPressed()
+                                        } else goBack()
+                                    }) {
                                         Icon(
                                             Icons.AutoMirrored.Filled.ArrowBack,
-                                        contentDescription = if (showAccountSignIn) "Back to Account" else "Back to Focus"
+                                        contentDescription = when {
+                                            showAccountSignIn -> "Back to Account"
+                                            !showDebug && currentTab == NavigationItem.SETTINGS && settingsHasDetail -> "Back to Settings"
+                                            !showDebug && currentTab == NavigationItem.ACCOUNT && accountReturnTab == NavigationItem.SETTINGS -> "Back to Settings"
+                                            else -> "Back to Focus"
+                                        }
                                         )
                                     }
                                 },
@@ -434,9 +455,9 @@ class MainActivity : ComponentActivity() {
                         when (currentTab) {
                             NavigationItem.DASHBOARD -> DashboardScreen(
                                 onOpenTickTick = { openTickTick() },
-                                onNavigatePermissions = { currentTab = NavigationItem.SETTINGS },
-                                onOpenSettings = { currentTab = NavigationItem.SETTINGS },
-                                onOpenAccount = { currentTab = NavigationItem.ACCOUNT }
+                                onNavigatePermissions = { openSettings(SettingsSection.PROTECTION) },
+                                onOpenSettings = { openSettings(SettingsSection.OVERVIEW) },
+                                onOpenAccount = { accountReturnTab = currentTab; currentTab = NavigationItem.ACCOUNT }
                             )
                             NavigationItem.APPS -> BoundariesScreen(
                                 pendingMergeTarget = pendingMergeTarget,
@@ -444,6 +465,9 @@ class MainActivity : ComponentActivity() {
                             )
                             NavigationItem.STRICT -> StrictModeScreen()
                             NavigationItem.SETTINGS -> SettingsScreen(
+                                initialSection = settingsSection,
+                                onNavigationStateChanged = { settingsHasDetail = it },
+                                onOpenAccount = { accountReturnTab = NavigationItem.SETTINGS; currentTab = NavigationItem.ACCOUNT },
                                 // highlightKind omitted (defaults null): the screen derives
                                 // the next missing permission from its own checks.
                                 onOpenDebug = { showDebug = true },
@@ -501,7 +525,10 @@ class MainActivity : ComponentActivity() {
                                     ProductTourDestination.BOUNDARIES -> NavigationItem.APPS
                                     ProductTourDestination.STRICT -> NavigationItem.STRICT
                                     ProductTourDestination.SETTINGS -> NavigationItem.SETTINGS
-                                    ProductTourDestination.ACCOUNT -> NavigationItem.ACCOUNT
+                                    ProductTourDestination.ACCOUNT -> {
+                                        accountReturnTab = NavigationItem.DASHBOARD
+                                        NavigationItem.ACCOUNT
+                                    }
                                 }
                             }
                         )

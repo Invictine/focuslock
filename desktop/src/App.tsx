@@ -1292,6 +1292,7 @@ function DesktopApp() {
   const auth = useFocusAuth();
   useMutationReplay();
   const [tab, setTab] = useState<Tab>("focus");
+  const [accountReturnToSettings, setAccountReturnToSettings] = useState(false);
   const { snapshot, status, error: trackerError, refresh } = useNativeTracking();
   const configuration: any = useQuery(syncApi.getConfiguration, EMPTY_ARGS);
   const nuke: any = useQuery(api.nuke.getNuke, EMPTY_ARGS);
@@ -1870,7 +1871,7 @@ function DesktopApp() {
             active={tab === "account"}
             icon="user"
             label="Account"
-            onClick={() => setTab("account")}
+            onClick={() => { setAccountReturnToSettings(false); setTab("account"); }}
           />
         </nav>
         <div className={`tracker-pill ${snapshot?.running ? "online" : ""}`}>
@@ -1956,6 +1957,7 @@ function DesktopApp() {
             lastSyncAt={lastSyncAt}
             syncing={syncing}
             onSyncNow={syncNow}
+            onOpenAccount={() => { setAccountReturnToSettings(true); setTab("account"); }}
           />
         ) : (
           <AccountPage
@@ -1967,6 +1969,7 @@ function DesktopApp() {
             syncError={syncError}
             syncWarning={syncWarning}
             signOutBlockedReason={signOutBlockedReason}
+            onBack={accountReturnToSettings ? () => { setAccountReturnToSettings(false); setTab("settings"); } : undefined}
           />
         )}
       </main>
@@ -5014,7 +5017,29 @@ function SettingsPage({
   lastSyncAt,
   syncing,
   onSyncNow,
+  onOpenAccount,
 }: any) {
+  const [section, setSection] = useState<"overview" | "connections" | "routine" | "protection" | "preferences">("overview");
+  const sectionHeadingRef = useRef<HTMLHeadingElement>(null);
+  const destinationRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const returnFocusSection = useRef<string | null>(null);
+  const hasNavigatedSettings = useRef(false);
+  function navigateSettings(next: typeof section, returnFocus?: string) {
+    hasNavigatedSettings.current = true;
+    returnFocusSection.current = returnFocus || null;
+    setSection(next);
+  }
+  useEffect(() => {
+    if (!hasNavigatedSettings.current) return;
+    window.scrollTo(0, 0);
+    if (section === "overview") {
+      const previous = returnFocusSection.current;
+      if (previous) destinationRefs.current[previous]?.focus();
+      returnFocusSection.current = null;
+    } else {
+      sectionHeadingRef.current?.focus();
+    }
+  }, [section]);
   const [busy, setBusy] = useState(false);
   const [browserProtectionBusy, setBrowserProtectionBusy] = useState(false);
   const [trackerNotice, setTrackerNotice] = useState<string | null>(null);
@@ -5120,17 +5145,31 @@ function SettingsPage({
     } finally { setPrefsBusy(false); }
   }
   return (
-    <div className="page narrow">
+    <div className="page narrow settings-page">
       <header className="page-header">
         <div>
           <p className="eyebrow">This device</p>
-          <h1>Settings</h1>
-          <p>
-            Tracking stays local first, then uploads absolute counters to your
-            signed-in account.
-          </p>
+          {section === "overview" ? <>
+            <h1>Settings</h1>
+            <p>Manage your account, daily routine, protection, and preferences.</p>
+          </> : <div className="settings-detail-heading">
+            <button className="settings-back" type="button" onClick={() => navigateSettings("overview", section)} aria-label="Back to Settings">
+              <span aria-hidden="true">‹</span> Settings
+            </button>
+            <h1 ref={sectionHeadingRef} tabIndex={-1}>{({ connections: "Connections", routine: "Daily priority routine", protection: "Permissions & protection", preferences: "Preferences" } as const)[section]}</h1>
+          </div>}
         </div>
       </header>
+      {section === "overview" ? <nav className="settings-destinations" aria-label="Settings">
+        <button className="settings-destination" type="button" onClick={onOpenAccount}>
+          <span><strong>Account &amp; devices</strong><small>Manage your account and signed-in devices</small></span><span className="settings-destination-arrow" aria-hidden="true">›</span>
+        </button>
+        <SettingsDestination section="connections" buttonRef={(node) => { destinationRefs.current.connections = node; }} title="Connections" detail="Background auto-sync and TickTick" onClick={() => navigateSettings("connections")} />
+        <SettingsDestination section="routine" buttonRef={(node) => { destinationRefs.current.routine = node; }} title="Daily priority routine" detail={DESKTOP_FROG_ENABLED ? "Eat the Frog settings" : "Eat the Frog is temporarily disabled on desktop"} onClick={() => navigateSettings("routine")} />
+        <SettingsDestination section="protection" buttonRef={(node) => { destinationRefs.current.protection = node; }} title="Permissions & protection" detail="Windows tracking, boundaries lock, and system status" onClick={() => navigateSettings("protection")} />
+        <SettingsDestination section="preferences" buttonRef={(node) => { destinationRefs.current.preferences = node; }} title="Preferences" detail="Work-to-leisure ratio and task bonus" onClick={() => navigateSettings("preferences")} />
+      </nav> : <>
+      {section === "protection" && <>
       <section className="settings-group">
         <h2>Windows tracking</h2>
         <SettingRow
@@ -5219,62 +5258,13 @@ function SettingsPage({
         </SettingRow>
         {trackerError && <p className="inline-error">{trackerError}</p>}
       </section>
-      <section className="settings-group">
-        <h2>Earned time</h2>
-        <div className="setting-row">
-          <span className="setting-icon">
-            <Icon name="focus" />
-          </span>
-          <div>
-            <strong>Work-to-leisure ratio {workRatio}:1</strong>
-            <p>
-              Synced across Android, Windows, and Chrome. Work earns leisure at
-              this ratio on every device.
-            </p>
-            <input
-              type="range"
-              min={1}
-              max={10}
-              step={1}
-              value={workRatio}
-              onChange={(e) => setWorkRatio(Number(e.target.value))}
-              aria-label="Work to leisure ratio"
-              style={{ width: "100%" }}
-            />
-          </div>
-          <span className="setting-value">{workRatio}:1</span>
-        </div>
-        <div className="setting-row">
-          <span className="setting-icon">
-            <Icon name="plus" />
-          </span>
-          <div>
-            <strong>Task completion bonus</strong>
-            <p>
-              Extra minutes per finished task in the manual log. Synced across
-              your devices.
-            </p>
-            <input
-              type="range"
-              min={0}
-              max={20}
-              step={1}
-              value={taskBonus}
-              onChange={(e) => setTaskBonus(Number(e.target.value))}
-              aria-label="Task completion bonus minutes"
-              style={{ width: "100%" }}
-            />
-          </div>
-          <span className="setting-value">+{taskBonus}m</span>
-        </div>
-      </section>
       <section className="settings-group strict-settings-group">
         <h2>Strict mode</h2>
         <div className="setting-row strict-commitment-row">
           <span className="setting-icon"><Icon name="lock" /></span>
           <div className="setting-copy">
             <strong>Strict commitment</strong>
-            <p>{strictActive && prefs.strictEndsAt ? `Active until ${new Date(prefs.strictEndsAt).toLocaleString()}. Windows uninstall is locked during this commitment.` : "Lock boundary settings and Windows uninstall for a duration. App access follows your existing rules."}</p>
+            <p>{strictActive && prefs.strictEndsAt ? `Active until ${new Date(prefs.strictEndsAt).toLocaleString()}. Windows uninstall is locked during this commitment.` : "Allow only stronger protection settings and lock Windows uninstall for a duration. App access follows your existing rules."}</p>
             <div className="strict-plan-fields">
               <label className="settings-field">
                 <span>Preset</span>
@@ -5317,93 +5307,8 @@ function SettingsPage({
         </div>
         <ApprovalUnlockPanel />
       </section>
-      {!DESKTOP_FROG_ENABLED ? (
-        <section className="settings-group">
-          <h2>Eat the Frog</h2>
-          <p className="frog-settings-note">Eat the Frog is temporarily disabled on desktop.</p>
-        </section>
-      ) : (
       <section className="settings-group">
-        <h2>Eat the Frog</h2>
-        <SettingRow
-          icon="lock"
-          title="Eat the Frog"
-          detail="Hard-lock every boundary app and website until today's frog is ticked off with enough focus tracked. Device-local, like Android."
-        >
-          <button
-            className={`switch ${frog?.state?.enabled ? "on" : ""}`}
-            role="switch"
-            aria-checked={Boolean(frog?.state?.enabled)}
-            aria-label="Toggle Eat the Frog"
-            onClick={() => frog?.actions?.setEnabled(!frog?.state?.enabled)}
-          >
-            <span />
-          </button>
-        </SettingRow>
-        {frog?.state?.enabled && (
-          <>
-            <div className="setting-row">
-              <span className="setting-icon">
-                <Icon name="clock" />
-              </span>
-              <div>
-                <strong>Focus minutes required</strong>
-                <p>
-                  Tracked focus on the selected frog ({FROG_UI_MIN_REQUIRED_MINUTES}–
-                  {FROG_UI_MAX_REQUIRED_MINUTES} min). The lock releases when the frog is
-                  ticked off and this much focus is tracked.
-                </p>
-                <input
-                  type="range"
-                  min={FROG_UI_MIN_REQUIRED_MINUTES}
-                  max={FROG_UI_MAX_REQUIRED_MINUTES}
-                  step={5}
-                  value={clampFrogMinutes(frog?.state?.requiredMinutes)}
-                  onChange={(e) => frog?.actions?.setRequiredMinutes(Number(e.target.value))}
-                  aria-label="Frog focus minutes required"
-                  style={{ width: "100%" }}
-                />
-              </div>
-              <span className="setting-value">
-                {clampFrogMinutes(frog?.state?.requiredMinutes)}m
-              </span>
-            </div>
-            <div className="setting-row">
-              <span className="setting-icon">
-                <Icon name="clock" />
-              </span>
-              <div>
-                <strong>Wake hour</strong>
-                <p>
-                  24-hour clock (5 = 05:00). The five-minute grace begins with your first
-                  device interaction at or after this time. Progress resets at the next one.
-                </p>
-                <input
-                  type="range"
-                  min={0}
-                  max={23}
-                  step={1}
-                  value={Math.min(23, Math.max(0, Math.trunc(frog?.state?.wakeHour) || 0))}
-                  onChange={(e) => frog?.actions?.setWakeHour(Number(e.target.value))}
-                  aria-label="Frog wake hour"
-                  style={{ width: "100%" }}
-                />
-              </div>
-              <span className="setting-value">{frogWakeLabel(frog?.state?.wakeHour)}</span>
-            </div>
-            <p className="frog-settings-note">
-              After your first interaction at or after {frogWakeLabel(frog?.state?.wakeHour)},
-              you get five minutes before boundary apps and websites lock. The lock then remains
-              until today's frog is ticked off and{" "}
-              {clampFrogMinutes(frog?.state?.requiredMinutes)} minutes of focus are tracked.
-              Progress resets at the next {frogWakeLabel(frog?.state?.wakeHour)}.
-            </p>
-          </>
-        )}
-      </section>
-      )}
-      <section className="settings-group">
-        <h2>Protection</h2>
+        <h2>Boundaries &amp; protection</h2>
         <SettingRow
           icon="lock"
           title="Lockdown mode"
@@ -5426,39 +5331,6 @@ function SettingsPage({
           >
             <span />
           </button>
-        </SettingRow>
-        <SettingRow
-          icon="sync"
-          title="Background auto-sync"
-          detail="Uploads screen time and device status every four hours while signed in, with immediate checks on sign-in, edits, and reconnect. Use Sync now for an immediate refresh."
-        >
-          <div className="setting-inline">
-            <span className="setting-value">{syncStatusText}</span>
-            <button
-              className="secondary-button"
-              onClick={onSyncNow}
-              disabled={syncing || !tauriAvailable()}
-            >
-              <Icon name="sync" /> {syncing ? "Syncing…" : "Sync Now"}
-            </button>
-          </div>
-        </SettingRow>
-        <SettingRow
-          icon="check"
-          title="TickTick"
-          detail="TickTick task verification runs in the Android app. Open TickTick on the web to review tasks, then log finished work here or with the focus timer."
-        >
-          <div className="setting-inline">
-            <span className="setting-value">Not connected on desktop</span>
-            <a
-              className="secondary-button"
-              href="https://ticktick.com/webapp"
-              target="_blank"
-              rel="noreferrer noopener"
-            >
-              Open TickTick
-            </a>
-          </div>
         </SettingRow>
       </section>
       <section className="settings-group">
@@ -5499,8 +5371,120 @@ function SettingsPage({
       <section className="danger-zone">
         <NukeButton />
       </section>
+      </>}
+      {section === "preferences" && <section className="settings-group">
+        <h2>Earned time</h2>
+        <div className="setting-row">
+          <span className="setting-icon"><Icon name="focus" /></span>
+          <div>
+            <strong>Work-to-leisure ratio {workRatio}:1</strong>
+            <p>Synced across Android, Windows, and Chrome. Work earns leisure at this ratio on every device.</p>
+            <input type="range" min={1} max={10} step={1} value={workRatio} onChange={(e) => setWorkRatio(Number(e.target.value))} aria-label="Work to leisure ratio" style={{ width: "100%" }} />
+          </div>
+          <span className="setting-value">{workRatio}:1</span>
+        </div>
+        <div className="setting-row">
+          <span className="setting-icon"><Icon name="plus" /></span>
+          <div>
+            <strong>Task completion bonus</strong>
+            <p>Extra minutes per finished task in the manual log. Synced across your devices.</p>
+            <input type="range" min={0} max={20} step={1} value={taskBonus} onChange={(e) => setTaskBonus(Number(e.target.value))} aria-label="Task completion bonus minutes" style={{ width: "100%" }} />
+          </div>
+          <span className="setting-value">+{taskBonus}m</span>
+        </div>
+      </section>}
+      {section === "routine" && (!DESKTOP_FROG_ENABLED ? (
+        <section className="settings-group">
+          <h2>Eat the Frog</h2>
+          <p className="frog-settings-note">Eat the Frog is temporarily disabled on desktop.</p>
+        </section>
+      ) : <section className="settings-group">
+        <h2>Eat the Frog</h2>
+        <SettingRow
+          icon="lock"
+          title="Eat the Frog"
+          detail="Hard-lock every boundary app and website until today's frog is ticked off with enough focus tracked. Device-local, like Android."
+        >
+          <button
+            className={`switch ${frog?.state?.enabled ? "on" : ""}`}
+            role="switch"
+            aria-checked={Boolean(frog?.state?.enabled)}
+            aria-label="Toggle Eat the Frog"
+            onClick={() => frog?.actions?.setEnabled(!frog?.state?.enabled)}
+          >
+            <span />
+          </button>
+        </SettingRow>
+        {frog?.state?.enabled && <>
+          <div className="setting-row">
+            <span className="setting-icon"><Icon name="clock" /></span>
+            <div>
+              <strong>Focus minutes required</strong>
+              <p>
+                Tracked focus on the selected frog ({FROG_UI_MIN_REQUIRED_MINUTES}–
+                {FROG_UI_MAX_REQUIRED_MINUTES} min). The lock releases when the frog is
+                ticked off and this much focus is tracked.
+              </p>
+              <input
+                type="range"
+                min={FROG_UI_MIN_REQUIRED_MINUTES}
+                max={FROG_UI_MAX_REQUIRED_MINUTES}
+                step={5}
+                value={clampFrogMinutes(frog?.state?.requiredMinutes)}
+                onChange={(e) => frog?.actions?.setRequiredMinutes(Number(e.target.value))}
+                aria-label="Frog focus minutes required"
+                style={{ width: "100%" }}
+              />
+            </div>
+            <span className="setting-value">{clampFrogMinutes(frog?.state?.requiredMinutes)}m</span>
+          </div>
+          <div className="setting-row">
+            <span className="setting-icon"><Icon name="clock" /></span>
+            <div>
+              <strong>Wake hour</strong>
+              <p>
+                24-hour clock (5 = 05:00). The five-minute grace begins with your first
+                device interaction at or after this time. Progress resets at the next one.
+              </p>
+              <input
+                type="range"
+                min={0}
+                max={23}
+                step={1}
+                value={Math.min(23, Math.max(0, Math.trunc(frog?.state?.wakeHour) || 0))}
+                onChange={(e) => frog?.actions?.setWakeHour(Number(e.target.value))}
+                aria-label="Frog wake hour"
+                style={{ width: "100%" }}
+              />
+            </div>
+            <span className="setting-value">{frogWakeLabel(frog?.state?.wakeHour)}</span>
+          </div>
+          <p className="frog-settings-note">
+            After your first interaction at or after {frogWakeLabel(frog?.state?.wakeHour)},
+            you get five minutes before boundary apps and websites lock. The lock then remains
+            until today's frog is ticked off and {clampFrogMinutes(frog?.state?.requiredMinutes)}
+            {" "}minutes of focus are tracked. Progress resets at the next {frogWakeLabel(frog?.state?.wakeHour)}.
+          </p>
+        </>}
+      </section>)}
+      {section === "connections" && <section className="settings-group">
+        <h2>Connections</h2>
+        <SettingRow icon="sync" title="Background auto-sync" detail="Uploads screen time and device status every four hours while signed in, with immediate checks on sign-in, edits, and reconnect. Use Sync now for an immediate refresh.">
+          <div className="setting-inline"><span className="setting-value">{syncStatusText}</span><button className="secondary-button" onClick={onSyncNow} disabled={syncing || !tauriAvailable()}><Icon name="sync" /> {syncing ? "Syncing…" : "Sync Now"}</button></div>
+        </SettingRow>
+        <SettingRow icon="check" title="TickTick" detail="TickTick task verification runs in the Android app. Open TickTick on the web to review tasks, then log finished work here or with the focus timer.">
+          <div className="setting-inline"><span className="setting-value">Not connected on desktop</span><a className="secondary-button" href="https://ticktick.com/webapp" target="_blank" rel="noreferrer noopener">Open TickTick</a></div>
+        </SettingRow>
+      </section>}
+      </>}
     </div>
   );
+}
+
+function SettingsDestination({ section, buttonRef, title, detail, onClick }: { section: string; buttonRef: (node: HTMLButtonElement | null) => void; title: string; detail: string; onClick: () => void }) {
+  return <button ref={buttonRef} data-settings-section={section} className="settings-destination" type="button" onClick={onClick}>
+    <span><strong>{title}</strong><small>{detail}</small></span><span className="settings-destination-arrow" aria-hidden="true">›</span>
+  </button>;
 }
 
 function ProtectionCheck({ title, detail, ok, value }: any) {
@@ -5539,6 +5523,7 @@ function AccountPage({
   syncError,
   syncWarning,
   signOutBlockedReason,
+  onBack,
 }: {
   devices: any[];
   lastSyncAt?: number;
@@ -5548,6 +5533,7 @@ function AccountPage({
   syncError?: string | null;
   syncWarning?: string | null;
   signOutBlockedReason?: string | null;
+  onBack?: () => void;
 }) {
   const auth = useFocusAuth();
   const user = auth.user;
@@ -5571,7 +5557,10 @@ function AccountPage({
       <header className="page-header">
         <div>
           <p className="eyebrow">FocusLock account</p>
-          <h1>Account</h1>
+          <div className="account-page-heading">
+            {onBack && <button className="settings-back" type="button" onClick={onBack} aria-label="Back to Settings"><span aria-hidden="true">‹</span> Settings</button>}
+            <h1>Account</h1>
+          </div>
         </div>
       </header>
       {auth.loading ? (

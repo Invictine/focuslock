@@ -41,6 +41,7 @@ import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -77,8 +78,19 @@ import java.util.Date
 import java.util.Locale
 import java.util.UUID
 
+enum class SettingsSection {
+    OVERVIEW,
+    CONNECTIONS,
+    ROUTINE,
+    PROTECTION,
+    PREFERENCES
+}
+
 @Composable
 fun SettingsScreen(
+    initialSection: SettingsSection = SettingsSection.OVERVIEW,
+    onOpenAccount: () -> Unit = {},
+    onNavigationStateChanged: (Boolean) -> Unit = {},
     highlightKind: PermissionKind? = null,
     onOpenDebug: () -> Unit = {},
     onReplayOnboarding: () -> Unit = {},
@@ -105,6 +117,21 @@ fun SettingsScreen(
     )
     var showHomeStyleDialog by remember { mutableStateOf(false) }
     var showFrogEssentialApps by rememberSaveable { mutableStateOf(false) }
+
+    var showAdvancedProviderOptions by rememberSaveable { mutableStateOf(false) }
+    var selectedSection by rememberSaveable { mutableStateOf(initialSection) }
+    var lastRequestedSection by rememberSaveable { mutableStateOf(initialSection) }
+
+    // Only an explicit parent destination change resets this local navigation state.
+    LaunchedEffect(initialSection) {
+        if (initialSection != lastRequestedSection) {
+            selectedSection = initialSection
+            lastRequestedSection = initialSection
+        }
+    }
+    LaunchedEffect(highlightKind) {
+        if (highlightKind != null) selectedSection = SettingsSection.PROTECTION
+    }
 
     var showOAuthCredentialsDialog by remember { mutableStateOf(false) }
     var showTokenField by remember { mutableStateOf(false) }
@@ -198,7 +225,7 @@ fun SettingsScreen(
                 context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
                 showOAuthCredentialsDialog = false
                 showManualCallback = true
-                syncMessage = "Browser opened. Approve TickTick — FocusLock catches the redirect automatically, or paste the link below."
+                syncMessage = "Browser opened. Approve TickTick — FocusLock catches the redirect automatically, or open Advanced provider options to paste the link."
             } catch (_: android.content.ActivityNotFoundException) {
                 syncMessage = "Install a browser to connect to TickTick."
             } finally {
@@ -322,8 +349,10 @@ fun SettingsScreen(
         else -> null
     }
     val effectiveHighlight = highlightKind ?: resolvedHighlight
-    LaunchedEffect(effectiveHighlight) {
-        if (effectiveHighlight == PermissionKind.BATTERY || effectiveHighlight == PermissionKind.DEVICE_ADMIN) {
+    LaunchedEffect(effectiveHighlight, selectedSection) {
+        scrollState.scrollTo(0)
+        if (selectedSection == SettingsSection.PROTECTION &&
+            (effectiveHighlight == PermissionKind.BATTERY || effectiveHighlight == PermissionKind.DEVICE_ADMIN)) {
             scrollState.animateScrollTo(scrollState.maxValue)
         }
     }
@@ -377,6 +406,10 @@ fun SettingsScreen(
         }
     }
 
+    SideEffect { onNavigationStateChanged(selectedSection != SettingsSection.OVERVIEW || showFrogEssentialApps) }
+    BackHandler(enabled = selectedSection != SettingsSection.OVERVIEW && !showFrogEssentialApps) {
+        selectedSection = SettingsSection.OVERVIEW
+    }
     BackHandler(enabled = showFrogEssentialApps) { showFrogEssentialApps = false }
     if (showFrogEssentialApps) {
         FrogEssentialAppsScreen(onBack = { showFrogEssentialApps = false })
@@ -389,10 +422,67 @@ fun SettingsScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
             .verticalScroll(scrollState)
-            .padding(horizontal = 20.dp)
+            .padding(horizontal = 16.dp)
             .padding(top = 16.dp, bottom = 32.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        if (selectedSection == SettingsSection.OVERVIEW) {
+            Text(
+                text = "Settings",
+                style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.SemiBold),
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            SettingsDestinationRow(
+                title = "Account & devices",
+                subtitle = "Manage your account and signed-in devices",
+                onClick = { onOpenAccount() }
+            )
+            SettingsDestinationRow(
+                title = "Connections",
+                subtitle = if (isTickTickConnected) "TickTick connected · $lastSyncText" else "Connect TickTick and manage sync",
+                onClick = { selectedSection = SettingsSection.CONNECTIONS }
+            )
+            SettingsDestinationRow(
+                title = "Daily priority routine",
+                subtitle = "Eat the Frog settings and essential apps",
+                onClick = { selectedSection = SettingsSection.ROUTINE }
+            )
+            val permissionStates = listOf(isAccessibilityOn, isUsageOn, isOverlayOn, isNotifOn, isBatteryIgnored, isDeviceAdminOn)
+            val permissionSummary = if (permissionStates.all { it != null }) {
+                "${permissionStates.count { it == true }} of ${permissionStates.size} permissions granted"
+            } else "Checking permissions"
+            SettingsDestinationRow(
+                title = "Permissions & protection",
+                subtitle = permissionSummary,
+                onClick = { selectedSection = SettingsSection.PROTECTION }
+            )
+            SettingsDestinationRow(
+                title = "Preferences",
+                subtitle = "Goals, conversion, reminders, and backups",
+                onClick = { selectedSection = SettingsSection.PREFERENCES }
+            )
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = { selectedSection = SettingsSection.OVERVIEW }) {
+                    Text("‹  Settings")
+                }
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = when (selectedSection) {
+                        SettingsSection.OVERVIEW -> "Settings"
+                        SettingsSection.CONNECTIONS -> "Connections"
+                        SettingsSection.ROUTINE -> "Daily priority routine"
+                        SettingsSection.PROTECTION -> "Permissions & protection"
+                        SettingsSection.PREFERENCES -> "Preferences"
+                    },
+                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+        }
+
+        if (selectedSection == SettingsSection.PREFERENCES) {
         Card(
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
             shape = MaterialTheme.shapes.large,
@@ -421,64 +511,11 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(
-                modifier = Modifier.padding(20.dp),
+                modifier = Modifier.padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
                 RatioSliderCard(authViewModel)
 
-                HorizontalDivider(color = MaterialTheme.colorScheme.surfaceContainerHighest)
-
-                // Boundaries Lock
-                if (boundariesLock) {
-                    Card(
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
-                        ),
-                        shape = MaterialTheme.shapes.medium,
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                Icons.Default.Lock,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                "Boundaries list is locked — removals disabled",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            "Boundaries Lock",
-                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            "When ON, blocked apps/websites can't be removed from Boundaries",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = boundariesLock,
-                        onCheckedChange = { checked ->
-                            scope.launch { settings.setBoundariesLock(checked) }
-                        }
-                    )
-                }
             }
         }
 
@@ -495,7 +532,7 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(
-                modifier = Modifier.padding(20.dp),
+                modifier = Modifier.padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -550,9 +587,15 @@ fun SettingsScreen(
             }
         }
 
+        }
+
+        if (selectedSection == SettingsSection.ROUTINE) {
         // 2c. Eat the Frog Card — hard-lock toggle, required focus minutes, wake hour.
         FrogSettingsCard(onOpenEssentialApps = { showFrogEssentialApps = true })
 
+        }
+
+        if (selectedSection == SettingsSection.PREFERENCES) {
         // 3. Block Schedules Card — owns its flow, editor state and dialogs.
         BlockSchedulesCard()
 
@@ -562,6 +605,9 @@ fun SettingsScreen(
         // 5. Daily Reminder Card — schedules a WorkManager notification.
         DailyReminderCard()
 
+        }
+
+        if (selectedSection == SettingsSection.CONNECTIONS) {
         // 6. TickTick Integration Card — simplified: token-first, OAuth advanced
         Card(
             colors = CardDefaults.cardColors(
@@ -571,7 +617,7 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(
-                modifier = Modifier.padding(20.dp),
+                modifier = Modifier.padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -697,7 +743,10 @@ fun SettingsScreen(
                     }
                     // TickTick only allows http(s) redirects, so the browser lands on a
                     // loopback address that can't load on-device. Paste it back here.
-                    if (showManualCallback) {
+                    TextButton(onClick = { showAdvancedProviderOptions = !showAdvancedProviderOptions }) {
+                        Text(if (showAdvancedProviderOptions) "Hide advanced provider options" else "Advanced provider options")
+                    }
+                    if (showAdvancedProviderOptions && showManualCallback) {
                         Text(
                             "After approving in the browser you'll land on http://127.0.0.1:8080/?code=… which can't load on the phone — copy that full address and paste it here.",
                             style = MaterialTheme.typography.bodySmall,
@@ -727,12 +776,18 @@ fun SettingsScreen(
                     }
                     if (!canOAuth) {
                         Text(
-                            "Login not configured on this build — paste a personal token below instead.",
+                            "TickTick login is not configured on this build. Open Advanced provider options to connect.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error
                         )
                     }
 
+                    if (showAdvancedProviderOptions) {
+                        if (!showManualCallback) {
+                            TextButton(onClick = { showManualCallback = true }) {
+                                Text("Need help finishing connection?")
+                            }
+                        }
                     if (!showTokenField) {
                         TextButton(onClick = { showTokenField = true }) {
                             Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(14.dp))
@@ -805,6 +860,8 @@ fun SettingsScreen(
                         }
                     }
 
+                    }
+
                     syncMessage?.let {
                         Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
@@ -842,6 +899,69 @@ fun SettingsScreen(
             }
         }
 
+        }
+
+        if (selectedSection == SettingsSection.PROTECTION) {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+            shape = MaterialTheme.shapes.large,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                // Boundaries Lock
+                if (boundariesLock) {
+                    Card(
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+                        ),
+                        shape = MaterialTheme.shapes.medium,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Default.Lock,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                "Boundaries list is locked — removals disabled",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            "Boundaries Lock",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            "When ON, blocked apps/websites can't be removed from Boundaries",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = boundariesLock,
+                        onCheckedChange = { checked ->
+                            scope.launch { settings.setBoundariesLock(checked) }
+                        }
+                    )
+                }
+            }
+        }
+
         // 5. System Permissions Checklist
         Card(
             colors = CardDefaults.cardColors(
@@ -851,7 +971,7 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(
-                modifier = Modifier.padding(20.dp),
+                modifier = Modifier.padding(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -968,6 +1088,9 @@ fun SettingsScreen(
 
         RemovalReminderSettings()
 
+        }
+
+        if (selectedSection == SettingsSection.PREFERENCES) {
         // Debug entry (totals, records, sync state)
         Card(
             colors = CardDefaults.cardColors(
@@ -980,7 +1103,7 @@ fun SettingsScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable(onClick = onOpenDebug)
-                    .padding(20.dp),
+                    .padding(16.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -1002,6 +1125,7 @@ fun SettingsScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+        }
         }
     }
         SnackbarHost(
@@ -1348,7 +1472,7 @@ private fun DailyGoalsCard() {
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
-            modifier = Modifier.padding(20.dp),
+            modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1493,7 +1617,7 @@ private fun BlockSchedulesCard() {
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
-            modifier = Modifier.padding(20.dp),
+            modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1992,7 +2116,7 @@ private fun ConfigBackupCard(snackbarHostState: SnackbarHostState) {
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
-            modifier = Modifier.padding(20.dp),
+            modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2100,7 +2224,7 @@ private fun DailyReminderCard() {
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
-            modifier = Modifier.padding(20.dp),
+            modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2230,7 +2354,7 @@ private fun FrogSettingsCard(onOpenEssentialApps: () -> Unit) {
         modifier = Modifier.fillMaxWidth()
     ) {
         Column(
-            modifier = Modifier.padding(20.dp),
+            modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2348,6 +2472,47 @@ private fun FrogSettingsCard(onOpenEssentialApps: () -> Unit) {
                 }
                 Text("›", style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+        }
+    }
+}
+
+@Composable
+private fun SettingsDestinationRow(
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(role = Role.Button, onClick = onClick),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        shape = MaterialTheme.shapes.large
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Text(
+                text = "›",
+                style = MaterialTheme.typography.headlineSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }

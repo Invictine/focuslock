@@ -600,6 +600,48 @@ button {
   margin: 0 0 6px;
   font-size: 17px;
 }
+.settings-destinations { display: grid; gap: 10px; }
+.settings-destination {
+  display: flex;
+  width: 100%;
+  min-height: 74px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 15px 18px;
+  border: 1px solid var(--fl-outline-variant);
+  border-radius: var(--fl-radius-large);
+  background: var(--fl-surface-container);
+  color: var(--fl-on-surface);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, transform 120ms ease;
+}
+.settings-destination:hover { background: var(--fl-surface-container-high); border-color: var(--fl-outline); }
+.settings-destination:active { transform: translateY(1px); }
+.settings-destination:focus-visible, .settings-back:focus-visible { outline: 2px solid var(--fl-primary); outline-offset: 3px; }
+.settings-destination > span:first-child { display: grid; gap: 4px; min-width: 0; }
+.settings-destination strong { font-size: 15px; }
+.settings-destination small { color: var(--fl-on-surface-variant); font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
+.settings-destination-arrow { color: var(--fl-on-surface-variant); font-size: 25px; line-height: 1; }
+.settings-detail-heading, .account-page-heading { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.settings-back {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px 7px 6px;
+  border: 0;
+  border-radius: var(--fl-radius-small);
+  background: transparent;
+  color: var(--fl-primary);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+.settings-back:hover { background: var(--fl-surface-container); }
+.settings-back > span { font-size: 25px; line-height: 0.8; }
+.settings-detail-heading h1, .account-page-heading h1 { margin: 0; }
 .setting-row,
 .device-account-row {
   display: grid;
@@ -813,6 +855,10 @@ input[type="range"] {
   }
 }
 @media (max-width: 900px) {
+  .settings-destination { min-height: 68px; padding: 13px 14px; }
+  .settings-destination small { max-width: 38ch; }
+  .settings-detail-heading { align-items: flex-start; gap: 8px; }
+  .settings-detail-heading h1 { flex-basis: 100%; }
   .app-frame {
     grid-template-columns: 1fr;
   }

@@ -76,6 +76,7 @@ class ProductOnboardingIntegrationTest {
             compose.onNodeWithText("FocusLock guide").assertDoesNotExist()
 
             compose.onNodeWithContentDescription("Settings").performClick()
+            compose.onNodeWithText("Preferences").performClick()
             compose.onNodeWithText("Resume guide").performScrollTo().performClick()
             compose.onNodeWithText("FocusLock guide").assertIsDisplayed()
             assertCurrentPage(2)
