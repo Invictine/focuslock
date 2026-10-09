@@ -14,6 +14,8 @@
 }
 .blocker-card {
   width: min(560px, 100%);
+  max-height: calc(100dvh - 48px);
+  overflow-y: auto;
   display: grid;
   justify-items: center;
   gap: 14px;

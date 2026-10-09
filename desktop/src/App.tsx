@@ -259,6 +259,20 @@ function Icon({
 function fmt(seconds: number) {
   return formatTimeDuration(seconds);
 }
+function formatSyncAge(ageMs: number) {
+  const ageMinutes = Math.max(0, Math.floor(ageMs / 60_000));
+  if (ageMinutes < 1) return "Just now";
+  if (ageMinutes < 60) return `${ageMinutes} min ago`;
+  const ageHours = Math.floor(ageMinutes / 60);
+  if (ageHours < 24) {
+    const remainingMinutes = ageMinutes % 60;
+    return remainingMinutes > 0
+      ? `${ageHours} hr ${remainingMinutes} min ago`
+      : `${ageHours} hr ago`;
+  }
+  const ageDays = Math.floor(ageHours / 24);
+  return `${ageDays} day${ageDays === 1 ? "" : "s"} ago`;
+}
 function formatBank(seconds: number) {
   const total = Math.max(0, Math.floor(seconds || 0));
   return `${Math.floor(total / 60)}m ${String(total % 60).padStart(2, "0")}s`;
@@ -1609,7 +1623,7 @@ function DesktopApp() {
             deviceId,
             name: snap.device.name,
             platform: "windows",
-            appVersion: "0.6.17",
+            appVersion: "0.6.18",
             trackingStatus: snap.running ? "active" : "paused",
             statusDetail: trackerErrorRef.current || undefined,
             lastSeen: now,
@@ -5024,7 +5038,7 @@ function SettingsPage({
         ? "Waiting for first upload"
         : syncFresh
           ? "Up to date"
-          : `Last upload ${Math.round(syncAgeMs / 1000)}s ago`;
+          : `Last upload ${formatSyncAge(syncAgeMs)}`;
   const trackerIssue = status?.lastError || trackerError || null;
   async function toggle() {
     if (!tauriAvailable()) return;
@@ -5126,6 +5140,10 @@ function SettingsPage({
         >
           <button
             className={`switch ${running ? "on" : ""}`}
+            type="button"
+            role="switch"
+            aria-label="App activity tracking"
+            aria-checked={running}
             onClick={toggle}
             disabled={busy || !tauriAvailable()}
           >
@@ -5137,38 +5155,6 @@ function SettingsPage({
             {trackerNotice}
           </p>
         )}
-        <div className="setting-row">
-          <span className="setting-icon"><Icon name="clock" /></span>
-          <div>
-            <strong>Strict commitment</strong>
-            <p>{strictActive && prefs.strictEndsAt ? `Active until ${new Date(prefs.strictEndsAt).toLocaleString()}. Windows uninstall is locked during this commitment.` : "Lock boundary settings and Windows uninstall for a duration. App access follows your existing rules."}</p>
-            <div className="setting-inline">
-              <select value={prefs.strictPreset || "custom"} onChange={(e) => void setStrictPreset(e.target.value)} aria-label="Strict mode preset">
-                <option value="custom">Custom</option>
-                <option value="deep_work">Deep work · 2h</option>
-                <option value="exam">Exam · 4h</option>
-                <option value="sleep">Sleep · 8h</option>
-              </select>
-              <select value={strictPlan} onChange={(e) => setStrictPlan(e.target.value as "duration" | "until")} aria-label="Strict mode timing">
-                <option value="duration">For a duration</option>
-                <option value="until">Until a time</option>
-              </select>
-              {strictPlan === "duration" ? (
-                <select value={strictHours} onChange={(e) => setStrictHours(Number(e.target.value))} aria-label="Strict mode duration">
-                  {STRICT_HOUR_OPTIONS.map((h) => <option key={h} value={h}>{strictDurationLabel(h)}</option>)}
-                </select>
-              ) : (
-                <input type="datetime-local" value={strictUntilInput} onChange={(e) => setStrictUntil(e.target.value)} aria-label="Strict mode end time" />
-              )}
-            </div>
-            <button onClick={() => void (strictActive ? updateStrictPlan(strictPlan, strictPlan === "until" ? strictUntil : strictHours) : setStrictMode(true))}
-              disabled={prefsBusy || (strictPlan === "until" && !strictUntil)}>
-              {strictActive ? "Extend commitment" : "Start commitment"}
-            </button>
-            {strictError && <p role="alert">{strictError}</p>}
-          </div>
-        </div>
-        <ApprovalUnlockPanel />
         <SettingRow
           icon="globe"
           title="Website domains"
@@ -5187,7 +5173,7 @@ function SettingsPage({
               ? "Protection is paused until you sign in. You can turn it off here."
               : "Sign in to enable optional browser extension protection."}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div className="setting-inline">
             <span className="setting-value" role="status">
               {browserProtectionStatusLabel(status, Boolean(auth.user))}
             </span>
@@ -5281,19 +5267,55 @@ function SettingsPage({
           </div>
           <span className="setting-value">+{taskBonus}m</span>
         </div>
-        <SettingRow
-          icon="lock"
-          title="Strict mode"
-          detail={strictActive ? "You can add blocked boundaries; existing protections and other settings stay locked until the selected end time." : "Choose a duration above to lock boundary settings."}
-        >
-          <button
-            className={`switch ${prefs.strictMode ? "on" : ""}`}
-            onClick={() => setStrictMode(!prefs.strictMode)}
-            disabled={prefsBusy || strictActive}
-          >
-            <span />
-          </button>
-        </SettingRow>
+      </section>
+      <section className="settings-group strict-settings-group">
+        <h2>Strict mode</h2>
+        <div className="setting-row strict-commitment-row">
+          <span className="setting-icon"><Icon name="lock" /></span>
+          <div className="setting-copy">
+            <strong>Strict commitment</strong>
+            <p>{strictActive && prefs.strictEndsAt ? `Active until ${new Date(prefs.strictEndsAt).toLocaleString()}. Windows uninstall is locked during this commitment.` : "Lock boundary settings and Windows uninstall for a duration. App access follows your existing rules."}</p>
+            <div className="strict-plan-fields">
+              <label className="settings-field">
+                <span>Preset</span>
+                <select value={prefs.strictPreset || "custom"} onChange={(e) => void setStrictPreset(e.target.value)} aria-label="Strict mode preset">
+                  <option value="custom">Custom</option>
+                  <option value="deep_work">Deep work · 2h</option>
+                  <option value="exam">Exam · 4h</option>
+                  <option value="sleep">Sleep · 8h</option>
+                </select>
+              </label>
+              <label className="settings-field">
+                <span>End timing</span>
+                <select value={strictPlan} onChange={(e) => setStrictPlan(e.target.value as "duration" | "until")} aria-label="Strict mode timing">
+                  <option value="duration">For a duration</option>
+                  <option value="until">Until a time</option>
+                </select>
+              </label>
+              {strictPlan === "duration" ? (
+                <label className="settings-field">
+                  <span>Duration</span>
+                  <select value={strictHours} onChange={(e) => setStrictHours(Number(e.target.value))} aria-label="Strict mode duration">
+                    {STRICT_HOUR_OPTIONS.map((h) => <option key={h} value={h}>{strictDurationLabel(h)}</option>)}
+                  </select>
+                </label>
+              ) : (
+                <label className="settings-field">
+                  <span>End time</span>
+                  <input type="datetime-local" value={strictUntilInput} onChange={(e) => setStrictUntil(e.target.value)} aria-label="Strict mode end time" />
+                </label>
+              )}
+            </div>
+            <div className="strict-plan-actions">
+              <button className="primary-button" type="button" onClick={() => void (strictActive ? updateStrictPlan(strictPlan, strictPlan === "until" ? strictUntil : strictHours) : setStrictMode(true))}
+                disabled={prefsBusy || (strictPlan === "until" && !strictUntil)}>
+                {strictActive ? "Extend commitment" : "Start commitment"}
+              </button>
+              {strictError && <p className="inline-error" role="alert">{strictError}</p>}
+            </div>
+          </div>
+        </div>
+        <ApprovalUnlockPanel />
       </section>
       {!DESKTOP_FROG_ENABLED ? (
         <section className="settings-group">
@@ -5384,7 +5406,7 @@ function SettingsPage({
         <h2>Protection</h2>
         <SettingRow
           icon="lock"
-          title="Lockdown Mode"
+          title="Lockdown mode"
           detail="Android-only 24-hour hard lock with no unlocks. Windows has no equivalent lock — use the Nuke below to reset every device."
         >
           <span className="setting-value">Android only</span>
@@ -5396,8 +5418,11 @@ function SettingsPage({
         >
           <button
             className={`switch ${boundariesLock ? "on" : ""}`}
+            type="button"
+            role="switch"
+            aria-checked={Boolean(boundariesLock)}
             onClick={() => setBoundariesLock(!boundariesLock)}
-            aria-label="Toggle Boundaries Lock"
+            aria-label="Boundaries lock"
           >
             <span />
           </button>
@@ -5405,7 +5430,7 @@ function SettingsPage({
         <SettingRow
           icon="sync"
           title="Background auto-sync"
-              detail="Uploads screen time and device status every four hours while signed in, with immediate checks on sign-in, edits, and reconnect. Use Sync Now for an immediate refresh."
+          detail="Uploads screen time and device status every four hours while signed in, with immediate checks on sign-in, edits, and reconnect. Use Sync now for an immediate refresh."
         >
           <div className="setting-inline">
             <span className="setting-value">{syncStatusText}</span>
@@ -5430,7 +5455,6 @@ function SettingsPage({
               href="https://ticktick.com/webapp"
               target="_blank"
               rel="noreferrer noopener"
-              onClick={() => window.open("https://ticktick.com/webapp", "_blank")}
             >
               Open TickTick
             </a>
@@ -5455,7 +5479,7 @@ function SettingsPage({
           title="Account sync"
           detail="Device status and usage uploads reach your FocusLock account."
           ok={Boolean(auth.user) && syncFresh}
-          value={!auth.user ? "Signed out" : syncFresh ? "Syncing" : "Waiting"}
+          value={!auth.user ? "Signed out" : syncing ? "Syncing" : syncFresh ? "Up to date" : "Waiting"}
         />
         <ProtectionCheck
           title="Idle timeout"
@@ -5497,11 +5521,11 @@ function SettingRow({ icon, title, detail, children }: any) {
       <span className="setting-icon">
         <Icon name={icon} />
       </span>
-      <div>
+      <div className="setting-copy">
         <strong>{title}</strong>
         <p>{detail}</p>
       </div>
-      {children}
+      <div className="setting-control">{children}</div>
     </div>
   );
 }
@@ -5540,7 +5564,7 @@ function AccountPage({
         ? "Waiting for first upload"
         : syncFresh
           ? "Up to date"
-          : `Last upload ${Math.round(syncAgeMs / 1000)}s ago`;
+          : `Last upload ${formatSyncAge(syncAgeMs)}`;
 
   return (
     <div className="page narrow">
@@ -5576,7 +5600,7 @@ function AccountPage({
               <Icon name="check" /> Signed in
             </span>
           </section>
-          <section className="settings-group">
+          <section className="settings-group account-cloud">
             <div className="account-sync-row">
               <div>
                 <p className="section-label">Cloud status</p>
@@ -5632,10 +5656,12 @@ function AccountPage({
               />
             )}
           </section>
-          <button className="secondary-button danger-text" onClick={auth.signOut} disabled={Boolean(signOutBlockedReason)} aria-describedby={signOutBlockedReason ? "sign-out-protection" : undefined}>
-            <Icon name="lock" /> Sign Out
-          </button>
-          {signOutBlockedReason && <p id="sign-out-protection" className="field-help">{signOutBlockedReason}</p>}
+          <section className="account-actions">
+            <button className="secondary-button danger-text" onClick={auth.signOut} disabled={Boolean(signOutBlockedReason)} aria-describedby={signOutBlockedReason ? "sign-out-protection" : undefined}>
+              <Icon name="lock" /> Sign out
+            </button>
+            {signOutBlockedReason && <p id="sign-out-protection" className="field-help">{signOutBlockedReason}</p>}
+          </section>
         </>
       ) : (
         <>

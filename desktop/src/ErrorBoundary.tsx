@@ -26,12 +26,12 @@ export class ErrorBoundary extends React.Component<Props, State> {
           <section className="bootstrap-card" aria-labelledby="crash-title">
             <p className="bootstrap-eyebrow">Connection problem</p>
             <h1 id="crash-title">FocusLock hit an unexpected error</h1>
-            <pre style={{ whiteSpace: "pre-wrap", fontSize: 12, margin: "12px 0" }}>{message}</pre>
+            <pre className="bootstrap-error-detail">{message}</pre>
             <p className="bootstrap-note">If this persists, sign out and back in from the account menu.</p>
             <button
               type="button"
               onClick={() => location.reload()}
-              style={{ marginTop: 12, padding: "8px 16px", cursor: "pointer" }}
+              className="bootstrap-retry"
             >
               Retry
             </button>

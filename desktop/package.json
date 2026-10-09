@@ -1,7 +1,7 @@
 {
   "name": "focuslock-desktop",
   "private": true,
-  "version": "0.6.17",
+  "version": "0.6.18",
   "type": "module",
   "scripts": {
     "predev": "node ../scripts/generate-theme.mjs --check",

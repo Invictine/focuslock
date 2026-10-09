@@ -17,6 +17,12 @@ The extension repair notice is 360×220 and moves by dragging its header. Native
 
 These changes concern FocusLock's host and its browser bridge. Shared `windows/void/` launcher source is unchanged, so standalone Void has no equivalent integration to backport.
 
+## Desktop layout review
+
+All five pages share page gutters and card spacing. Narrow windows use a single row of five navigation tabs; settings actions stack beneath their descriptions, and dialogs scroll within the available height. Strict mode has a dedicated section with labelled preset, timing, and duration/end-time fields and one Start/Extend action. These React host UI changes do not alter shared `windows/void/` source or standalone Void flows.
+
+Run `node scripts/verify-desktop-ui.mjs` from the repository root for isolated screen/dialog layout checks and screenshots in `build/ui-verification/`. The fixtures exercise the real React components without account writes or native blocking. They do not verify live sign-in, cross-device sync, or native launcher behavior.
+
 ## Prereqs
 
 - Node 20+, npm 10+

@@ -18,7 +18,8 @@ body {
   font-size: 14px;
 }
 button,
-input {
+input,
+select {
   font: inherit;
 }
 button {
@@ -602,7 +603,7 @@ button {
 .setting-row,
 .device-account-row {
   display: grid;
-  grid-template-columns: 36px 1fr auto;
+  grid-template-columns: 36px minmax(0, 1fr) auto;
   align-items: center;
   gap: 11px;
   padding: 13px 0;
@@ -833,7 +834,7 @@ input[type="range"] {
   }
   .rail nav {
     width: 100%;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(5, minmax(0, 1fr));
   }
   .nav-button {
     display: grid;
@@ -1284,6 +1285,8 @@ input[type="range"] {
 }
 .boundary-dialog {
   width: min(440px, 100%);
+  max-height: calc(100dvh - 40px);
+  overflow-y: auto;
   display: grid;
   gap: 12px;
   padding: 22px;
@@ -1926,11 +1929,11 @@ body {
   line-height: 1.45;
 }
 .app-frame {
-  grid-template-columns: 236px minmax(0, 1fr);
+  grid-template-columns: 218px minmax(0, 1fr);
 }
 .rail {
-  gap: 32px;
-  padding: 28px 18px 22px;
+  gap: 28px;
+  padding: 24px 14px 20px;
 }
 .brand {
   padding: 0 12px;
@@ -1948,20 +1951,20 @@ body {
 }
 .page {
   width: min(100%, 1160px);
-  padding: 48px clamp(28px, 5vw, 72px) 88px;
+  padding: 32px clamp(24px, 3.2vw, 48px) 56px;
 }
 .page.narrow {
   max-width: 980px;
+  margin-inline: auto;
 }
 .page-header {
-  margin-bottom: 34px;
+  margin-bottom: 24px;
 }
 .page-header h1 {
   margin-top: 8px;
 }
 .focus-overview {
-  margin-top: 0;
-  padding: 32px;
+  padding: 24px;
 }
 .rings-panel {
   gap: 32px;
@@ -1974,15 +1977,15 @@ body {
   margin-top: 12px;
 }
 .hero-balance {
-  gap: 34px;
-  margin-top: 26px;
-  padding: 34px;
+  gap: 24px;
+  margin-top: 20px;
+  padding: 24px;
 }
 .device-summary,
 .content-section,
 .settings-group {
-  margin-top: 26px;
-  padding: 28px;
+  margin-top: 20px;
+  padding: 24px;
 }
 .stats-row {
   gap: 14px;
@@ -2006,7 +2009,7 @@ body {
   padding: 14px 16px;
 }
 .settings-group {
-  margin-bottom: 22px;
+  margin-bottom: 20px;
 }
 .setting-row,
 .device-account-row {
@@ -2019,13 +2022,146 @@ body {
   margin-top: 22px;
 }
 
+/* A shared reading and control layout for every settings section. */
+.setting-row > div,
+.device-account-row > div {
+  min-width: 0;
+}
+.setting-row p,
+.device-account-row p {
+  margin-top: 3px;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.setting-control {
+  display: flex;
+  justify-content: flex-end;
+  max-width: 220px;
+}
+.setting-row input[type="range"] {
+  display: block;
+  margin: 12px 0 2px;
+  accent-color: var(--fl-primary);
+}
+.setting-value {
+  line-height: 1.5;
+}
+.strict-commitment-row {
+  grid-template-columns: 36px minmax(0, 1fr);
+  align-items: start;
+  border-bottom: 0;
+}
+.strict-plan-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 18px;
+}
+.settings-field {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+}
+.settings-field > span {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fl-on-surface-variant);
+}
+.settings-field :is(input, select) {
+  width: 100%;
+  min-width: 0;
+  min-height: 42px;
+  padding: 9px 10px;
+  border: 1px solid var(--fl-outline-variant);
+  border-radius: var(--fl-radius-small);
+  background: var(--fl-surface-container-lowest);
+  color: var(--fl-on-surface);
+}
+.strict-plan-actions {
+  display: grid;
+  justify-items: start;
+  gap: 12px;
+  margin-top: 16px;
+}
+.strict-plan-actions .inline-error {
+  margin: 0;
+  color: var(--fl-on-error-container);
+}
+.approval-unlock-panel {
+  margin: 12px 0 0;
+  padding: 18px;
+}
+.approval-unlock-panel .settings-card-copy,
+.approval-unlock-panel .field-help {
+  font-size: 13px;
+}
+.account-cloud {
+  padding: 20px 24px;
+}
+.account-note {
+  padding: 20px 24px;
+}
+.account-note p,
+.account-identity p {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.account-actions {
+  display: grid;
+  justify-items: start;
+  gap: 12px;
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--fl-outline-variant);
+}
+.account-actions .field-help {
+  margin: 0;
+  max-width: 65ch;
+  color: var(--fl-on-surface-variant);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.boundary-row,
+.boundary-row.selecting {
+  display: flex;
+}
+.boundary-row > div {
+  min-width: 0;
+  flex: 1;
+}
+.boundary-row :is(strong, p) {
+  overflow-wrap: anywhere;
+}
+.boundary-row > :is(.letter-icon, button, .permanent-badge) {
+  flex: none;
+}
+.section-heading {
+  flex-wrap: wrap;
+}
+.dialog-actions {
+  flex-wrap: wrap;
+  padding-top: 4px;
+}
+.boundary-dialog :is(input, select):focus-visible,
+.settings-field :is(input, select):focus-visible {
+  outline: 2px solid var(--fl-primary);
+  outline-offset: 3px;
+}
+
 /* Focus is an action-led screen: expose the timer and manual log before the
    heavier analytics panels. The explicit order also keeps keyboard and
    screen-reader traversal aligned with the visual hierarchy. */
 .focus-page {
   display: flex;
   flex-direction: column;
+  gap: 20px;
 }
+.focus-page > :is(section, .frog-card, .protection-warning, .scroll-bank-caption) {
+  margin-block: 0;
+}
+.focus-page > .page-header { margin-bottom: 4px; }
 .focus-page > .page-header { order: 0; }
 .focus-page > .protection-warning { order: 1; }
 .focus-page > .hero-balance { order: 2; }
@@ -2066,6 +2202,17 @@ body {
   .app-frame {
     grid-template-columns: 1fr;
   }
+  .rail {
+    gap: 0;
+    padding: 7px 8px;
+  }
+  .rail .nav-button {
+    min-height: 52px;
+    padding: 6px 4px;
+  }
+  .rail .rail-avatar {
+    display: none;
+  }
   .page {
     padding: 34px 22px 104px;
   }
@@ -2083,6 +2230,59 @@ body {
   }
   .page-header {
     margin-bottom: 24px;
+  }
+  .setting-row,
+  .device-account-row {
+    grid-template-columns: 36px minmax(0, 1fr);
+    align-items: start;
+    row-gap: 12px;
+  }
+  .setting-row > :last-child:not(.setting-copy),
+  .device-account-row > .status-badge {
+    grid-column: 2;
+    justify-self: start;
+    margin: 0;
+  }
+  .setting-control {
+    justify-content: flex-start;
+    max-width: 100%;
+  }
+  .setting-inline {
+    justify-content: flex-start;
+  }
+  .strict-plan-fields {
+    grid-template-columns: 1fr;
+  }
+  .strict-plan-actions {
+    justify-items: stretch;
+  }
+  .account-hero {
+    display: grid;
+    grid-template-columns: 52px minmax(0, 1fr);
+  }
+  .account-hero > .priority-badge {
+    grid-column: 2;
+    justify-self: start;
+  }
+  .account-sync-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .account-sync-row > button {
+    width: 100%;
+  }
+  .boundary-dialog-backdrop {
+    padding: 12px;
+  }
+  .boundary-dialog {
+    padding: 18px;
+    max-height: calc(100dvh - 24px);
+  }
+  .key-entry {
+    flex-wrap: wrap;
+  }
+  .key-entry input {
+    flex-basis: calc(100% - 70px);
   }
   .focus-overview,
   .hero-balance,
