@@ -216,7 +216,7 @@ export function DesktopBrowserAuthProvider({ client, children }: { client: Conve
       setError(null);
       clientRef.current.clearAuth();
     } catch (reason) {
-      setError(authError(reason, "Could not sign out of FocusLock."));
+      setError(`Could not sign out of FocusLock. ${safeErrorDetail(reason)}`);
     }
   }, []);
 

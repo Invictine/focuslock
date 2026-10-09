@@ -18,7 +18,7 @@ export function browserProtectionPolicy(dashboard: any, groups: any[], frogLocke
 /** Describe the opt-in browser checker without guessing from a missing browser row. */
 export function browserProtectionStatusLabel(status: any, signedIn: boolean): string {
   if (!status?.browserProtectionEnabled) return "Off";
-  if (!signedIn) return "On · paused until sign-in";
+  if (!signedIn && !status.browserProtectionRequired) return "On · no website rules to monitor";
   if (!status.browserProtectionRequired) return "On · no website rules to monitor";
   if (status.browserProtection) {
     const browser = status.browserProtection;

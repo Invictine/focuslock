@@ -358,9 +358,6 @@ struct TrackingStore {
     browser_protection_required: bool,
     #[serde(default)]
     browser_protection_enabled: bool,
-    /// Revalidated from native auth on every tracker pass; never restored from disk.
-    #[serde(skip)]
-    browser_protection_signed_in: bool,
     #[serde(default)]
     browser_protection_locked_until_ms: u64,
     usage: BTreeMap<String, UsageEntry>,
@@ -378,8 +375,7 @@ struct TrackingStore {
 
 impl TrackingStore {
     fn browser_protection_active(&self) -> bool {
-        self.browser_protection_enabled && self.browser_protection_signed_in
-            && self.browser_protection_required
+        self.browser_protection_enabled && self.browser_protection_required
     }
     fn new() -> Self {
         let name = std::env::var("COMPUTERNAME")
@@ -400,7 +396,6 @@ impl TrackingStore {
             permanent_targets: Vec::new(),
             browser_protection_required: false,
             browser_protection_enabled: false,
-            browser_protection_signed_in: false,
             browser_protection_locked_until_ms: 0,
             usage: BTreeMap::new(),
             dirty: false,
@@ -582,11 +577,8 @@ impl TrackerRuntime {
                 let lease_dir = store_path.parent().unwrap_or(Path::new(".")).to_path_buf();
                 let guard_started = std::time::Instant::now();
                 while running.load(Ordering::SeqCst) {
-                    let signed_in = app.try_state::<crate::auth::BrowserAuthRuntime>()
-                        .is_some_and(|auth| auth.is_signed_in());
                     let (config, device, protection_required) = match store.lock() {
-                        Ok(mut s) => {
-                            s.browser_protection_signed_in = signed_in;
+                        Ok(s) => {
                             (s.config.clone(), s.device.clone(), s.browser_protection_active())
                         },
                         Err(_) => break,
@@ -926,12 +918,14 @@ pub fn set_browser_protection_policy(
     locked_until_ms: Option<u64>,
     state: State<'_, TrackerRuntime>,
 ) -> Result<bool, String> {
+    if !app.state::<crate::auth::BrowserAuthRuntime>().is_signed_in() {
+        return Err("Sign in before updating browser protection policy.".into());
+    }
     let mut store = state.store.lock().map_err(|_| "Tracking store lock was poisoned")?;
     // Strict freezes boundary edits; it does not force this optional checker on.
     let _ = locked_until_ms;
     store.browser_protection_required = required;
     store.browser_protection_locked_until_ms = 0;
-    store.browser_protection_signed_in = app.state::<crate::auth::BrowserAuthRuntime>().is_signed_in();
     persist_store(&state.store_path, &store)?;
     let active = store.browser_protection_active();
     drop(store);
@@ -952,7 +946,6 @@ pub fn set_browser_protection_enabled(
     let mut store = state.store.lock().map_err(|_| "Tracking store lock was poisoned")?;
     let previous = store.browser_protection_enabled;
     store.browser_protection_enabled = enabled;
-    store.browser_protection_signed_in = signed_in;
     store.browser_protection_locked_until_ms = 0;
     if let Err(error) = persist_store(&state.store_path, &store) {
         store.browser_protection_enabled = previous;
@@ -1238,13 +1231,12 @@ fn update_browser_repair_guard(
     crate::browser_warning::sync_window(app, repair_state.as_ref());
 
     for window in due {
-        // A settings click, sign-out, or disabled switch may arrive while the
+        // A settings click or disabled switch may arrive while the
         // sample was being collected. Recheck before sending a close request.
         let Some(tracker) = app.try_state::<TrackerRuntime>() else { continue };
         let resetting = tracker.browser_repair_resets.lock().map(|resets|
             resets.iter().any(|id| id.eq_ignore_ascii_case(&window.app_id))).unwrap_or(true);
         if resetting || !tracker.browser_protection_active()
-            || !app.try_state::<crate::auth::BrowserAuthRuntime>().is_some_and(|auth| auth.is_signed_in())
             || crate::browser_bridge::read_window_health(
                 lease_dir, window.window_handle, window.process_id, &window.app_id, now_ms()) {
             continue;
@@ -1585,20 +1577,16 @@ mod tests {
         assert!(runtime.ensure_pause_allowed().is_ok());
     }
     #[test]
-    fn browser_checker_requires_opt_in_and_native_sign_in_after_restart() {
+    fn browser_checker_keeps_opted_in_protection_after_auth_loss_and_restart() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("usage.json");
         let mut store = TrackingStore::new();
         store.browser_protection_required = true;
         store.browser_protection_enabled = true;
-        store.browser_protection_signed_in = true;
         assert!(store.browser_protection_active());
         persist_store(&path, &store).unwrap();
         let runtime = TrackerRuntime::load(path).unwrap();
         assert!(runtime.status().browser_protection_enabled);
-        assert!(!runtime.status().browser_protection_required);
-        assert!(runtime.ensure_pause_allowed().is_ok());
-        runtime.store.lock().unwrap().browser_protection_signed_in = true;
         assert!(runtime.status().browser_protection_required);
         assert!(runtime.ensure_pause_allowed().unwrap_err().contains("Browser extension protection"));
         let mut store = runtime.store.lock().unwrap();
@@ -1610,8 +1598,7 @@ mod tests {
         store.browser_protection_enabled = false;
         assert!(!store.browser_protection_active());
         store.browser_protection_enabled = true;
-        store.browser_protection_signed_in = false;
-        assert!(!store.browser_protection_active());
+        assert!(store.browser_protection_active(), "Auth loss cannot release a configured website rule");
     }
 
     #[test]

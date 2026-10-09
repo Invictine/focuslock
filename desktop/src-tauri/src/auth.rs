@@ -240,22 +240,24 @@ fn refresh_if_needed_with(
     Ok(Some(session))
 }
 
+fn session_profile(value: &StoredSession) -> AuthProfile {
+    let mut profile = value.profile.clone();
+    if profile.id.is_empty() {
+        profile.id = value.id_token.as_deref().and_then(|token| token.split('.').nth(1))
+            .and_then(|payload| URL_SAFE_NO_PAD.decode(payload).ok())
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|claims| claims.get("sub").and_then(|v| v.as_str()).map(str::to_owned))
+            .unwrap_or_default();
+    }
+    profile
+}
+
 #[tauri::command]
 pub async fn get_browser_auth_state(runtime: State<'_, BrowserAuthRuntime>) -> Result<AuthState, String> {
     // Loading the local account must work offline. Token refresh belongs to the
     // actual network request, not to opening the persisted local workspace.
     let session = runtime.session.lock().map_err(|_| "Auth session lock failed".to_string())?.clone();
-    let profile = session.map(|value| {
-        let mut profile = value.profile;
-        if profile.id.is_empty() {
-            profile.id = value.id_token.as_deref().and_then(|token| token.split('.').nth(1))
-                .and_then(|payload| URL_SAFE_NO_PAD.decode(payload).ok())
-                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .and_then(|claims| claims.get("sub").and_then(|v| v.as_str()).map(str::to_owned))
-                .unwrap_or_default();
-        }
-        profile
-    });
+    let profile = session.as_ref().map(session_profile);
     Ok(AuthState { signed_in: profile.is_some(), profile })
 }
 
@@ -270,9 +272,49 @@ pub async fn get_browser_auth_token(app: AppHandle) -> Result<Option<String>, St
 }
 
 #[tauri::command]
-pub fn sign_out_browser_auth(runtime: State<'_, BrowserAuthRuntime>) -> Result<(), String> {
+pub fn sign_out_browser_auth(app: AppHandle, runtime: State<'_, BrowserAuthRuntime>) -> Result<(), String> {
+    protected_sign_out(
+        &runtime,
+        &app.state::<crate::account_protection::AccountProtectionRuntime>(),
+        &app.state::<crate::tracking::TrackerRuntime>(),
+        &app.state::<crate::uninstall_guard::UninstallGuardRuntime>(),
+    )
+}
+
+fn protected_sign_out(
+    runtime: &BrowserAuthRuntime,
+    protection: &crate::account_protection::AccountProtectionRuntime,
+    tracker: &crate::tracking::TrackerRuntime,
+    strict: &crate::uninstall_guard::UninstallGuardRuntime,
+) -> Result<(), String> {
     let _guard = runtime.refresh_lock.lock().map_err(|_| "Auth refresh lock failed".to_string())?;
-    runtime.save(None)
+    protection.with_sign_out_allowed(|| {
+        if strict.check(now_ms())? {
+            return Err("Sign out is unavailable during a Strict Mode commitment.".into());
+        }
+        tracker.ensure_pause_allowed()?;
+        runtime.save(None)
+    })
+}
+
+/// Persist configured restrictions, including rules whose allowance has not yet
+/// run out. Only the current native account can replace its protection policy.
+#[tauri::command]
+pub fn sync_account_protection(
+    account_id: String,
+    restricted: bool,
+    strict_until_ms: Option<u64>,
+    app: AppHandle,
+    runtime: State<'_, BrowserAuthRuntime>,
+) -> Result<(), String> {
+    let _guard = runtime.refresh_lock.lock().map_err(|_| "Auth refresh lock failed".to_string())?;
+    let owner = runtime.session.lock().map_err(|_| "Auth session lock failed")?
+        .as_ref().map(|session| session_profile(session).id);
+    if owner.as_deref() != Some(account_id.as_str()) {
+        return Err("Sign in to the protected account before updating its restrictions.".into());
+    }
+    app.state::<crate::account_protection::AccountProtectionRuntime>()
+        .update(&account_id, restricted, strict_until_ms)
 }
 
 #[tauri::command]
@@ -317,7 +359,22 @@ pub fn start_browser_sign_in(app: AppHandle, runtime: State<'_, BrowserAuthRunti
         let managed = app_for_thread.state::<BrowserAuthRuntime>();
         let result = result.and_then(|session| {
             let _guard = managed.refresh_lock.lock().map_err(|_| "Auth refresh lock failed".to_string())?;
-            managed.save(Some(session.clone()))?;
+            let protection = app_for_thread.state::<crate::account_protection::AccountProtectionRuntime>();
+            let recovering_owner = protection.owns_account(&session.profile.id)?;
+            protection
+                .with_account_allowed(&session.profile.id, || {
+                    let previous = managed.session.lock().map_err(|_| "Auth session lock failed")?
+                        .as_ref().map(|value| session_profile(value).id);
+                    // Also cover legacy installs before their first protection
+                    // snapshot, without blocking recovery of the same account.
+                    if !recovering_owner && previous.as_deref() != Some(session.profile.id.as_str()) {
+                        app_for_thread.state::<crate::tracking::TrackerRuntime>().ensure_pause_allowed()?;
+                        if app_for_thread.state::<crate::uninstall_guard::UninstallGuardRuntime>().check(now_ms())? {
+                            return Err("Use the same account to resume your Strict Mode commitment.".into());
+                        }
+                    }
+                    managed.save(Some(session.clone()))
+                })?;
             Ok(session)
         });
         if let Ok(mut running) = managed.flow_running.lock() { *running = false; }
@@ -494,5 +551,90 @@ mod live_tests {
         assert!(!session.access_token.is_empty());
         assert!(!session.refresh_token.is_empty());
         assert!(!session.profile.email.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod sign_out_tests {
+    use super::*;
+    use crate::{account_protection::AccountProtectionRuntime, tracking::TrackerRuntime, uninstall_guard::UninstallGuardRuntime};
+
+    fn session() -> StoredSession {
+        StoredSession { access_token: "a".into(), refresh_token: "r".into(), expires_at_ms: now_ms() + 60_000,
+            id_token: None, id_token_exp_ms: None,
+            profile: AuthProfile { id: "user-a".into(), name: "A".into(), email: "a@example.invalid".into(), image_url: None } }
+    }
+
+    #[test]
+    fn legacy_profile_uses_the_same_account_id_for_ui_and_native_guard() {
+        let mut stored = session();
+        stored.profile.id.clear();
+        let payload = URL_SAFE_NO_PAD.encode(br#"{"sub":"user-a"}"#);
+        stored.id_token = Some(format!("header.{payload}.signature"));
+        assert_eq!(session_profile(&stored).id, "user-a");
+    }
+
+    fn runtimes(temp: &tempfile::TempDir) -> (BrowserAuthRuntime, AccountProtectionRuntime, TrackerRuntime, UninstallGuardRuntime) {
+        let auth = BrowserAuthRuntime::load(temp.path().join("session.json"));
+        auth.save(Some(session())).unwrap();
+        let protection = AccountProtectionRuntime::load(temp.path().join("protection.json")).unwrap();
+        let tracker = TrackerRuntime::load(temp.path().join("tracking.json")).unwrap();
+        let strict = UninstallGuardRuntime::new(temp.path().join("strict.json"));
+        (auth, protection, tracker, strict)
+    }
+
+    #[test]
+    fn unknown_policy_preserves_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let (auth, protection, tracker, strict) = runtimes(&temp);
+        assert!(protected_sign_out(&auth, &protection, &tracker, &strict).is_err());
+        assert!(auth.is_signed_in() && auth.path.exists());
+    }
+
+    #[test]
+    fn configured_restriction_preserves_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let (auth, protection, tracker, strict) = runtimes(&temp);
+        protection.update("user-a", true, None).unwrap();
+        assert!(protected_sign_out(&auth, &protection, &tracker, &strict).is_err());
+        assert!(auth.is_signed_in() && auth.path.exists());
+    }
+
+    #[test]
+    fn persisted_native_block_overrides_clear_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let (auth, protection, _tracker, strict) = runtimes(&temp);
+        let tracking_path = temp.path().join("tracking.json");
+        let mut fixture: serde_json::Value = serde_json::from_slice(&fs::read(&tracking_path).unwrap()).unwrap();
+        fixture["blockedTargets"]["appIds"] = serde_json::json!(["steam.exe"]);
+        fixture["blockedReasons"]["steam.exe"] = serde_json::json!("manual");
+        fs::write(&tracking_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        let tracker = TrackerRuntime::load(tracking_path).unwrap();
+        protection.update("user-a", false, None).unwrap();
+        assert!(protected_sign_out(&auth, &protection, &tracker, &strict).is_err());
+        assert!(auth.is_signed_in() && auth.path.exists());
+    }
+
+    #[test]
+    fn persisted_strict_guard_overrides_clear_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let (auth, protection, tracker, strict) = runtimes(&temp);
+        strict.sync("user-a", true, Some(now_ms() + 60_000), Some("session"), None, None).unwrap();
+        protection.update("user-a", false, None).unwrap();
+        assert!(protected_sign_out(&auth, &protection, &tracker, &strict).is_err());
+        assert!(auth.is_signed_in() && auth.path.exists());
+    }
+
+    #[test]
+    fn clear_policy_logs_out_and_expired_strict_permits() {
+        let temp = tempfile::tempdir().unwrap();
+        let (auth, protection, tracker, strict) = runtimes(&temp);
+        protection.update("user-a", false, None).unwrap();
+        assert!(protected_sign_out(&auth, &protection, &tracker, &strict).is_ok());
+        assert!(!auth.is_signed_in() && !auth.path.exists());
+
+        let (auth, protection, tracker, strict) = runtimes(&temp);
+        protection.update("user-a", false, Some(1)).unwrap();
+        assert!(protected_sign_out(&auth, &protection, &tracker, &strict).is_ok());
     }
 }

@@ -28,6 +28,7 @@ import { accountClient, flushMutations, useDurableMutation, useMutationReplay } 
 import { claimPermanentTargets, discoverPermanentTargets, permanentTargetsOwnedByAccount } from "./permanentSync";
 import { useFocusAuth } from "./auth";
 import { browserProtectionPolicy, browserProtectionStatusLabel } from "./browserProtection";
+import { signOutProtectionPolicy } from "./signOutProtection";
 import { DESKTOP_FROG_ENABLED } from "./features";
 import FrogCard from "./FrogCard";
 import { VoidLauncherBridge } from "./voidLauncher";
@@ -1278,6 +1279,7 @@ function DesktopApp() {
   const [tab, setTab] = useState<Tab>("focus");
   const { snapshot, status, error: trackerError, refresh } = useNativeTracking();
   const configuration: any = useQuery(syncApi.getConfiguration, EMPTY_ARGS);
+  const nuke: any = useQuery(api.nuke.getNuke, EMPTY_ARGS);
   const nativeState: any = useQuery(syncApi.getState, EMPTY_ARGS);
   const history: any = useQuery(syncApi.getHistory, tab === "focus" ? EMPTY_ARGS : "skip");
   // Keep the large configuration subscription separate from frequently changing
@@ -1475,6 +1477,37 @@ function DesktopApp() {
   // This instance drives the hard-lock union and Settings; FrogCard owns its own
   // instance, so both re-read through the store's notifications.
   const frog = useFrogState();
+  const signOutStrictActive = useStrictActive(Boolean(configuration?.prefs?.strictMode), configuration?.prefs?.strictEndsAt);
+  const signOutPolicy = useMemo(
+    () => {
+      const policy = signOutProtectionPolicy(configuration, groups, Boolean(frog.state.locked));
+      return policy && nuke !== undefined ? { ...policy, restricted: policy.restricted || Boolean(nuke?.isActive) } : null;
+    },
+    [configuration, groups, frog.state.locked, signOutStrictActive, nuke],
+  );
+  const signOutPolicyJson = JSON.stringify(signOutPolicy);
+  const [savedSignOutPolicy, setSavedSignOutPolicy] = useState("");
+  const [signOutPolicyError, setSignOutPolicyError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!tauriAvailable()) return;
+    setSavedSignOutPolicy("");
+    if (!accountKey || !signOutPolicy) return;
+    let cancelled = false;
+    setSignOutPolicyError(null);
+    invoke("sync_account_protection", { accountId: accountKey, ...signOutPolicy })
+      .then(() => { if (!cancelled) setSavedSignOutPolicy(signOutPolicyJson); })
+      .catch((reason) => { if (!cancelled) setSignOutPolicyError(String(reason)); });
+    return () => { cancelled = true; };
+  }, [accountKey, signOutPolicyJson]);
+  const signOutBlockedReason = !signOutPolicy
+    ? "Checking your restrictions before sign-out…"
+    : signOutPolicy.restricted || signOutPolicy.strictUntilMs !== null || permanentTargets.length > 0
+      ? "Sign-out is unavailable while boundaries, Strict Mode, or Nuke are active. Remove editable boundaries or finish your commitment first."
+      : signOutPolicyError
+        ? `Could not verify sign-out protection: ${signOutPolicyError}`
+        : tauriAvailable() && savedSignOutPolicy !== signOutPolicyJson
+          ? "Saving sign-out protection…"
+          : null;
   const frogLock = useMemo(
     () => ({
       locked: DESKTOP_FROG_ENABLED && frog.state.locked,
@@ -1713,11 +1746,9 @@ function DesktopApp() {
   );
   useEffect(() => {
     if (!tauriAvailable()) return;
-    // Never leave a stale required policy behind after sign-out or while the
-    // account dashboard is unavailable.
-    const policy = auth.user && dashboard
-      ? browserProtectionPolicy(dashboard, groups || [], Boolean(frogLock?.locked))
-      : { required: false, lockedUntilMs: 0 };
+    // Missing auth/data is not permission to release an existing restriction.
+    if (!auth.user || !dashboard || groups === undefined) return;
+    const policy = browserProtectionPolicy(dashboard, groups, Boolean(frogLock?.locked));
     const json = JSON.stringify(policy);
     if (json === browserPolicyJsonRef.current) return;
     browserPolicyJsonRef.current = json;
@@ -1839,7 +1870,7 @@ function DesktopApp() {
         )}
       </aside>
       <main className="workspace" id="main-content">
-        {dashboard === undefined ? (
+        {dashboard === undefined && tab !== "account" ? (
           <DashboardSkeleton />
         ) : tab === "focus" ? (
           <FocusPage
@@ -1915,6 +1946,7 @@ function DesktopApp() {
             trackerError={trackerError}
             syncError={syncError}
             syncWarning={syncWarning}
+            signOutBlockedReason={signOutBlockedReason}
           />
         )}
       </main>
@@ -5475,6 +5507,7 @@ function AccountPage({
   trackerError,
   syncError,
   syncWarning,
+  signOutBlockedReason,
 }: {
   devices: any[];
   lastSyncAt?: number;
@@ -5483,6 +5516,7 @@ function AccountPage({
   trackerError?: string | null;
   syncError?: string | null;
   syncWarning?: string | null;
+  signOutBlockedReason?: string | null;
 }) {
   const auth = useFocusAuth();
   const user = auth.user;
@@ -5591,9 +5625,10 @@ function AccountPage({
               />
             )}
           </section>
-          <button className="secondary-button danger-text" onClick={auth.signOut}>
+          <button className="secondary-button danger-text" onClick={auth.signOut} disabled={Boolean(signOutBlockedReason)} aria-describedby={signOutBlockedReason ? "sign-out-protection" : undefined}>
             <Icon name="lock" /> Sign Out
           </button>
+          {signOutBlockedReason && <p id="sign-out-protection" className="field-help">{signOutBlockedReason}</p>}
         </>
       ) : (
         <>

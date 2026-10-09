@@ -54,8 +54,9 @@ describe("browser protection status label", () => {
     }, true)).toBe("Browser check unavailable");
   });
 
-  it("reports an enabled checker as paused while signed out", () => {
-    expect(browserProtectionStatusLabel({ browserProtectionEnabled: true }, false)).toBe("On · paused until sign-in");
+  it("keeps an opted-in checker enforcing website rules when authentication is lost", () => {
+    expect(browserProtectionStatusLabel({ browserProtectionEnabled: true, browserProtectionRequired: true }, false)).toBe("On · checking browser status");
+    expect(browserProtectionStatusLabel({ browserProtectionEnabled: true }, false)).toBe("On · no website rules to monitor");
   });
 
   it("shows Off when the optional checker is disabled", () => {

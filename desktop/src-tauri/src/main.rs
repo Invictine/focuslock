@@ -1,6 +1,7 @@
 // FocusLock desktop native shell and local Windows activity tracker.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod account_protection;
 mod auth;
 mod background;
 mod blocker;
@@ -45,6 +46,9 @@ fn main() {
             app.manage(auth::BrowserAuthRuntime::load(
                 data_dir.join("auth-session.json"),
             ));
+            app.manage(account_protection::AccountProtectionRuntime::load(
+                data_dir.join("account-protection-v1.json"),
+            ).map_err(Box::<dyn std::error::Error>::from)?);
             app.manage(blocker::BlockerRuntime::new());
             app.manage(browser_warning::BrowserRepairRuntime::default());
             app.manage(void_launcher::VoidSessionState::default());
@@ -117,6 +121,7 @@ fn main() {
             auth::get_browser_auth_token,
             auth::start_browser_sign_in,
             auth::sign_out_browser_auth,
+            auth::sync_account_protection,
             tracking::get_device_identity,
             tracking::get_tracking_snapshot,
             tracking::get_tracker_status,
