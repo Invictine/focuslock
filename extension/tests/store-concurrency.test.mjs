@@ -81,6 +81,25 @@ strict.strictEndsAt = Date.now() + 60_000;
 await worker.save(strict);
 await assert.rejects(() => dashboard.save(staleBoundaryEdit), /Strict Mode/);
 assert.equal(data['focuslock.v1'].lists[0].enabled, true);
+const setupWhitelist = await worker.load();
+setupWhitelist.strictEndsAt = Date.now() - 1;
+await worker.save(setupWhitelist);
+const addWhitelist = await worker.load();
+addWhitelist.lists.push({ id: 'whitelist-test', name: 'Allowed sites', mode: 'whitelist', enabled: false,
+  alwaysOn: true, sites: ['school.example'], exceptions: [], lockedUntil: 0, dailyLimitMin: 0 });
+await worker.save(addWhitelist);
+const reactivateStrict = await worker.load();
+reactivateStrict.strictMode = true;
+reactivateStrict.strictEndsAt = Date.now() + 60_000;
+await worker.save(reactivateStrict);
+const whitelistEnable = await dashboard.load();
+whitelistEnable.lists.find(list => list.id === 'whitelist-test').enabled = true;
+await assert.rejects(() => dashboard.save(whitelistEnable), /Strict Mode/,
+  'Strict Mode does not permit enabling a whitelist that could weaken another active boundary');
+const whitelistAdd = await dashboard.load();
+whitelistAdd.lists.find(list => list.id === 'whitelist-test').sites.push('new-allowed.example');
+await assert.rejects(() => dashboard.save(whitelistAdd), /Strict Mode/,
+  'Strict Mode does not permit extending a whitelist');
 const unrelatedSetting = await dashboard.load();
 unrelatedSetting.settings.idleTimeoutSec = 90;
 await dashboard.save(unrelatedSetting);
@@ -88,8 +107,18 @@ assert.equal(data['focuslock.v1'].settings.idleTimeoutSec, 90,
   'Strict Mode permits unrelated settings while boundary rules remain locked');
 const permanentEdit = await dashboard.load();
 permanentEdit.permanentSites.push('locked.example');
-await assert.rejects(() => dashboard.save(permanentEdit), /Strict Mode/,
-  'Strict Mode also protects permanent-boundary configuration');
+await dashboard.save(permanentEdit);
+assert.ok(data['focuslock.v1'].permanentSites.includes('locked.example'),
+  'Strict Mode permits append-only permanent blocks');
+const additiveBoundary = await dashboard.load();
+additiveBoundary.lists[0].sites.push('new-boundary.example');
+await dashboard.save(additiveBoundary);
+assert.ok(data['focuslock.v1'].lists[0].sites.includes('new-boundary.example'),
+  'Strict Mode permits adding a blocked site');
+const weakenedBoundary = await dashboard.load();
+weakenedBoundary.lists[0].sites = weakenedBoundary.lists[0].sites.filter(site => site !== 'new-boundary.example');
+await assert.rejects(() => dashboard.save(weakenedBoundary), /Strict Mode/,
+  'Strict Mode continues to prevent removing a boundary');
 await worker.update(state => { state.stats['2026-09-27']['example.com'] = 60; });
 assert.equal(data['focuslock.v1'].stats['2026-09-27']['example.com'], 60,
   'Usage persists while strict boundary writes are locked');

@@ -844,7 +844,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     } else if (msg.type === 'setSharedSite') {
       try {
         await syncCloud('edit');
-        if (strictIsActive(await ensureState())) {
+        if (strictIsActive(await ensureState()) && msg.isBlocked !== true) {
           sendResponse({ ok: false, error: 'Strict Mode is active. Boundaries are locked until it ends.' });
           return;
         }

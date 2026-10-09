@@ -558,8 +558,8 @@ internal fun AppPickerScreen(
     // dropped (revert) and a snackbar explains why.
     val onAppToggle: (AppRowItem, Boolean) -> Unit = remember(settings, scope, snackbarHostState, strictBoundaryConfigLocked) {
         { app, checked ->
-            if (strictBoundaryConfigLocked) {
-                scope.launch { snackbarHostState.showSnackbar("Strict Mode locks boundary changes until it ends.") }
+            if (strictBoundaryConfigLocked && !checked) {
+                scope.launch { snackbarHostState.showSnackbar("Strict Mode lets you add blocks, but existing blocks stay locked until it ends.") }
             } else if (app.isPermanent) {
                 // A permanent block is enforced regardless of the legacy isBlocked flag
                 // (the service ORs the dedicated store with the legacy mirror), and
@@ -587,8 +587,8 @@ internal fun AppPickerScreen(
     }
     val onWebsiteToggle: (String, Boolean) -> Unit = remember(settings, scope, snackbarHostState, strictBoundaryConfigLocked) {
         toggle@{ domain, checked ->
-            if (strictBoundaryConfigLocked) {
-                scope.launch { snackbarHostState.showSnackbar("Strict Mode locks boundary changes until it ends.") }
+            if (strictBoundaryConfigLocked && !checked) {
+                scope.launch { snackbarHostState.showSnackbar("Strict Mode lets you add blocks, but existing blocks stay locked until it ends.") }
                 return@toggle
             }
             websiteOverrides.value = websiteOverrides.value + (domain to checked)
@@ -609,8 +609,8 @@ internal fun AppPickerScreen(
     // Optimistic permanent-block toggles — mirror the block overrides above.
     val onAppPermanentToggle: (AppRowItem, Boolean) -> Unit = remember(settings, permanentBlocks, scope, snackbarHostState, strictBoundaryConfigLocked) {
         { app, permanent ->
-            if (strictBoundaryConfigLocked) {
-                scope.launch { snackbarHostState.showSnackbar("Strict Mode locks boundary changes until it ends.") }
+            if (strictBoundaryConfigLocked && !permanent) {
+                scope.launch { snackbarHostState.showSnackbar("Strict Mode lets you add permanent blocks, but they cannot be removed in FocusLock.") }
             } else if (!permanent) {
                 scope.launch { snackbarHostState.showSnackbar("Permanent blocks cannot be removed in FocusLock.") }
             } else if (PermanentBlocksRepository.isProtectedPackage(context, app.packageName)) {
@@ -622,8 +622,8 @@ internal fun AppPickerScreen(
     }
     val onWebsitePermanentToggle: (String, Boolean) -> Unit = remember(settings, scope, snackbarHostState, strictBoundaryConfigLocked) {
         toggle@{ domain, permanent ->
-            if (strictBoundaryConfigLocked) {
-                scope.launch { snackbarHostState.showSnackbar("Strict Mode locks boundary changes until it ends.") }
+            if (strictBoundaryConfigLocked && !permanent) {
+                scope.launch { snackbarHostState.showSnackbar("Strict Mode lets you add permanent blocks, but they cannot be removed in FocusLock.") }
                 return@toggle
             }
             websitePermanentOverrides.value = websitePermanentOverrides.value + (domain to permanent)
@@ -2449,7 +2449,7 @@ private fun WebsiteRow(
     val context = LocalContext.current
     val configuration = LocalConfiguration.current
     val compactActions = configuration.screenWidthDp < 400 || configuration.fontScale >= 1.2f
-    val switchEnabled = !strictBoundaryConfigLocked && !(boundariesFrozen && site.isBlocked)
+    val switchEnabled = !((boundariesFrozen || strictBoundaryConfigLocked) && site.isBlocked)
     val rowEnabled = true
     val interactionSource = remember { MutableInteractionSource() }
     Card(
@@ -2686,7 +2686,7 @@ private fun InstalledAppRow(
     // Permanent rows are never flippable: the switch renders on/locked and every tap
     // routes through the toggle handler, which refuses with the permanent-block
     // snackbar. Frozen boundaries keep their toast refusal for other blocked rows.
-    val switchEnabled = !strictBoundaryConfigLocked && !(boundariesFrozen && app.isBlocked) && !app.isPermanent
+    val switchEnabled = !((boundariesFrozen || strictBoundaryConfigLocked) && app.isBlocked) && !app.isPermanent
     val rowEnabled = true
     val interactionSource = remember { MutableInteractionSource() }
     Card(

@@ -59,23 +59,30 @@ function sameContent<T extends Record<string, any>>(current: any, item: T): bool
   return true;
 }
 
-/** Strict Mode freezes configuration, while allowing identical sync retries. */
+/** Strict Mode preserves configuration, optionally allowing additional blocks. */
 export async function guardStrictBoundaryChanges<T extends Record<string, any>>(
   ctx: any,
   userId: string,
   existing: any[],
   incoming: T[],
   identityParts: (item: T) => string[],
+  allowBlockedAdditions = false,
 ): Promise<void> {
   const prefs = await ctx.db.query("userPrefs")
     .withIndex("by_user", (q: any) => q.eq("userId", userId)).first();
   if (!prefs?.strictMode || (prefs.strictEndsAt ?? 0) <= Date.now()) return;
   const currentByKey = new Map(existing.map((row) => [identityKey(row as T, identityParts), row]));
-  if (currentByKey.size !== incoming.length || incoming.some((item) => {
+  const incomingKeys = new Set(incoming.map((item) => identityKey(item, identityParts)));
+  if ([...currentByKey.keys()].some((key) => !incomingKeys.has(key)) || incoming.some((item) => {
     const current = currentByKey.get(identityKey(item, identityParts));
     const content = Object.fromEntries(Object.entries(item).filter(([key]) =>
       !key.startsWith("_") && key !== "userId" && key !== "updatedAt"));
-    return !current || !sameContent(current, content);
+    if (!current) return !allowBlockedAdditions || content.isBlocked !== true;
+    if (sameContent(current, content)) return false;
+    // Only the block switch may become stricter. Metadata and targeting stay
+    // frozen, including Shorts-only scope and custom-site identity.
+    return !allowBlockedAdditions || current.isBlocked !== false || content.isBlocked !== true ||
+      !sameContent(current, { ...content, isBlocked: current.isBlocked });
   })) throw new Error("Boundaries cannot change during Strict Mode");
 }
 

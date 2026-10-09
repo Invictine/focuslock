@@ -32,6 +32,7 @@ let expireUsageOnce = false;
 let changeIdentityDuringToken = false;
 let changeIdentityDuringDashboard = false;
 let rejectMutationPath = '';
+let failConfigOnce = false;
 let hangConvexRequest = false;
 let nukeState = null;
 let rulesConfig = null;
@@ -59,6 +60,7 @@ const context = {
       }
       return out;
     },
+    async load() { return structuredClone(store.get('localState') || {}); },
   } },
   createClerkClient: () => clerk,
   ConvexClient: FakeConvexClient,
@@ -78,6 +80,10 @@ const context = {
   fetch: async (_url, init) => {
     const body = JSON.parse(init.body);
     calls.push(body);
+    if (body.path === 'focus:getConfiguration' && failConfigOnce) {
+      failConfigOnce = false;
+      throw new Error('configuration temporarily unavailable');
+    }
     if (body.path === 'focus:getConfiguration' && rulesConfig) return { ok: true, async json() { return { status: 'success', value: rulesConfig }; } };
     if (hangConvexRequest) return new Promise((_, reject) => init.signal.addEventListener('abort', () => {
       const error = new Error('aborted');
@@ -540,6 +546,45 @@ hangConvexRequest = false;
 clerk.user = { id: 'A' };
 await Promise.all([cloud.setWebsiteBlocked('one.test', true), cloud.setWebsiteBlocked('two.test', true)]);
 assert.equal(store.get('focuslock.cloud.v2').accounts.A.pendingMutations.length, 0);
+
+// Strict block additions remain durable if the fresh policy query fails. A
+// cache belonging to another account must not supply this mutation's metadata.
+store.set('localState', { cloudAccountId: 'B', cloudSites: [
+  { domain: 'offline-boundary.test', displayName: 'Other account label', category: 'Other account category' },
+], cloudPrefs: { strictMode: true, strictEndsAt: Date.now() + 60_000 } });
+failConfigOnce = true;
+await assert.rejects(() => cloud.setWebsiteBlocked('offline-boundary.test', true), /configuration temporarily unavailable/);
+const offlineMutation = store.get('focuslock.cloud.v2').accounts.A.pendingMutations
+  .find(item => item.id === 'website:offline-boundary.test');
+assert.equal(offlineMutation.args.displayName, 'offline-boundary.test', 'An unrelated account cache never supplies site metadata');
+assert.equal(offlineMutation.args.category, 'Web');
+const beforeOfflineRetry = calls.filter(call => call.path === 'focus:setBlockedWebsite'
+  && call.args.domain === 'offline-boundary.test').length;
+await cloud.setWebsiteBlocked('offline-boundary.test', true);
+const offlineRetryCalls = calls.filter(call => call.path === 'focus:setBlockedWebsite'
+  && call.args.domain === 'offline-boundary.test');
+assert.equal(beforeOfflineRetry, 0);
+assert.equal(offlineRetryCalls.length, 1, 'A retained strict addition flushes once after connectivity returns');
+assert.equal(store.get('focuslock.cloud.v2').accounts.A.pendingMutations
+  .some(item => item.id === 'website:offline-boundary.test'), false);
+store.delete('localState');
+
+rulesConfig = {
+  prefs: { strictMode: true, strictEndsAt: Date.now() + 60_000 },
+  sites: [{ domain: 'existing.test', displayName: 'Research notes', category: 'Study', isBlocked: false, isCustom: false }],
+};
+await cloud.setWebsiteBlocked('EXISTING.TEST', true);
+let siteMutation = calls.filter(call => call.path === 'focus:setBlockedWebsite').at(-1);
+assert.equal(siteMutation.args.displayName, 'Research notes', 'Strict block additions preserve existing site display metadata');
+assert.equal(siteMutation.args.category, 'Study', 'Strict block additions preserve existing site category metadata');
+await cloud.setWebsiteBlocked('new-strict.test', true);
+siteMutation = calls.filter(call => call.path === 'focus:setBlockedWebsite').at(-1);
+assert.equal(siteMutation.args.domain, 'new-strict.test', 'Strict Mode permits adding a new blocked site');
+const blockedMutationsBeforeUnblock = calls.filter(call => call.path === 'focus:setBlockedWebsite').length;
+await assert.rejects(() => cloud.setWebsiteBlocked('existing.test', false), /Strict Mode/,
+  'Strict Mode rejects shared site unblocking before queuing a mutation');
+assert.equal(calls.filter(call => call.path === 'focus:setBlockedWebsite').length, blockedMutationsBeforeUnblock);
+rulesConfig = null;
 
 // A stale cloud write stays queued and is reported as unapplied to the caller.
 rejectMutationPath = 'focus:setBlockedWebsite';

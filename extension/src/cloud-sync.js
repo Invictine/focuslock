@@ -696,15 +696,48 @@ async function setWebsiteBlocked(domain, isBlocked) {
   if (!identity.session || !identity.user) return { signedIn: false, ok: false };
   const normalized = String(domain || '').trim().toLowerCase().replace(/^www\./, '');
   if (!normalized) throw new Error('Choose a website first');
-  const args = {
-    domain: normalized, displayName: normalized, isBlocked: Boolean(isBlocked),
-    category: 'Web', updatedAt: Date.now(),
-  };
-  const mutation = { id: `website:${normalized}`, kind: 'website', path: 'focus:setBlockedWebsite', args };
   const userId = identity.user.id;
-  await queueMutation(userId, mutation);
+  let cachedState = null;
+  try { cachedState = await self.FocusLockStore.load(); } catch { /* offline edits still enter the durable outbox */ }
+  const accountCache = cachedState?.cloudAccountId === userId ? cachedState : null;
+  const cachedExisting = (Array.isArray(accountCache?.cloudSites) ? accountCache.cloudSites : []).find((site) =>
+    String(site.domain || '').trim().toLowerCase().replace(/^www\./, '') === normalized);
+  const cachedStrict = accountCache?.cloudPrefs?.strictMode === true
+    && (!accountCache.cloudPrefs.strictEndsAt || accountCache.cloudPrefs.strictEndsAt > Date.now());
+  if (cachedStrict && isBlocked !== true) {
+    throw new Error('Strict Mode is active. Existing boundaries cannot be weakened.');
+  }
+  const makeMutation = (existing) => ({
+    id: `website:${normalized}`, kind: 'website', path: 'focus:setBlockedWebsite',
+    args: {
+      domain: normalized,
+      displayName: typeof existing?.displayName === 'string' ? existing.displayName : normalized,
+      isBlocked: Boolean(isBlocked),
+      category: typeof existing?.category === 'string' ? existing.category : 'Web',
+      updatedAt: Date.now(),
+    },
+  });
+  const mutation = makeMutation(cachedExisting);
+  // A blocked=true edit is additive and safe to persist before network access.
+  // Scope both cache metadata and the outbox to the authenticated account.
+  if (isBlocked === true) await queueMutation(userId, mutation);
   const auth = await authContext(userId, identity.session);
   if (!auth) return { signedIn: false, ok: false };
+  const config = await callConvex('query', 'focus:getConfiguration', {}, auth.authToken);
+  await assertIdentity(userId, identity.session);
+  const strict = config?.prefs?.strictMode === true
+    && (!config.prefs.strictEndsAt || config.prefs.strictEndsAt > Date.now());
+  if (strict && isBlocked !== true) {
+    throw new Error('Strict Mode is active. Existing boundaries cannot be weakened.');
+  }
+  const existing = (Array.isArray(config?.sites) ? config.sites : []).find((site) =>
+    String(site.domain || '').trim().toLowerCase().replace(/^www\./, '') === normalized);
+  const freshMutation = makeMutation(existing);
+  // Preserve offline intent while upgrading cached metadata to the latest
+  // same-account server row before the request is flushed.
+  if (isBlocked !== true || JSON.stringify(freshMutation.args) !== JSON.stringify(mutation.args)) {
+    await queueMutation(userId, freshMutation);
+  }
   await flushRequiredMutation(auth.userId, auth.authToken, mutation.id);
   return { signedIn: true, ok: true };
 }

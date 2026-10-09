@@ -9,14 +9,14 @@
   if (!strictPanel || !frogPanel) return;
   strictPanel.innerHTML = `
     <section class="card"><div class="listhead"><h2>Strict Mode</h2><span class="badge" id="strictBadge">Off</span></div>
-      <p class="d" id="strictDescription">Commit to keeping your boundary rules unchanged until the end time. Existing rules keep enforcing as configured.</p>
+      <p class="d" id="strictDescription">Commit to keeping your boundaries in place until the end time. You can still add boundaries or permanent blocks.</p>
       <p id="strictUntil" class="mut"></p>
       <div id="strictActivation">
         <div class="days" role="group" aria-label="Commitment duration"><button type="button" data-strict-choice="hours" class="on" aria-pressed="true">Hours</button><button type="button" data-strict-choice="days" aria-pressed="false">Days</button><button type="button" data-strict-choice="date" aria-pressed="false">End date</button></div>
         <div data-strict-input="hours"><label for="strictHours">Hours (1–720)</label><input id="strictHours" type="number" min="1" max="720" value="2"></div>
         <div data-strict-input="days" hidden><label for="strictDays">Days (1–30)</label><input id="strictDays" type="number" min="1" max="30" value="1"></div>
         <div data-strict-input="date" hidden><label for="strictDate">End at your local date and time</label><input id="strictDate" type="datetime-local"></div>
-        <p class="mut">Boundary rules can only be changed after the commitment ends or with the configured approval. A signed-in commitment syncs to your account.</p>
+        <p class="mut">You can add boundaries or permanent blocks during a commitment. Existing boundaries cannot be removed or weakened. A signed-in commitment syncs to your account.</p>
         <div class="btnrow"><button id="strictCommit" class="go" type="button">Start commitment</button></div>
       </div>
       <p id="strictSyncState" class="mut" role="status"></p>

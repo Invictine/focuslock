@@ -27,6 +27,33 @@
     };
   }
 
+  function onlyStrengthensBoundaries(before, after, now) {
+    const oldSettings = boundarySettings(before, now);
+    const nextSettings = boundarySettings(after, now);
+    const nextLists = new Map(nextSettings.lists.map((list) => [list.id, list]));
+    const oldIds = new Set(oldSettings.lists.map((list) => list.id));
+    for (const oldList of oldSettings.lists) {
+      const next = nextLists.get(oldList.id);
+      if (!next) return false;
+      const oldSites = Array.isArray(oldList.sites) ? oldList.sites : [];
+      const nextSites = Array.isArray(next.sites) ? next.sites : [];
+      if (oldSites.some((site) => !nextSites.includes(site))) return false;
+      if (oldList.enabled === true && next.enabled !== true) return false;
+      if (oldList.mode === 'whitelist' && oldList.enabled !== next.enabled) return false;
+      if (serialized(oldSites) !== serialized(nextSites) && oldList.mode !== 'blacklist') return false;
+      const oldRest = { ...oldList }; delete oldRest.sites; delete oldRest.enabled;
+      const nextRest = { ...next }; delete nextRest.sites; delete nextRest.enabled;
+      if (serialized(oldRest) !== serialized(nextRest)) return false;
+    }
+    for (const list of nextSettings.lists) {
+      if (oldIds.has(list.id)) continue;
+      if (list.enabled !== true || list.mode !== 'blacklist' || !Array.isArray(list.sites) || !list.sites.length) return false;
+    }
+    if (serialized(oldSettings.schedules) !== serialized(nextSettings.schedules)) return false;
+    const permanent = new Set(nextSettings.permanentSites);
+    return oldSettings.permanentSites.every((domain) => permanent.has(domain));
+  }
+
   function uid(prefix) {
     return (prefix || 'id') + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   }
@@ -238,11 +265,11 @@
       // already persisted with whatever this save adds, so no caller (stale
       // dashboard window, worker flush, account switch) can drop an entry.
       // Check the committed state under the same lock as the write. Strict
-      // Mode may have arrived from mobile after a dashboard edit began.
-      // Timer housekeeping and usage/cloud updates remain safe to persist.
+      // Mode may have arrived from mobile after a dashboard edit began. Only
+      // additions that strengthen a boundary are allowed during a commitment.
       const now = Date.now();
       if (latest?.strictMode === true && (!Number(latest.strictEndsAt) || Number(latest.strictEndsAt) > now)
-          && serialized(boundarySettings(latest, now)) !== serialized(boundarySettings(merged, now))) {
+          && !onlyStrengthensBoundaries(latest, merged, now)) {
         throw new Error('Strict Mode is active. Boundaries are locked until it ends.');
       }
       merged.permanentSites = normalizePermanentSites([

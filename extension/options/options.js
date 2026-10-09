@@ -19,8 +19,32 @@
       !['timer', 'frozen', 'pomodoro'].includes(schedule.type) || Number(schedule.endTs) > Date.now()),
     permanentSites: permanentSitesOf(candidate),
   });
+  const onlyAddsBoundaries = (before, after) => {
+    const oldState = JSON.parse(boundarySnapshot(before));
+    const nextState = JSON.parse(boundarySnapshot(after));
+    const nextLists = new Map(nextState.lists.map((list) => [list.id, list]));
+    const oldIds = new Set(oldState.lists.map((list) => list.id));
+    for (const oldList of oldState.lists) {
+      const next = nextLists.get(oldList.id);
+      if (!next) return false;
+      if ((oldList.sites || []).some((site) => !(next.sites || []).includes(site))) return false;
+      if (oldList.enabled === true && next.enabled !== true) return false;
+      if (oldList.mode === 'whitelist' && oldList.enabled !== next.enabled) return false;
+      if (JSON.stringify(oldList.sites || []) !== JSON.stringify(next.sites || []) && oldList.mode !== 'blacklist') return false;
+      const oldRest = { ...oldList }; delete oldRest.sites; delete oldRest.enabled;
+      const nextRest = { ...next }; delete nextRest.sites; delete nextRest.enabled;
+      if (JSON.stringify(oldRest) !== JSON.stringify(nextRest)) return false;
+    }
+    for (const list of nextState.lists) {
+      if (!oldIds.has(list.id) && (list.enabled !== true || list.mode !== 'blacklist' || !list.sites?.length)) return false;
+    }
+    if (JSON.stringify(oldState.schedules) !== JSON.stringify(nextState.schedules)) return false;
+    const permanent = new Set(nextState.permanentSites);
+    return oldState.permanentSites.every((domain) => permanent.has(domain));
+  };
   function assertEditableState(before, after) {
-    if (strictActive(before) && boundarySnapshot(before) !== boundarySnapshot(after)) {
+    if (strictActive(before) && boundarySnapshot(before) !== boundarySnapshot(after)
+        && !onlyAddsBoundaries(before, after)) {
       throw new Error('Strict Mode is active. Boundaries are locked until it ends.');
     }
     for (const locked of before.lists || []) {
@@ -138,7 +162,8 @@
     box.innerHTML = '';
     for (const l of state.lists) {
       const strict = strictActive(state);
-      const locked = l.lockedUntil > Date.now() || strict;
+      const frozen = l.lockedUntil > Date.now();
+      const locked = frozen || strict;
       const div = document.createElement('div');
       div.className = 'card';
       div.dataset.listId = l.id;
@@ -154,7 +179,7 @@
         </summary>
         <div class="list-editor-body">
         <div class="grid2">
-          <div><label>Sites / patterns (one per line)</label><textarea data-f="sites" ${locked ? 'disabled' : ''}>${esc(l.sites.filter(site => !isPermanentSite(site, state)).join('\n'))}</textarea></div>
+          <div><label>Sites / patterns (one per line)</label><textarea data-f="sites" ${frozen ? 'disabled' : ''}>${esc(l.sites.filter(site => !isPermanentSite(site, state)).join('\n'))}</textarea></div>
           <div><label>Exceptions — never block (one per line)</label><textarea data-f="exceptions" ${locked ? 'disabled' : ''}>${esc((l.exceptions || []).join('\n'))}</textarea></div>
         </div>
         <div class="grid2">
@@ -165,7 +190,7 @@
           <div><label>Daily limit (minutes on these sites, 0 = off)</label><input data-f="dailyLimitMin" type="number" min="0" max="1440" value="${l.dailyLimitMin || 0}" ${locked ? 'disabled' : ''} /></div>
         </div>
         <label style="margin-top:10px"><input data-f="alwaysOn" type="checkbox" style="width:auto" ${l.alwaysOn ? 'checked' : ''} ${locked ? 'disabled' : ''} /> Always on when no schedule matches</label>
-        <div class="btnrow"><button data-a="save" class="go" ${locked ? 'disabled' : ''}>Save list</button></div>
+        <div class="btnrow"><button data-a="save" class="go" ${frozen ? 'disabled' : ''}>Save list</button></div>
         </div></details>`;
       div.querySelector('[data-a="toggle"]').onclick = async () => {
         const latest = await storeLoad();
@@ -453,7 +478,7 @@
     if (strict) {
       badge.textContent = 'Strict Mode';
       $('lockdownRemaining').textContent = 'Strict Mode · ' + (state.strictEndsAt ? fmtCountdown(Number(state.strictEndsAt) - t) : 'active');
-      $('lockdownDetail').textContent = 'Boundaries are locked until Strict Mode ends.';
+      $('lockdownDetail').textContent = 'New boundaries and permanent blocks are allowed; existing rules stay protected.';
     } else if (frozen.length) {
       const until = Math.max.apply(null, frozen.map(l => l.lockedUntil));
       badge.textContent = 'Frozen';
@@ -995,18 +1020,21 @@
 
   function applyStrictUiLock() {
     const locked = strictActive(state || {});
-    for (const id of ['newList', 'addPreset', 'presetSocial', 'presetVideo', 'presetUnblock', 'addSite', 'createGroup']) {
-      const control = $(id); if (control) control.disabled = locked;
+    for (const id of ['newList', 'addPreset', 'presetSocial', 'presetVideo', 'addSite']) {
+      const control = $(id); if (control) control.disabled = false;
     }
+    for (const id of ['presetUnblock', 'createGroup']) { const control = $(id); if (control) control.disabled = locked; }
     document.querySelectorAll('#lists [data-a], #lists [data-f], #siteRows [data-del], #groupList [data-group-save], #groupList [data-group-remove], #groupList [data-group-limit-enabled], #groupList [data-group-limit-min]').forEach((control) => {
       const list = control.closest('#lists [data-list-id]');
       const frozen = Boolean(list && Number(state?.lists?.find((item) => item.id === list.dataset.listId)?.lockedUntil) > Date.now());
       const groupLimit = control.matches('[data-group-limit-min]') && !control.closest('[data-group-id]')?.querySelector('[data-group-limit-enabled]')?.checked;
-      control.disabled = locked || frozen || groupLimit;
+      const additiveEditor = control.matches('#lists [data-f="sites"], #lists [data-a="save"]');
+      const sharedBlock = control.matches('#siteRows [data-del]') && control.textContent.trim() === 'Block';
+      control.disabled = (locked && !additiveEditor && !sharedBlock) || frozen || groupLimit;
     });
     const createSave = $('createGroupSave'); if (createSave) createSave.disabled = locked || $('groupTargetOptions')?.querySelectorAll('[data-group-member]:checked').length < 2 || !$('groupName')?.value.trim();
-    const permaInput = $('permaInput'); if (permaInput) permaInput.disabled = locked;
-    const permaAdd = $('permaAdd'); if (permaAdd) permaAdd.disabled = locked;
+    const permaInput = $('permaInput'); if (permaInput) permaInput.disabled = false;
+    const permaAdd = $('permaAdd'); if (permaAdd) permaAdd.disabled = false;
   }
 
   function renderApps(apps) {
@@ -1245,7 +1273,7 @@
       return '<div class="site-row"><div><strong>' + esc(r.site) + '</strong><span class="mut">'
         + esc(r.listName) + ' · ' + esc(r.category) + (custom ? ' · custom' : '') + '</span></div>'
         + '<span class="badge ' + (r.enabled ? 'on' : '') + '">' + (r.enabled ? '● blocked' : '○ off') + '</span>'
-        + '<div class="btnrow" style="margin:0"><button type="button" class="red" data-del="' + esc(r.listId) + '|' + esc(r.site) + '"' + (strictActive(state || {}) ? ' disabled' : '') + '>' + (r.listId === '__shared' ? (r.enabled ? 'Unblock' : 'Block') : 'Delete') + '</button></div></div>';
+      + '<div class="btnrow" style="margin:0"><button type="button" class="red" data-del="' + esc(r.listId) + '|' + esc(r.site) + '"' + (strictActive(state || {}) && !(r.listId === '__shared' && !r.enabled) ? ' disabled' : '') + '>' + (r.listId === '__shared' ? (r.enabled ? 'Unblock' : 'Block') : 'Delete') + '</button></div></div>';
     }).join('');
   }
 
@@ -1269,14 +1297,15 @@
     const btn = e.target.closest('[data-del]'); if (!btn) return;
     const parts = btn.dataset.del.split('|');
     const listId = parts[0], site = parts.slice(1).join('|');
-    if (strictActive(await storeLoad())) return toast('Strict Mode is active. Boundaries are locked until it ends.');
     if (listId === '__shared') {
       const current = syncedSites().find(s => s.domain === site);
+      if (strictActive(await storeLoad()) && current?.isBlocked) return toast('Strict Mode is active. Existing boundaries cannot be weakened.');
       const result = await chrome.runtime.sendMessage({ type: 'setSharedSite', domain: site, isBlocked: !current?.isBlocked });
       if (!result?.ok) return toast(result?.error || 'Could not sync website.');
       await refreshFocus(); toast(current?.isBlocked ? 'Website unblocked on your account.' : 'Website blocked on your account.');
       return;
     }
+    if (strictActive(await storeLoad())) return toast('Strict Mode is active. Existing boundaries cannot be weakened.');
     if (!confirm('Delete "' + site + '" from this list?')) return;
     await S.update(async (st) => { const l = st.lists.find(x => x.id === listId); if (l) l.sites = l.sites.filter(s => s !== site); return st; });
     await refresh();
@@ -1356,7 +1385,6 @@
   $('addSiteModal').addEventListener('click', (e) => { if (e.target === $('addSiteModal')) closeAddSite(); });
   $('addSiteInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('addSiteConfirm').click(); } });
   $('addSiteConfirm').onclick = async () => {
-    if (strictActive(await storeLoad())) return toast('Strict Mode is active. Boundaries are locked until it ends.');
     const err = $('addSiteError');
     const parsed = validateSite($('addSiteInput').value);
     if (parsed.error) { err.textContent = parsed.error; err.hidden = false; return; }

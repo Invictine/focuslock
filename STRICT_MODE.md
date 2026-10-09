@@ -1,10 +1,10 @@
 # Strict Mode
 
-Strict Mode locks boundary configuration until the commitment ends or an approved release is received. It does not independently block opening an app or website.
+Strict Mode protects existing boundary configuration until the commitment ends or an approved release is received. You can still add app and website boundaries or permanent blocks. It does not independently block opening an app or website.
 
 - Apps and websites follow their normal credit, schedule, limit, permanent-block, Frog, and Nuke rules.
 - Strict Mode does not suppress notifications, disable earned-credit unlocks, prevent ordinary credit snoozes, or activate Nuke after blocked launches.
-- Boundary selections, website targets, groups, limits, and schedules cannot be changed while Strict Mode is active. Identical cloud snapshots may still be synchronized.
+- New blocked apps and websites can be added while Strict Mode is active, and an existing unblocked target can be switched to blocked. Permanent blocks can also be added. Existing targets cannot be removed or unblocked; targeting options, groups, limits, and schedules stay locked. Identical cloud snapshots may still be synchronized.
 - Android manual, schedule, and location activation all apply the boundary edit lock.
 - Commitments retain their existing expiry, extension, and guardian-approval behavior.
 

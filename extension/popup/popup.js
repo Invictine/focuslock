@@ -123,10 +123,10 @@ function render() {
       <div class="site-heading"><div><p class="label">Current website</p><h2>${escapeHtml(domain || 'Chrome page')}</h2></div><strong>${formatDuration(localSeconds)}</strong></div>
       <div class="progress" role="progressbar" aria-label="Current website share of today" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.min(100, totalSeconds ? Math.round(localSeconds / totalSeconds * 100) : 0)}"><i style="width:${Math.min(100, totalSeconds ? localSeconds / totalSeconds * 100 : 0)}%"></i></div>
       <div class="site-actions">
-        <button class="primary" id="block-site" ${!domain || strictActive ? 'disabled' : ''}>Block this site</button>
+        <button class="primary" id="block-site" ${!domain ? 'disabled' : ''}>Block this site</button>
         <button class="secondary" id="allow-site" ${!domain ? 'disabled' : ''}>Allow 5 min</button>
       </div>
-      ${strictActive ? '<p class="strict-status" role="status">Strict Mode is active. Boundaries are locked until it ends.</p>' : ''}
+      ${strictActive ? '<p class="strict-status" role="status">Strict Mode is active. You can add boundaries; existing ones cannot be weakened.</p>' : ''}
     </section>
 
     ${showFrog ? `<section class="frog-card" aria-labelledby="frog-heading">
@@ -202,7 +202,6 @@ function bindEvents(signedIn) {
     }
     let outcome = 'blocked';
     try { await S.update((state) => {
-      if (state.strictMode && (!state.strictEndsAt || state.strictEndsAt > Date.now())) { outcome = 'strict'; return state; }
       const list = state.lists.find((item) => item.id === 'list_social') || state.lists[0];
       if (!list) { outcome = 'missing'; return state; }
       if (list.lockedUntil > Date.now()) { outcome = 'locked'; return state; }
@@ -211,7 +210,7 @@ function bindEvents(signedIn) {
       return state;
     });
       if (outcome !== 'blocked') {
-        flash(outcome === 'strict' ? 'Strict Mode is active. Boundaries are locked until it ends.' : outcome === 'locked' ? 'This block list is frozen and cannot be edited.' : 'Create a block list before blocking this site.');
+        flash(outcome === 'locked' ? 'This block list is frozen and cannot be edited.' : 'Create a block list before blocking this site.');
         return;
       }
       await chrome.runtime.sendMessage({ type: 'refresh' });

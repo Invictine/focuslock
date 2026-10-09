@@ -426,15 +426,17 @@ private fun BoundariesOverview(
                             )
                             Column(Modifier.weight(1f)) {
                                 Text(
-                                    text = if (lockdownMode) "Strict Mode is active" else "Boundaries Lock is on",
+                                    text = if (lockdownMode || strictAutomationActive) "Strict Mode is active" else "Boundaries Lock is on",
                                     style = MaterialTheme.typography.titleSmall,
                                     color = MaterialTheme.colorScheme.onSecondaryContainer
                                 )
                                 Text(
                                     text = when {
-                                        !lockdownMode -> "Turn it off in Settings to remove blocks."
-                                        lockdownRemainingMs > 0L -> "Edits locked for ${formatLockdownRemaining(lockdownRemainingMs)}."
-                                        else -> "Edits stay locked until it's off."
+                                        lockdownMode && lockdownRemainingMs > 0L ->
+                                            "You can add blocks. Existing blocks stay locked for ${formatLockdownRemaining(lockdownRemainingMs)}."
+                                        lockdownMode -> "You can add blocks. Existing blocks stay locked until Strict Mode ends."
+                                        strictAutomationActive -> "You can add blocks. Existing blocks stay locked while scheduled Strict Mode is active."
+                                        else -> "You can add blocks. Existing blocks stay locked until Boundaries Lock is off."
                                     },
                                     style = MaterialTheme.typography.bodyMedium,
                                     color = MaterialTheme.colorScheme.onSecondaryContainer

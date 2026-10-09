@@ -291,9 +291,11 @@ assert.equal((await send({ type: 'snooze', url: active.url }, extensionSender)).
 let boundaryWrites = 0;
 context.self.FocusLockCloud.setWebsiteBlocked = async () => { boundaryWrites++; return { ok: true }; };
 context.self.FocusLockCloud.saveGroups = async () => { boundaryWrites++; return { ok: true }; };
+assert.equal((await send({ type: 'setSharedSite', domain: 'new.example', isBlocked: true }, extensionSender)).ok, true,
+  'Strict Mode permits adding a shared blocked website');
 assert.equal((await send({ type: 'setSharedSite', domain: 'reddit.com', isBlocked: false }, extensionSender)).ok, false);
 assert.equal((await send({ type: 'focusGroupsSave', groups: [], updatedAt: fakeNow }, extensionSender)).ok, false);
-assert.equal(boundaryWrites, 0, 'Strict Mode rejects shared edits before queuing cloud writes');
+assert.equal(boundaryWrites, 1, 'Strict Mode permits only additive shared boundary writes');
 assert.equal(engine.verdictFor(active.url, savedState, fakeNow + 60_001).blocked, false,
   'The incoming commitment releases at its synced expiry');
 

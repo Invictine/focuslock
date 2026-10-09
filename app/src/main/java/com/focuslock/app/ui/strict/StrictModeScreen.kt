@@ -680,7 +680,7 @@ private fun StrictOffCard(onEnableClick: () -> Unit) {
                 }
             }
             Text(
-                text = "Choose 1 hour to 30 days or a date and time. Boundary settings stay locked until your commitment ends.",
+                text = "Choose 1 hour to 30 days or a date and time. Existing rules stay locked, but you can add new app and website blocks.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -785,7 +785,7 @@ private fun StrictRulesCard() {
                 color = MaterialTheme.colorScheme.onSurface
             )
             Text(
-                text = "For the time you choose, boundary settings are locked. Existing app and website rules continue as usual.",
+                text = "For the time you choose, existing rules stay locked. You can still add app and website blocks, including permanent blocks.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -803,8 +803,8 @@ private fun StrictRulesCard() {
                 ),
                 Triple(
                     Icons.Rounded.Shield,
-                    "Boundary settings stay locked",
-                    "Apps, websites, groups, limits, and block schedules can't be changed until Strict Mode ends."
+                    "Existing boundary settings stay locked",
+                    "Existing apps and websites can't be unblocked or weakened. Groups, limits, and block schedules stay locked, and you can add new app or website blocks."
                 ),
                 Triple(
                     Icons.Rounded.Sync,

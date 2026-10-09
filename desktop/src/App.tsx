@@ -2060,7 +2060,8 @@ const PermalockPage = memo(function PermalockPage({
           <h1>Permalock</h1>
           <p>
             Windows apps committed here stay blocked on this PC and sync to your FocusLock account
-            when you’re signed in. No timers, credits, emergency passes, or in-app removal.
+            when you’re signed in. You can add apps here during Strict Mode. No timers, credits,
+            emergency passes, or in-app removal.
           </p>
         </div>
       </header>
@@ -3923,11 +3924,12 @@ function BoundariesPage({
     setNotice(null);
   }
 
-  // Boundaries Lock genuinely blocks removal/unblocking while ON, mirroring Android.
+  // Strict Mode freezes boundary weakening, while still allowing new protections.
+  // Boundaries Lock has the same removal/unblocking restriction when ON.
   function guardUnlock(isUnblocking: boolean): boolean {
-    if (strictActive || (boundariesLock && isUnblocking)) {
+    if ((strictActive || boundariesLock) && isUnblocking) {
       setNotice(strictActive
-        ? "Strict Mode keeps these boundaries until the commitment ends."
+        ? "Strict Mode lets you add protections, but existing boundaries stay blocked until the commitment ends."
         : "Boundaries Lock is ON — turn it off in Settings to change this.");
       return false;
     }
@@ -4096,10 +4098,6 @@ function BoundariesPage({
 
   async function submitAddSite() {
     if (busy) return;
-    if (strictActive) {
-      setSiteError("Strict Mode keeps boundary settings locked until the commitment ends.");
-      return;
-    }
     const normalized = normalizeDomainInput(siteInput);
     if (!normalized) {
       setSiteError("Enter a valid domain, like example.com or a full URL.");
@@ -4179,7 +4177,7 @@ function BoundariesPage({
 
       {(boundariesLock || strictActive) && (
         <p className="boundary-notice lock-notice">
-          {strictActive ? "Strict Mode is active — boundary settings are locked until the commitment ends." : "Boundaries Lock is on — blocked apps and websites can't be removed or unblocked."}
+          {strictActive ? "Strict Mode is active — you can add protections, but can't remove or unblock existing boundaries until the commitment ends." : "Boundaries Lock is on — blocked apps and websites can't be removed or unblocked."}
         </p>
       )}
 
@@ -4343,8 +4341,8 @@ function BoundariesPage({
           <button
             type="button"
             className="primary-button add-site-button"
-            disabled={busy || strictActive}
-            title={strictActive ? "Strict Mode keeps boundary settings locked until the commitment ends" : undefined}
+            disabled={busy}
+            title={strictActive ? "Add this website as a blocked boundary during Strict Mode" : undefined}
             onClick={() => {
               setSiteError(null);
               setShowAddSite(true);
@@ -4360,7 +4358,7 @@ function BoundariesPage({
         <button
           type="button"
           className="preset-chip social"
-          disabled={busy || strictActive}
+          disabled={busy}
           onClick={() =>
             kind === "apps"
               ? blockAppsInCategories(["Social", "Social Media"], "Social")
@@ -4372,7 +4370,7 @@ function BoundariesPage({
         <button
           type="button"
           className="preset-chip video"
-          disabled={busy || strictActive}
+          disabled={busy}
           onClick={() =>
             kind === "apps"
               ? blockAppsInCategories(["Entertainment", "Video"], "Video")
@@ -4530,7 +4528,7 @@ function BoundariesPage({
                 {row.permanent && <span className="permanent-badge">Permanent</span>}
                 <button
                   className={`switch ${row.isBlocked ? "on" : ""} ${row.permanent ? "permanent" : ""}`}
-                  disabled={busy || strictActive}
+                  disabled={busy || (strictActive && row.isBlocked)}
                   aria-disabled={row.permanent || undefined}
                   title={
                     row.permanent
@@ -4601,7 +4599,7 @@ function BoundariesPage({
                 )}
                 <button
                   className={`switch ${site.isBlocked ? "on" : ""} ${site.permanent ? "permanent" : ""}`}
-                  disabled={busy || strictActive || site.permanent}
+                  disabled={busy || (strictActive && site.isBlocked) || site.permanent}
                   onClick={() => toggleSite(site)}
                   aria-label={`${site.isBlocked ? "Allow" : "Block"} ${site.domain}`}
                 >
@@ -4674,7 +4672,7 @@ function BoundariesPage({
                 type="button"
                 className="primary-button"
                 onClick={submitAddSite}
-                disabled={busy || strictActive || !siteInput.trim()}
+                disabled={busy || !siteInput.trim()}
               >
                 {busy ? "Adding…" : "Add Website"}
               </button>
@@ -5223,7 +5221,7 @@ function SettingsPage({
         <SettingRow
           icon="lock"
           title="Strict mode"
-          detail={strictActive ? "Boundary settings are locked until the selected end time." : "Choose a duration above to lock boundary settings."}
+          detail={strictActive ? "You can add blocked boundaries; existing protections and other settings stay locked until the selected end time." : "Choose a duration above to lock boundary settings."}
         >
           <button
             className={`switch ${prefs.strictMode ? "on" : ""}`}

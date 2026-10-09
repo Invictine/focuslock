@@ -257,7 +257,7 @@ export const saveBlockedApps = mutation({
       .collect();
     const storedVersion = Math.max(version?.updatedAt ?? 0, ...existing.map((row) => row.updatedAt ?? 0));
     if (args.updatedAt < storedVersion) return { applied: false, updatedAt: storedVersion };
-    await guardStrictBoundaryChanges(ctx, userId, existing, args.apps, (app) => [app.packageName]);
+    await guardStrictBoundaryChanges(ctx, userId, existing, args.apps, (app) => [app.packageName], true);
     const effectiveClock = Math.max(args.updatedAt, storedVersion + 1);
     const changedRows = await applyCollectionDiff(ctx, "blockedApps", userId, existing, args.apps,
       (app) => [app.packageName], effectiveClock);
@@ -293,7 +293,7 @@ export const saveBlockedWebsites = mutation({
       .collect();
     const storedVersion = Math.max(version?.updatedAt ?? 0, ...existing.map((row) => row.updatedAt ?? 0));
     if (args.updatedAt < storedVersion) return { applied: false, updatedAt: storedVersion };
-    await guardStrictBoundaryChanges(ctx, userId, existing, args.sites, (site) => [site.domain]);
+    await guardStrictBoundaryChanges(ctx, userId, existing, args.sites, (site) => [site.domain], true);
     const effectiveClock = Math.max(args.updatedAt, storedVersion + 1);
     const changedRows = await applyCollectionDiff(ctx, "blockedWebsites", userId, existing, args.sites,
       (site) => [site.domain], effectiveClock);
@@ -418,18 +418,21 @@ export const setBlockedWebsite = mutation({
     if (existing && args.updatedAt < existing.updatedAt) {
       return { applied: false, updatedAt: existing.updatedAt };
     }
+    const prefs = existing ? await ctx.db.query("userPrefs")
+      .withIndex("by_user", (q) => q.eq("userId", userId)).first() : null;
+    const preserveMetadata = prefs?.strictMode && (prefs.strictEndsAt ?? 0) > Date.now();
     const site = {
       domain,
-      displayName: args.displayName.trim() || domain,
+      displayName: preserveMetadata ? existing!.displayName : args.displayName.trim() || domain,
       isBlocked: args.isBlocked,
-      category: args.category.trim() || "Web",
-      isCustom: true,
+      category: preserveMetadata ? existing!.category : args.category.trim() || "Web",
+      ...(existing ? (existing.isCustom === undefined ? {} : { isCustom: existing.isCustom }) : { isCustom: true }),
       updatedAt,
     };
-    // The per-site API must enforce the same freeze as full collection writes.
+    // The per-site API permits added blocks and preserves existing restrictions.
     // Preserve optional legacy fields when this API does not expose them.
     const incoming = existing ? { ...existing, ...site } : site;
-    await guardStrictBoundaryChanges(ctx, userId, existing ? [existing] : [], [incoming], (row) => [row.domain]);
+    await guardStrictBoundaryChanges(ctx, userId, existing ? [existing] : [], [incoming], (row) => [row.domain], true);
     if (existing) await ctx.db.patch(existing._id, site);
     else await ctx.db.insert("blockedWebsites", { ...site, userId });
     await setCollectionVersion(ctx, userId, "blockedWebsites", updatedAt);

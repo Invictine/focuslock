@@ -482,6 +482,16 @@ class SettingsRepository(
         return lockdown
     }
 
+    /** Strict Mode permits only monotonic additions to the blocking policy. */
+    private suspend fun strictAdditionsOnly(): Boolean = try {
+        isLockdownModeEnabled() || strictAutomationActive()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        Log.w("SettingsRepo", "Strict Mode check failed; treating boundary as editable", e)
+        false
+    }
+
     val nukeActiveFlow: Flow<Boolean> = store.data
         .map { preferences -> preferences[PreferencesKeys.NUKE_ACTIVE] ?: false }
         .onEach { active ->
@@ -678,12 +688,13 @@ class SettingsRepository(
     private suspend fun editAppsAtomically(
         markLocalChange: Boolean = true,
         updatedAt: Long? = null,
+        allowDuringLockdown: Boolean = false,
         mutate: (MutableList<BlockedApp>) -> Boolean,
     ): List<BlockedApp>? {
         var result: List<BlockedApp>? = null
         val committed = editSettings { preferences ->
             val current = decodeBlockedApps(preferences[PreferencesKeys.BLOCKED_APPS_JSON]).toMutableList()
-            if (isLockdownActiveIn(preferences)) return@editSettings
+            if (isLockdownActiveIn(preferences) && !allowDuringLockdown) return@editSettings
             if (mutate(current)) {
                 preferences[PreferencesKeys.BLOCKED_APPS_JSON] = json.encodeToString(current)
                 if (updatedAt != null) {
@@ -705,12 +716,13 @@ class SettingsRepository(
     private suspend fun editWebsitesAtomically(
         markLocalChange: Boolean = true,
         updatedAt: Long? = null,
+        allowDuringLockdown: Boolean = false,
         mutate: (MutableList<BlockedWebsite>) -> Boolean,
     ): List<BlockedWebsite>? {
         var result: List<BlockedWebsite>? = null
         val committed = editSettings { preferences ->
             val current = decodeBlockedWebsites(preferences[PreferencesKeys.BLOCKED_WEBSITES_JSON]).toMutableList()
-            if (isLockdownActiveIn(preferences)) return@editSettings
+            if (isLockdownActiveIn(preferences) && !allowDuringLockdown) return@editSettings
             if (mutate(current)) {
                 preferences[PreferencesKeys.BLOCKED_WEBSITES_JSON] = json.encodeToString(current)
                 if (updatedAt != null) {
@@ -769,10 +781,12 @@ class SettingsRepository(
     }
 
     suspend fun setAppBlocked(packageName: String, blocked: Boolean) {
-        if (isBoundaryEditRefusedByStrictMode()) return
-        editAppsAtomically { current ->
+        val additionsOnly = strictAdditionsOnly()
+        if (additionsOnly && !blocked) return
+        editAppsAtomically(allowDuringLockdown = additionsOnly) { current ->
             val index = current.indexOfFirst { it.packageName == packageName }
             if (index != -1) {
+                if (additionsOnly && current[index].isBlocked) return@editAppsAtomically false
                 current[index] = current[index].copy(isBlocked = blocked)
             } else {
                 current.add(BlockedApp(packageName = packageName, appName = packageName, isBlocked = blocked))
@@ -782,11 +796,17 @@ class SettingsRepository(
     }
 
     suspend fun setAppBlockedFull(packageName: String, appName: String, category: String, blocked: Boolean) {
-        if (isBoundaryEditRefusedByStrictMode()) return
-        editAppsAtomically { current ->
+        val additionsOnly = strictAdditionsOnly()
+        if (additionsOnly && !blocked) return
+        editAppsAtomically(allowDuringLockdown = additionsOnly) { current ->
             val index = current.indexOfFirst { it.packageName == packageName }
             if (index != -1) {
-                current[index] = current[index].copy(appName = appName, category = category, isBlocked = blocked)
+                if (additionsOnly && current[index].isBlocked) return@editAppsAtomically false
+                current[index] = if (additionsOnly) {
+                    current[index].copy(isBlocked = true)
+                } else {
+                    current[index].copy(appName = appName, category = category, isBlocked = blocked)
+                }
             } else {
                 current.add(BlockedApp(packageName = packageName, appName = appName, category = category, isBlocked = blocked))
             }
@@ -804,16 +824,22 @@ class SettingsRepository(
 
     suspend fun setAppsBlockedFullBatch(updates: List<AppBlockUpdate>) {
         if (updates.isEmpty()) return
-        if (isBoundaryEditRefusedByStrictMode()) return
-        val allowed = updates
-        editAppsAtomically { current ->
+        val additionsOnly = strictAdditionsOnly()
+        val allowed = if (additionsOnly) updates.filter { it.isBlocked } else updates
+        if (allowed.isEmpty()) return
+        editAppsAtomically(allowDuringLockdown = additionsOnly) { current ->
             val indexByPkg = current.mapIndexed { i, app -> app.packageName to i }.toMap().toMutableMap()
             for (u in allowed) {
                 val index = indexByPkg[u.packageName]
                 if (index != null) {
-                    current[index] = current[index].copy(
-                        appName = u.appName, category = u.category, isBlocked = u.isBlocked
-                    )
+                    if (additionsOnly && current[index].isBlocked) continue
+                    current[index] = if (additionsOnly) {
+                        current[index].copy(isBlocked = true)
+                    } else {
+                        current[index].copy(
+                            appName = u.appName, category = u.category, isBlocked = u.isBlocked
+                        )
+                    }
                 } else {
                     current.add(
                         BlockedApp(
@@ -833,12 +859,14 @@ class SettingsRepository(
     /** Single JSON rewrite for bulk blocked-flag flips when metadata is already stored. */
     suspend fun setAppsBlockedBatch(states: Map<String, Boolean>) {
         if (states.isEmpty()) return
-        if (isBoundaryEditRefusedByStrictMode()) return
-        val allowedStates = states
-        editAppsAtomically { current ->
+        val additionsOnly = strictAdditionsOnly()
+        val allowedStates = if (additionsOnly) states.filterValues { it } else states
+        if (allowedStates.isEmpty()) return
+        editAppsAtomically(allowDuringLockdown = additionsOnly) { current ->
             var changed = false
             for (i in current.indices) {
                 val next = allowedStates[current[i].packageName]
+                if (additionsOnly && current[i].isBlocked) continue
                 if (next != null && current[i].isBlocked != next) {
                     current[i] = current[i].copy(isBlocked = next)
                     changed = true
@@ -858,13 +886,15 @@ class SettingsRepository(
     /** Single JSON rewrite for bulk website block/unblock presets. */
     suspend fun setWebsitesBlockedBatch(states: Map<String, Boolean>) {
         if (states.isEmpty()) return
-        if (isBoundaryEditRefusedByStrictMode()) return
-        val allowedStates = states
-        editWebsitesAtomically { current ->
+        val additionsOnly = strictAdditionsOnly()
+        val allowedStates = if (additionsOnly) states.filterValues { it } else states
+        if (allowedStates.isEmpty()) return
+        editWebsitesAtomically(allowDuringLockdown = additionsOnly) { current ->
             var changed = false
             for (i in current.indices) {
                 val key = current[i].domain.lowercase()
                 val next = allowedStates[key] ?: allowedStates[current[i].domain]
+                if (additionsOnly && current[i].isBlocked) continue
                 if (next != null && current[i].isBlocked != next) {
                     current[i] = current[i].copy(isBlocked = next)
                     changed = true
@@ -881,7 +911,8 @@ class SettingsRepository(
      * Appends a permanent app commitment. Existing commitments cannot be disabled.
      */
     suspend fun setAppPermanent(packageName: String, permanent: Boolean) {
-        if (isBoundaryEditRefusedByStrictMode()) return
+        val additionsOnly = strictAdditionsOnly()
+        if (additionsOnly && !permanent) return
         val permanentStore = permanentBlocks
         permanentStore.warm()
         var appName = packageName
@@ -894,7 +925,7 @@ class SettingsRepository(
             // The dedicated append-only store is authoritative across local and cloud edits.
             return
         }
-        editAppsAtomically { current ->
+        editAppsAtomically(allowDuringLockdown = additionsOnly) { current ->
             val index = current.indexOfFirst { it.packageName == packageName }
             if (index != -1) {
                 current[index] = current[index].copy(isBlocked = true, isPermanent = permanent)
@@ -1009,10 +1040,12 @@ class SettingsRepository(
     }
 
     suspend fun setWebsiteBlocked(domain: String, blocked: Boolean) {
-        if (isBoundaryEditRefusedByStrictMode()) return
-        editWebsitesAtomically { current ->
+        val additionsOnly = strictAdditionsOnly()
+        if (additionsOnly && !blocked) return
+        editWebsitesAtomically(allowDuringLockdown = additionsOnly) { current ->
             val index = current.indexOfFirst { it.domain.equals(domain, ignoreCase = true) }
             if (index != -1) {
+                if (additionsOnly && current[index].isBlocked) return@editWebsitesAtomically false
                 current[index] = current[index].copy(isBlocked = blocked)
             } else {
                 current.add(BlockedWebsite(domain = domain.lowercase(), displayName = domain, isBlocked = blocked, isCustom = true))
@@ -1022,11 +1055,11 @@ class SettingsRepository(
     }
 
     suspend fun addCustomWebsite(domain: String): Boolean {
-        if (isBoundaryEditRefusedByStrictMode()) return false
         val cleaned = cleanDomain(domain)
         if (cleaned.isBlank()) return false
+        val additionsOnly = strictAdditionsOnly()
         var added = false
-        val committed = editWebsitesAtomically { current ->
+        val committed = editWebsitesAtomically(allowDuringLockdown = additionsOnly) { current ->
             if (current.any { it.domain.equals(cleaned, ignoreCase = true) }) {
                 false // already present
             } else {
@@ -1073,7 +1106,8 @@ class SettingsRepository(
      * Appends a permanent website commitment. Existing commitments cannot be disabled.
      */
     suspend fun setWebsitePermanent(domain: String, permanent: Boolean) {
-        if (isBoundaryEditRefusedByStrictMode()) return
+        val additionsOnly = strictAdditionsOnly()
+        if (additionsOnly && !permanent) return
         val cleaned = cleanDomain(domain)
         if (cleaned.isBlank()) return
         val permanentStore = permanentBlocks
@@ -1083,7 +1117,7 @@ class SettingsRepository(
         } else if (permanentStore.isPermanentlyBlockedDomain(domain)) {
             return
         }
-        editWebsitesAtomically { current ->
+        editWebsitesAtomically(allowDuringLockdown = additionsOnly) { current ->
             val index = current.indexOfFirst { it.domain.equals(cleaned, ignoreCase = true) }
             if (index != -1) {
                 current[index] = current[index].copy(isBlocked = true, isPermanent = permanent)
