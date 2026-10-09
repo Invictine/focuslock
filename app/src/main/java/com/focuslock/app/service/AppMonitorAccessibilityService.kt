@@ -68,9 +68,27 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         }
     )
 
+    @Volatile
+    private var foregroundEntry = 0L
+    private var foregroundObservedAtMs = 0L
+    private var lastBlockerObservedAtMs = 0L
+    private var foregroundCheckJob: Job? = null
+    private var foregroundCheckTarget: String? = null
+    private var foregroundCheckWindowClass: String? = null
+    private var policyActivitySetupJob: Job? = null
+    private var lastBlockerLaunch: Pair<Long, Triple<String, String?, String?>>? = null
+    private var lastBlockerLaunchAtMs = 0L
+
     // Written from event callbacks and read from serviceScope (Default) coroutines.
     @Volatile
     private var currentForegroundPackage: String? = null
+        set(value) {
+            if (field != value) {
+                foregroundEntry++
+                foregroundObservedAtMs = SystemClock.elapsedRealtime()
+            }
+            field = value
+        }
 
     @Volatile
     private var foregroundWindowClass: String? = null
@@ -343,6 +361,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         out.println("  serviceScope active=${scopeJob?.isActive == true} cancelled=${scopeJob?.isCancelled == true}")
         out.println("  jobs homeLocation=${homeLocationJob?.isActive == true} scheduleTicker=${scheduleTickerJob?.isActive == true} permissionReturn=${permissionReturnJob?.isActive == true} frogLock=${frogLockJob?.isActive == true} targetGroups=${targetGroupsJob?.isActive == true} permanentBlocks=${permanentBlocksJob?.isActive == true} permanentWebsites=${permanentWebsitesJob?.isActive == true} countdown=${countdownJob?.isActive == true} policyActivityRefresh=${policyActivityRefreshJob?.isActive == true} policyBoundary=${policyBoundaryJob?.isActive == true} tickTickSession=${tickTickSessionJob?.isActive == true} removalScan=${removalScanJob?.isActive == true}")
         out.println("  latestAppCheck target=${latestAppCheckTarget ?: "unknown"} decision=$latestAppCheckDecision")
+        out.println("  lastBlockerObservedAtMs=$lastBlockerObservedAtMs")
         out.println("  recentCoroutineErrorClass=${recentCoroutineErrorClass ?: "none"}")
         out.println("  homeLocation $homeDiagnostics")
         out.flush()
@@ -613,9 +632,13 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         // doomscroll countdown keeps draining credits while the blocker is showing.
         if (eventPackage == applicationContext.packageName) {
             if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                if (event.className?.toString() == com.focuslock.app.ui.blocker.FrogHomeActivity::class.java.name) {
+                    lastExternalAppPackage = null
+                }
                 val previousPackage = currentForegroundPackage
                 if (previousPackage != null && previousPackage != eventPackage) {
                     currentForegroundPackage = eventPackage
+                    foregroundCheckJob?.cancel()
                     foregroundWindowClass = null
                     redirectCandidate = null
                     currentActiveWebsite = null
@@ -722,6 +745,8 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         foregroundWindowClass = windowClass
         if (previous != foreground.packageName) currentActiveWebsite = null
         if (foreground.packageName == applicationContext.packageName) {
+            if (windowClass == com.focuslock.app.ui.blocker.FrogHomeActivity::class.java.name) lastExternalAppPackage = null
+            foregroundCheckJob?.cancel()
             redirectCandidate = null
             stopTrackingForPreviousPackage(previous)
         } else {
@@ -919,6 +944,8 @@ class AppMonitorAccessibilityService : AccessibilityService() {
      * switch or our blocker/UI taking over) and persists its batched scroll spend.
      */
     private fun stopTrackingForPreviousPackage(previousPackage: String?) {
+        policyActivitySetupJob?.cancel()
+        policyActivitySetupJob = null
         browserMonitor.stop()
         stopPolicyActivityRefresh()
         countdownJob?.cancel()
@@ -941,6 +968,11 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     }
 
     private fun handleForegroundPackageChanged(packageName: String, previousPackage: String?) {
+        // Content/caption events can change window identity while an app opens.
+        // Finish its first check rather than repeatedly cancelling it mid-read.
+        // Play billing is the exception: its activity class changes the exemption.
+        if (foregroundCheckJob?.isActive == true && foregroundCheckTarget == packageName &&
+            (packageName != "com.android.vending" || foregroundCheckWindowClass == foregroundWindowClass)) return
         // Keyboard/system chrome isn't the app that launched a redirect. Keep the
         // last actual app through those overlays, but clear it on a launcher visit.
         val transientWindow = packageName == "android" || packageName == "com.android.systemui" ||
@@ -969,10 +1001,14 @@ class AppMonitorAccessibilityService : AccessibilityService() {
 
         if (previousPackage != packageName) stopTrackingForPreviousPackage(previousPackage)
 
-        serviceScope.launch {
+        foregroundCheckJob?.cancel()
+        foregroundCheckTarget = packageName
+        foregroundCheckWindowClass = foregroundWindowClass
+        val checkedWindowClass = foregroundWindowClass
+        foregroundCheckJob = serviceScope.launch(Dispatchers.Main.immediate) {
             val app = FocusLockApplication.instance
             if (currentForegroundPackage != packageName) return@launch
-            val decision = appWindowDecision(packageName, foregroundWindowClass)
+            val decision = withContext(Dispatchers.Default) { appWindowDecision(packageName, checkedWindowClass) }
             if (currentForegroundPackage != packageName) return@launch
             latestAppCheckDecision = decision
             if (decision == "update_access_exempt" || decision == "device_access_exempt") {
@@ -982,10 +1018,6 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             if (decision == "location_paused") {
                 BlockerActivity.discardSavedFrogTimer(applicationContext)
                 return@launch
-            }
-            if (decision != "permanent") {
-                app.syncManager.requestPolicyRefresh()
-                updateAppPolicyActivity(app, packageName)
             }
             when (val reason = blockReasonForDecision(decision)) {
                 "nuke" -> {
@@ -1000,6 +1032,15 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                     Log.w(TAG, "Blocking $packageName (reason=$reason)")
                     recordBlock(packageName, reason)
                     triggerBlocker(packageName, website = null, reason = reason)
+                }
+            }
+            // Remote refresh and usage bookkeeping must not delay a local block.
+            if (decision != "permanent" && currentForegroundPackage == packageName) {
+                app.syncManager.requestPolicyRefresh()
+                if (policyActivitySetupJob?.isActive != true) {
+                    policyActivitySetupJob = serviceScope.launch {
+                        if (currentForegroundPackage == packageName) updateAppPolicyActivity(app, packageName)
+                    }
                 }
             }
         }
@@ -1018,7 +1059,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         if (PermanentBlockPolicy.shouldEnforce(
                 app.permanentBlocksRepository.isPermanentlyBlocked(packageName) || legacyPermanent, protected,
             )) return "permanent"
-        if (!app.homeLocationRepository.shouldEnforceNow()) return "location_paused"
+        if (!app.homeLocationRepository.shouldEnforceOnAppSwitch()) return "location_paused"
         if (try { settings.isNukeActive() } catch (error: kotlinx.coroutines.CancellationException) { throw error }
             catch (_: Exception) { false }) return "nuke"
         if (packageName == TICKTICK_PACKAGE) return "ticktick_exempt"
@@ -1750,9 +1791,10 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     }
 
     private suspend fun triggerBlocker(blockedPackage: String, website: String? = null, reason: String? = null) {
+        val entry = foregroundEntry
         if (DeviceAccessPolicy.isExempt(this, blockedPackage)) return
         if (AppUpdateAccessPolicy.isUpdateApp(blockedPackage)) return
-        if (!FocusLockApplication.instance.homeLocationRepository.shouldEnforceNow(permanent = reason == "permanent")) return
+        if (!FocusLockApplication.instance.homeLocationRepository.shouldEnforceOnAppSwitch(permanent = reason == "permanent")) return
         if (currentForegroundPackage != blockedPackage || !isScreenInteractive()) return
         val candidate = redirectCandidate?.takeIf {
             website == null && reason == FrogCoordinator.REASON_FROG && it.targetPackage == blockedPackage
@@ -1762,6 +1804,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
             addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+            addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION)
             putExtra(BlockerActivity.EXTRA_BLOCKED_PACKAGE, blockedPackage)
             if (website != null) {
                 putExtra(BlockerActivity.EXTRA_BLOCKED_WEBSITE, website)
@@ -1773,8 +1816,9 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         // Background-activity-start restrictions: posting to Main gives startActivity
         // the best chance of succeeding when called from serviceScope (Default).
         withContext(Dispatchers.Main) {
-            if (currentForegroundPackage != blockedPackage || !isScreenInteractive()) return@withContext
+            if (foregroundEntry != entry || currentForegroundPackage != blockedPackage || !isScreenInteractive()) return@withContext
             if (DeviceAccessPolicy.isExempt(this@AppMonitorAccessibilityService, blockedPackage)) return@withContext
+            if (activeWindowPackage() != blockedPackage) return@withContext
             // A check begun before Frog armed may resume after a settings/store read.
             // Apply the current policy at the actual launch boundary as well.
             val enforceFrog = reason != "permanent" && (reason == FrogCoordinator.REASON_FROG || isFrogLockActive())
@@ -1790,29 +1834,17 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                     latestAppCheckDecision = "frog_stale_policy"
                     return@withContext
                 }
-                val root = rootForForegroundPackage(blockedPackage) ?: run {
-                    latestAppCheckDecision = "frog_missing_window"
-                    return@withContext
-                }
-                try {
-                    val rootPackage = root.packageName?.toString()
-                    if (rootPackage != blockedPackage || rootPackage == applicationContext.packageName) {
-                        latestAppCheckDecision = "frog_stale_window"
-                        return@withContext
-                    }
-                } finally {
-                    if (canRecycleNodes) runCatching { root?.recycle() }
-                }
                 intent.putExtra(EXTRA_BLOCK_REASON, FrogCoordinator.REASON_FROG)
                 intent.removeExtra(BlockerActivity.EXTRA_BLOCKED_WEBSITE)
                 val sourceAllowed = candidate != null && candidate == redirectCandidate &&
                     AppRedirectRecovery.canReturnTo(this@AppMonitorAccessibilityService, candidate.sourcePackage)
-                val nukeActive = try {
+                val nukeActive = if (candidate == null) false else try {
                     FocusLockApplication.instance.settingsRepository.isNukeActive()
                 } catch (error: kotlinx.coroutines.CancellationException) {
                     throw error
                 } catch (_: Exception) { true }
-                if (currentForegroundPackage != blockedPackage || activeWindowPackage() != blockedPackage) return@withContext
+                if (foregroundEntry != entry || currentForegroundPackage != blockedPackage ||
+                    (candidate != null && activeWindowPackage() != blockedPackage)) return@withContext
                 if (candidate != null && candidate == redirectCandidate &&
                     AppRedirectPolicy.isEligible(
                         candidate, currentForegroundPackage, SystemClock.elapsedRealtime(), sourceAllowed,
@@ -1870,7 +1902,16 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                     latestAppCheckDecision = "redirect_return_available"
                 }
             }
-            startActivity(intent)
+            if (foregroundEntry != entry || currentForegroundPackage != blockedPackage) return@withContext
+            val launch = entry to Triple(blockedPackage, website, intent.getStringExtra(EXTRA_BLOCK_REASON))
+            // A denied background launch can return normally. Coalesce only the
+            // pending launch window so later enforcement can retry if necessary.
+            val launchAt = SystemClock.elapsedRealtime()
+            if (lastBlockerLaunch == launch && launchAt - lastBlockerLaunchAtMs in 0L..750L) return@withContext
+            startActivity(intent, ActivityOptions.makeCustomAnimation(this@AppMonitorAccessibilityService, 0, 0).toBundle())
+            lastBlockerObservedAtMs = foregroundObservedAtMs
+            lastBlockerLaunch = launch
+            lastBlockerLaunchAtMs = launchAt
         }
     }
 

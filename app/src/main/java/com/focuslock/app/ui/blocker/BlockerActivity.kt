@@ -89,6 +89,7 @@ class BlockerActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         // No screenshots / recents thumbnail of the lock screen.
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        window.setWindowAnimations(0)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
@@ -120,8 +121,14 @@ class BlockerActivity : ComponentActivity() {
         // permission change or leaving home. Keep the underlying commitment intact.
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
+                launch {
+                    while (true) {
+                        FocusLockApplication.instance.homeLocationRepository.shouldEnforceNow(permanent = isPermanentBlockNow())
+                        delay(10_000L)
+                    }
+                }
                 while (true) {
-                    if (!FocusLockApplication.instance.homeLocationRepository.shouldEnforceNow(permanent = isPermanentBlockNow())) {
+                    if (!FocusLockApplication.instance.homeLocationRepository.shouldEnforceOnAppSwitch(permanent = isPermanentBlockNow())) {
                         homeEnforcementAllowed = false
                         discardFrogFocusSession()
                         if (isFrogBlocked()) com.focuslock.app.service.FrogHomeLauncher.openRegularHome(this@BlockerActivity)
@@ -296,6 +303,7 @@ class BlockerActivity : ComponentActivity() {
      */
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        val previousTarget = Triple(blockedPackage, blockedWebsite, blockReason)
         setIntent(intent)
         readBlockTargetFromIntent()
         loadReturnAppFromIntent()
@@ -310,7 +318,8 @@ class BlockerActivity : ComponentActivity() {
                 }
             }
         }
-        renderBlockerContent()
+        // Reusing the same focus surface should retain its composition and timer UI.
+        if (previousTarget != Triple(blockedPackage, blockedWebsite, blockReason)) renderBlockerContent()
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -525,7 +534,7 @@ class BlockerActivity : ComponentActivity() {
         if (frogSessionRunning.value) return
         lifecycleScope.launch {
             val app = FocusLockApplication.instance
-            val enforceNow = app.homeLocationRepository.shouldEnforceNow(permanent = isPermanentBlockNow())
+            val enforceNow = app.homeLocationRepository.shouldEnforceOnAppSwitch(permanent = isPermanentBlockNow())
             val state = app.frogRepository.currentState()
             val task = state.frog
             if (!homeEnforcementAllowed || !enforceNow || !state.locked || !state.toolsConfirmed || task == null) {
@@ -557,7 +566,7 @@ class BlockerActivity : ComponentActivity() {
             val startWall = prefs.getLong(KEY_FROG_TIMER_START_WALL, 0L)
             val bootCount = currentBootCount()
             val enforceNow = FocusLockApplication.instance.homeLocationRepository
-                .shouldEnforceNow(permanent = isPermanentBlockNow())
+                .shouldEnforceOnAppSwitch(permanent = isPermanentBlockNow())
             val matches = state.locked && state.toolsConfirmed && state.frog?.id == prefs.getString(KEY_FROG_TIMER_TASK_ID, null) &&
                 state.cycleDate == prefs.getString(KEY_FROG_TIMER_CYCLE_DATE, null) &&
                 startElapsed in 1L..SystemClock.elapsedRealtime() && startWall > 0L &&
