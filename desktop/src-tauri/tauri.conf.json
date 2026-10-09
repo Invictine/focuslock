@@ -15,7 +15,13 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "installer-hooks.nsh"
+      }
+    },
     "icon": ["icons/icon.ico", "icons/icon.icns", "icons/icon.png"]
   }
 }

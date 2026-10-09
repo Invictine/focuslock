@@ -2,6 +2,7 @@ import { useCallback, useEffect } from "react";
 import { ConvexHttpClient } from "convex/browser";
 import { getFunctionName, type FunctionReference, type FunctionArgs, type FunctionReturnType } from "convex/server";
 import { useFocusAuth } from "./auth";
+import { persistStrictUninstallGuard } from "./strictUninstall";
 import { enqueueMutation, pendingMutations, replayMutations, type MutationReplayResult } from "./offlineQueue";
 
 const flights = new Map<string, Promise<Map<string, MutationReplayResult>>>();
@@ -41,6 +42,11 @@ export function useDurableMutation<F extends FunctionReference<"mutation">>(refe
       const result = results.get(id);
       if (!result) throw new Error('This change is waiting for sync.');
       if (!result.ok) throw result.error;
+      if (path === "focus:savePrefs" && (args as any).strictMode === true) {
+        // Persist before reporting success. The realtime snapshot adopts the
+        // server's session ID so guardian approval can release this lock.
+        await persistStrictUninstallGuard(account, args as any);
+      }
       return result.value as FunctionReturnType<F>;
     } catch (error) {
       const detail = error instanceof Error ? error.message : 'The server did not confirm this change.';

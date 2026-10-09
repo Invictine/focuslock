@@ -10,12 +10,15 @@ mod browser_launch;
 mod browser_warning;
 mod browser_window;
 mod tracking;
+mod uninstall_guard;
 mod windows_capture;
 
 use tauri::Manager;
 use tracking::TrackerRuntime;
 
 fn main() {
+    let context: tauri::Context<tauri::Wry> = tauri::generate_context!();
+    if uninstall_guard::maybe_run_uninstall_check(&context.config().identifier) { return; }
     if browser_bridge::maybe_run_host() { return; }
     if background::maybe_run_watchdog() { return; }
     let app = tauri::Builder::default()
@@ -28,6 +31,9 @@ fn main() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
+            app.manage(uninstall_guard::UninstallGuardRuntime::new(
+                data_dir.join("strict-uninstall-v1.json"),
+            ));
             if let Err(error) = browser_bridge::register_host(&data_dir) {
                 eprintln!("Could not register browser extension connection: {error}");
             }
@@ -106,6 +112,7 @@ fn main() {
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
+            uninstall_guard::sync_strict_uninstall_guard,
             auth::get_browser_auth_state,
             auth::get_browser_auth_token,
             auth::start_browser_sign_in,
@@ -128,7 +135,7 @@ fn main() {
             blocker::get_blocker_state,
             blocker::blocker_action,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while running FocusLock desktop");
     app.run(|app_handle, event| {
         if let tauri::RunEvent::ExitRequested { api, .. } = &event {

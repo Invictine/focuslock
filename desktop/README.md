@@ -40,6 +40,16 @@ npm run tauri:dev      # needs Rust
 npm run tauri:build    # installer in src-tauri/target/release/bundle
 ```
 
+## Windows Strict Mode uninstall protection
+
+The NSIS Windows installer refuses removal while a Strict Mode commitment saved on this PC is active. Windows Settings, the registered uninstaller, silent uninstall, and `/UPDATE` all use the same native check before any files are removed. Installer upgrades that need removal also wait until the commitment ends; `/UPDATE` is deliberately not an exemption. Windows builds publish NSIS installers only, because MSI removal does not run this hook. Existing installations need the new installer before their uninstall path is protected.
+
+FocusLock mirrors account Strict Mode into `strict-uninstall-v1.json` in its Tauri app-data directory. The check runs without a window, sign-in, network connection, tracker, or recovery process. Signing out, switching accounts, quitting, and restarting do not erase timed commitments. Expiry releases the lock automatically; a synced guardian approval releases only its matching account, current session, and end time. Failed persistence is shown in the dashboard and retried. Corrupt or unreadable guard state refuses uninstall until it can be read again. Cross-device starts/approvals apply once this desktop receives the account update; offline desktops cannot discover a new phone commitment.
+
+This is normal-uninstaller protection in a per-user Windows app. An administrator or a user who manually deletes/modifies the installation or its data can bypass it; this is not a privileged anti-tamper service. The policy belongs to the FocusLock desktop host, so standalone Void has no matching Strict/account/uninstall integration and no shared launcher source changes are required.
+
+Run `powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/verify-strict-uninstall.ps1` after building the native release to test the actual NSIS hook and native probe in a disposable app-data/installation sandbox. It never uninstalls the user's FocusLock installation.
+
 ## Auth notes (Clerk in Tauri — read this)
 
 - Email/password + verification codes work inside the Tauri window.

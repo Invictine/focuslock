@@ -32,6 +32,7 @@ import { DESKTOP_FROG_ENABLED } from "./features";
 import FrogCard from "./FrogCard";
 import ApprovalUnlockPanel from "./ApprovalUnlockPanel";
 import { useStrictActive } from "./useStrictActive";
+import { useStrictUninstallGuard } from "./strictUninstall";
 import { MAX_STRICT_HOURS, STRICT_HOUR_OPTIONS, strictDurationLabel, strictEndError } from "./strictTiming";
 import {
   FROG_UI_MAX_REQUIRED_MINUTES,
@@ -1353,6 +1354,7 @@ function DesktopApp() {
     tab === "focus" || tab === "account" ? EMPTY_ARGS : "skip",
   );
   const accountKey = auth.user?.id || null;
+  const uninstallGuardError = useStrictUninstallGuard(accountKey, configuration?.prefs);
   const [localTime, setLocalTime] = useState<{ account: string; device: string; buckets: UsageBucket[] } | null>(null);
   useEffect(() => {
     if (!accountKey || !deviceId || !snapshot) { setLocalTime(null); return; }
@@ -1772,6 +1774,7 @@ function DesktopApp() {
   const clearPendingMerge = useCallback(() => setPendingMerge(null), []);
   return (
     <div className="app-frame">
+      {uninstallGuardError && <p role="alert" className="error-text">{uninstallGuardError}</p>}
       <aside className="rail">
         <div className="brand">
           <span className="brand-mark">
@@ -5075,7 +5078,7 @@ function SettingsPage({
           <span className="setting-icon"><Icon name="clock" /></span>
           <div>
             <strong>Strict commitment</strong>
-            <p>{strictActive && prefs.strictEndsAt ? `Active until ${new Date(prefs.strictEndsAt).toLocaleString()}.` : "Lock boundary settings for a duration. App access follows your existing rules."}</p>
+            <p>{strictActive && prefs.strictEndsAt ? `Active until ${new Date(prefs.strictEndsAt).toLocaleString()}. Windows uninstall is locked during this commitment.` : "Lock boundary settings and Windows uninstall for a duration. App access follows your existing rules."}</p>
             <div className="setting-inline">
               <select value={prefs.strictPreset || "custom"} onChange={(e) => void setStrictPreset(e.target.value)} aria-label="Strict mode preset">
                 <option value="custom">Custom</option>
