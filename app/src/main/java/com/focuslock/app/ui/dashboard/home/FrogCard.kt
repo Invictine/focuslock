@@ -264,8 +264,8 @@ fun FrogCard(modifier: Modifier = Modifier, onOpenSettings: (() -> Unit)? = null
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
-    LaunchedEffect(state?.phase) {
-        if (state?.phase == FrogPhase.PICK_TOOLS) showTools = true
+    LaunchedEffect(state?.phase, state?.dailyExempt) {
+        if (state?.phase == FrogPhase.PICK_TOOLS && state?.dailyExempt != true) showTools = true
     }
 
     val frogState = state
@@ -289,6 +289,24 @@ fun FrogCard(modifier: Modifier = Modifier, onOpenSettings: (() -> Unit)? = null
                 Text("Eat the frog", style = MaterialTheme.typography.titleSmall)
                 Text("Off · Enable in settings", style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        return
+    }
+
+    if (frogState?.dailyExempt == true) {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+            shape = MaterialTheme.shapes.large,
+            modifier = modifier.fillMaxWidth(),
+        ) {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("Eat the frog", style = MaterialTheme.typography.titleSmall)
+                Text(
+                    "Released for today · You logged more than 30 minutes of focus.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
         return

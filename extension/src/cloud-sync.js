@@ -800,7 +800,8 @@ async function getDashboard(fromDate, toDate) {
     callConvex('query', 'groups:groupsState', {}, auth.authToken),
   ]);
   await assertIdentity(auth.userId, auth.session);
-  return { signedIn: true, dashboard: { ...dashboard, groups: groupsState?.groups || [], groupsUpdatedAt: groupsState?.updatedAt || 0 } };
+  return { signedIn: true, accountId: auth.userId,
+    dashboard: { ...dashboard, groups: groupsState?.groups || [], groupsUpdatedAt: groupsState?.updatedAt || 0 } };
 }
 
 async function saveGroups({ groups, updatedAt }) {

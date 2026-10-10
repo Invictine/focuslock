@@ -17,6 +17,8 @@ import com.focuslock.app.data.model.FrogPhase
 import com.focuslock.app.data.model.FrogState
 import com.focuslock.app.data.model.FrogTask
 import com.focuslock.app.data.model.BlockedApp
+import com.focuslock.app.data.model.TickTickWorkRecord
+import com.focuslock.app.data.model.UserStats
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -31,7 +33,10 @@ import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -76,6 +81,47 @@ fun computeFrogLocked(
     trackedSeconds: Int,
     requiredSeconds: Int,
 ): Boolean = enabled && armed && !(tickedOff && trackedSeconds >= requiredSeconds)
+
+/** More than 30 calendar-day focus minutes earns an automatic Frog exemption. */
+fun frogDailyExempt(focusMinutesToday: Int): Boolean = focusMinutesToday > FROG_DAILY_EXEMPT_MINUTES
+
+const val FROG_DAILY_EXEMPT_MINUTES = 30
+
+/** Counts only credited focus-record source kinds already logged on the local calendar day. */
+fun focusMinutesLoggedToday(
+    records: List<TickTickWorkRecord>,
+    nowMillis: Long,
+    zoneId: ZoneId = ZoneId.systemDefault(),
+): Int {
+    val start = Instant.ofEpochMilli(nowMillis).atZone(zoneId).toLocalDate().atStartOfDay(zoneId).toInstant().toEpochMilli()
+    val end = Instant.ofEpochMilli(nowMillis).atZone(zoneId).toLocalDate().plusDays(1).atStartOfDay(zoneId).toInstant().toEpochMilli()
+    return records.asSequence()
+        .filter { it.timestamp in start..minOf(nowMillis, end - 1L) }
+        .filter { CreditBankRepository.isFocusRecord(it.source, it.durationMinutes) }
+        .sumOf { it.durationMinutes.coerceAtLeast(0) }
+}
+
+/** Uses history detail and the same-calendar-day bank aggregate without double counting. */
+fun focusMinutesToday(
+    records: List<TickTickWorkRecord>,
+    stats: UserStats?,
+    nowMillis: Long,
+    zoneId: ZoneId = ZoneId.systemDefault(),
+): Int {
+    val date = Instant.ofEpochMilli(nowMillis).atZone(zoneId).toLocalDate().format(FROG_DATE_FORMAT)
+    val aggregate = stats?.takeIf { it.lastResetDate == date }?.totalWorkMinutesToday ?: 0
+    return maxOf(focusMinutesLoggedToday(records, nowMillis, zoneId), aggregate.coerceAtLeast(0))
+}
+
+/** Re-evaluates full history against an injected clock so the exemption expires at local midnight. */
+fun frogDailyExemptionFlow(
+    history: Flow<List<TickTickWorkRecord>>,
+    clockMillis: Flow<Long>,
+    zoneId: ZoneId = ZoneId.systemDefault(),
+    focusStatsFlow: Flow<UserStats?> = flowOf(null),
+): Flow<Boolean> = combine(history, clockMillis, focusStatsFlow) { records, now, stats ->
+    frogDailyExempt(focusMinutesToday(records, stats, now, zoneId))
+}.distinctUntilChanged()
 
 /** Five-minute local-device grace, anchored to the first interaction in each cycle. */
 const val FROG_DAILY_GRACE_MILLIS: Long = 5 * 60 * 1000L
@@ -151,9 +197,9 @@ private fun frogBoundaryPackages(context: Context): Flow<Set<String>> = combine(
  * a lazy daily rollover (same spirit as `checkAndResetDailyStats()`), plain
  * `data.map { ... }` flows, and kotlinx-serialization JSON blobs for lists/tasks.
  *
- * Lock rule: [computeFrogLocked]. The frog is armed once per cycle day (typically by
- * FrogWakeReceiver), a task is selected, and the lock only releases when the task is
- * ticked off with at least the required focus time tracked.
+ * Lock rule: [computeFrogLocked], with a derived local-calendar-day exemption after
+ * more than 30 focus minutes. The exemption does not alter the enabled preference or
+ * task state, and expires automatically when the local calendar date changes.
  *
  * No call on this class ever throws (except cancellation): DataStore failures are
  * logged and fall back to defaults, so a caller — including a broadcast receiver —
@@ -163,6 +209,14 @@ class FrogRepository(
     private val context: Context,
     private val frogStore: DataStore<Preferences> = context.frogDataStore,
     boundaryPackages: Flow<Set<String>> = frogBoundaryPackages(context),
+    private val focusHistoryFlow: Flow<List<TickTickWorkRecord>> = flowOf(emptyList()),
+    private val focusStatsFlow: Flow<UserStats?> = flowOf(null),
+    private val clockMillisFlow: Flow<Long> = flow {
+        while (true) {
+            emit(System.currentTimeMillis())
+            delay(60_000L)
+        }
+    },
 ) {
 
     private val json = Json { ignoreUnknownKeys = true }
@@ -260,7 +314,13 @@ class FrogRepository(
      * and persists asynchronously (exactly like CreditBankRepository.statsFlow does for
      * daily stats), while the authoritative reset runs on the next suspend call.
      */
-    val frogStateFlow: Flow<FrogState> = combine(frogStore.data, boundaryAppPackagesFlow) { prefs, boundaries ->
+    private val dailyExemptionFlow = frogDailyExemptionFlow(
+        focusHistoryFlow,
+        clockMillisFlow,
+        focusStatsFlow = focusStatsFlow,
+    )
+
+    val frogStateFlow: Flow<FrogState> = combine(frogStore.data, boundaryAppPackagesFlow, dailyExemptionFlow) { prefs, boundaries, exempt ->
         val now = System.currentTimeMillis()
         val today = frogCycleDate(now, wakeHour(prefs))
         val state = if ((prefs[Keys.FROG_CYCLE_DATE] ?: "") != today) {
@@ -270,7 +330,7 @@ class FrogRepository(
         } else {
             stateFromPrefs(prefs, today)
         }
-        state.withBoundaries(boundaries)
+        state.withBoundaries(boundaries).copy(dailyExempt = exempt, locked = state.locked && !exempt)
     }
         .catch { e ->
             if (e is CancellationException) throw e
@@ -330,6 +390,7 @@ class FrogRepository(
      */
     suspend fun startGraceIfDue(nowMillis: Long = System.currentTimeMillis()): Boolean = withFrogStore(false) {
         rolloverIfNeeded(nowMillis)
+        if (isDailyExempt(nowMillis)) return@withFrogStore false
         var armedNow = false
         val committed = editFrogPrefs { prefs ->
             val currentWakeHour = wakeHour(prefs)
@@ -351,6 +412,7 @@ class FrogRepository(
     /** Immediate arm primitive retained for controlled setup and test fixtures. */
     suspend fun armIfDue(nowMillis: Long = System.currentTimeMillis()): Boolean = withFrogStore(false) {
         rolloverIfNeeded(nowMillis)
+        if (isDailyExempt(nowMillis)) return@withFrogStore false
         var armedNow = false
         val committed = editFrogPrefs { prefs ->
             val enabled = prefs[Keys.FROG_ENABLED] ?: DEFAULT_ENABLED
@@ -366,6 +428,7 @@ class FrogRepository(
     /** Arms only after a previously started local grace period expires. */
     suspend fun armAfterGraceIfDue(nowMillis: Long = System.currentTimeMillis()): Boolean = withFrogStore(false) {
         rolloverIfNeeded(nowMillis)
+        if (isDailyExempt(nowMillis)) return@withFrogStore false
         var armedNow = false
         val committed = editFrogPrefs { prefs ->
             val enabled = prefs[Keys.FROG_ENABLED] ?: DEFAULT_ENABLED
@@ -501,6 +564,7 @@ class FrogRepository(
     /** Whether the frog lock is active right now (fresh read, rollover applied first). */
     suspend fun isLockActive(nowMillis: Long = System.currentTimeMillis()): Boolean = withFrogStore(false) {
         rolloverIfNeeded(nowMillis)
+        if (isDailyExempt(nowMillis)) return@withFrogStore false
         val prefs = readFrogPrefs()
         computeFrogLocked(
             enabled = prefs[Keys.FROG_ENABLED] ?: DEFAULT_ENABLED,
@@ -523,7 +587,20 @@ class FrogRepository(
                 stateFromPrefs(prefs, today)
             }
             state.withBoundaries(boundaryAppPackagesFlow.first())
+                .withDailyExemption(focusHistoryFlow.first(), focusStatsFlow.first(), nowMillis)
         }
+
+    private suspend fun isDailyExempt(nowMillis: Long): Boolean =
+        frogDailyExempt(focusMinutesToday(focusHistoryFlow.first(), focusStatsFlow.first(), nowMillis))
+
+    private fun FrogState.withDailyExemption(
+        history: List<TickTickWorkRecord>,
+        stats: UserStats?,
+        nowMillis: Long,
+    ): FrogState {
+        val exempt = frogDailyExempt(focusMinutesToday(history, stats, nowMillis))
+        return if (exempt) copy(dailyExempt = true, locked = false) else copy(dailyExempt = false)
+    }
 
     /**
      * Lazy daily rollover (mirrors CreditBankRepository.checkAndResetDailyStats): when the

@@ -130,8 +130,8 @@ function render() {
     </section>
 
     ${showFrog ? `<section class="frog-card" aria-labelledby="frog-heading">
-      <div class="frog-head"><div><p class="label">Eat the Frog · Chrome</p><h2 id="frog-heading">${escapeHtml(frog.frog?.title || 'Choose today’s task')}</h2></div><span class="state ${frog.locked ? 'idle' : 'ok'}">${frog.locked ? 'Active' : 'Complete'}</span></div>
-      <p class="frog-copy">${frog.frog ? `${formatDuration(frog.trackedSeconds)} of ${formatDuration(frog.requiredSeconds)} focused${frog.tickedOff ? ' · task marked done' : ' · mark done when finished'}` : 'Choose the task you need to finish before opening boundary websites.'}</p>
+      <div class="frog-head"><div><p class="label">Eat the Frog · Chrome</p><h2 id="frog-heading">${escapeHtml(frog.frog?.title || 'Choose today’s task')}</h2></div><span class="state ${frog.locked ? 'idle' : 'ok'}">${frog.disabledByDailyFocus ? 'Paused' : frog.locked ? 'Active' : 'Complete'}</span></div>
+      <p class="frog-copy">${frog.disabledByDailyFocus ? `Paused after ${formatDuration(frog.dailyFocusSeconds)} of focus today. Your task stays saved.` : frog.frog ? `${formatDuration(frog.trackedSeconds)} of ${formatDuration(frog.requiredSeconds)} focused${frog.tickedOff ? ' · task marked done' : ' · mark done when finished'}` : 'Choose the task you need to finish before opening boundary websites.'}</p>
       ${frog.frog ? `<div class="progress" role="progressbar" aria-label="Frog focus progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${frogPercent}"><i style="width:${frogPercent}%"></i></div>` : ''}
       ${!frog.frog && frog.armed && frog.locked ? `<div class="frog-select"><input id="frogTitleInput" maxlength="200" placeholder="Today’s important task" aria-label="Today’s important task" value="${escapeHtml(frogDraft)}" ${featureBusy ? 'disabled' : ''}><button class="primary" id="frogSelect" ${featureBusy ? 'disabled' : ''}>Choose</button></div>` : ''}
       ${frog.frog ? `<div class="frog-actions">${featureStatus?.timer

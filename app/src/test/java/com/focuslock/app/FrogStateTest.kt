@@ -2,9 +2,16 @@ package com.focuslock.app
 
 import com.focuslock.app.data.model.FrogPhase
 import com.focuslock.app.data.model.FrogTask
+import com.focuslock.app.data.model.TickTickWorkRecord
+import com.focuslock.app.data.model.UserStats
+import com.focuslock.app.data.model.WorkRecordSource
 import com.focuslock.app.data.repository.canArmNow
 import com.focuslock.app.data.repository.computeFrogLocked
+import com.focuslock.app.data.repository.focusMinutesLoggedToday
+import com.focuslock.app.data.repository.focusMinutesToday
 import com.focuslock.app.data.repository.frogCycleDate
+import com.focuslock.app.data.repository.frogDailyExempt
+import com.focuslock.app.data.repository.frogDailyExemptionFlow
 import com.focuslock.app.data.repository.frogGraceEndsAt
 import com.focuslock.app.data.repository.frogGraceExpired
 import com.focuslock.app.data.repository.pendingFrogGraceDeadline
@@ -13,6 +20,9 @@ import com.focuslock.app.data.repository.sanitizeFrogToolPackages
 import java.time.LocalDateTime
 import java.time.ZoneId
 import kotlinx.serialization.json.Json
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -31,6 +41,67 @@ class FrogStateTest {
 
     private fun millisAt(year: Int, month: Int, day: Int, hour: Int, minute: Int): Long =
         LocalDateTime.of(year, month, day, hour, minute).atZone(zone).toInstant().toEpochMilli()
+
+    @Test
+    fun dailyExemptionRequiresMoreThanThirtyMinutesOfFocus() {
+        assertFalse(frogDailyExempt(0))
+        assertFalse(frogDailyExempt(30))
+        assertTrue(frogDailyExempt(31))
+    }
+
+    @Test
+    fun dailyExemptionCountsTodayFocusOnlyAndIgnoresNonFocusLogs() {
+        val today = millisAt(2026, 10, 9, 12, 0)
+        val records = listOf(
+            TickTickWorkRecord("manual", "Manual", 20, today, WorkRecordSource.MANUAL_ENTRY),
+            TickTickWorkRecord("ticktick", "Focus", 11, today, WorkRecordSource.TICKTICK_FOCUS_API),
+            TickTickWorkRecord("task", "Task", 60, today, WorkRecordSource.TICKTICK_API),
+            TickTickWorkRecord("old", "Yesterday", 60, today - 86_400_000L, WorkRecordSource.MANUAL_ENTRY),
+        )
+        assertEquals(31, focusMinutesLoggedToday(records, today, zone))
+        assertTrue(frogDailyExempt(focusMinutesLoggedToday(records, today, zone)))
+    }
+
+    @Test
+    fun dailyFocusCountExcludesNonFocusSourcesAndFutureRecords() {
+        val now = millisAt(2026, 10, 9, 12, 0)
+        val records = listOf(
+            TickTickWorkRecord("manual", "Manual", 15, now, WorkRecordSource.MANUAL_ENTRY),
+            TickTickWorkRecord("ticktick", "Focus", 16, now, WorkRecordSource.TICKTICK_FOCUS_API),
+            TickTickWorkRecord("task", "Task", 60, now, WorkRecordSource.TICKTICK_API),
+            TickTickWorkRecord("notification", "Notification", 60, now, WorkRecordSource.TICKTICK_NOTIFICATION),
+            TickTickWorkRecord("app", "App foreground", 60, now, WorkRecordSource.TICKTICK_APP_FOCUS),
+            TickTickWorkRecord("later-today", "Not logged yet", 90, now + 60_000L, WorkRecordSource.MANUAL_ENTRY),
+            TickTickWorkRecord("tomorrow", "Tomorrow", 90, now + 86_400_000L, WorkRecordSource.MANUAL_ENTRY),
+        )
+
+        assertEquals(31, focusMinutesLoggedToday(records, now, zone))
+    }
+
+    @Test
+    fun matchingAggregateCoversTruncatedHistoryButStaleAggregateIsIgnored() {
+        val now = millisAt(2026, 10, 9, 12, 0)
+        val history = listOf(
+            TickTickWorkRecord("visible", "Visible", 20, now, WorkRecordSource.MANUAL_ENTRY),
+        )
+        val sameDayStats = UserStats(totalWorkMinutesToday = 51, lastResetDate = "2026-10-09")
+        val staleStats = UserStats(totalWorkMinutesToday = 51, lastResetDate = "2026-10-08")
+
+        assertEquals(51, focusMinutesToday(history, sameDayStats, now, zone))
+        assertEquals(20, focusMinutesToday(history, staleStats, now, zone))
+    }
+
+    @Test
+    fun exemptionFlowReleasesOnNewCalendarDayWithoutHistoryWrite() = runTest {
+        val records = MutableStateFlow(listOf(
+            TickTickWorkRecord("manual", "Manual", 31, millisAt(2026, 10, 9, 23, 0), WorkRecordSource.MANUAL_ENTRY),
+        ))
+        val clock = MutableStateFlow(millisAt(2026, 10, 9, 23, 59))
+        val exemption = frogDailyExemptionFlow(records, clock, zone)
+        assertTrue(exemption.first())
+        clock.value = millisAt(2026, 10, 10, 0, 0)
+        assertFalse(exemption.first())
+    }
 
     @Test
     fun dailyGraceStartsAtFirstInteractionAndExpiresAfterFiveMinutes() {

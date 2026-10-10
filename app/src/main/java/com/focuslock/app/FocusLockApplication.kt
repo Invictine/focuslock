@@ -79,7 +79,11 @@ class FocusLockApplication : Application() {
         appLimitsRepository = AppLimitsRepository(applicationContext, strictActivationActive)
         blockSchedulesRepository = BlockSchedulesRepository(applicationContext, strictActivationActive)
         blockLogRepository = BlockLogRepository(applicationContext)
-        frogRepository = FrogRepository(applicationContext)
+        frogRepository = FrogRepository(
+            applicationContext,
+            focusHistoryFlow = creditBankRepository.fullHistoryFlow,
+            focusStatsFlow = creditBankRepository.statsFlow,
+        )
         targetGroupsRepository = TargetGroupsRepository(applicationContext, strictActivationActive)
         homeLocationRepository = HomeLocationRepository(applicationContext, strictActivationActive = strictActivationActive)
         permanentBlocksRepository = PermanentBlocksRepository(applicationContext)

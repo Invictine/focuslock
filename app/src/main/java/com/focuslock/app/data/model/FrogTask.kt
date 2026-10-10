@@ -83,4 +83,6 @@ data class FrogState(
     val essentialAppPackages: Set<String>? = null,
     val boundaryAppPackages: Set<String> = emptySet(),
     val graceEndsAtMillis: Long? = null,
+    /** Automatically released for the calendar day after more than 30 focus minutes. */
+    val dailyExempt: Boolean = false,
 )

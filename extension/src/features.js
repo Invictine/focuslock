@@ -2,10 +2,11 @@
 (function (root) {
   'use strict';
   const DAY = 86400000;
+  const FROG_DAILY_FOCUS_LIMIT_SECONDS = 30 * 60;
   const clamp = (value, min, max, fallback) => Number.isFinite(Number(value))
     ? Math.max(min, Math.min(max, Math.floor(Number(value)))) : fallback;
   const dateKey = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-  function frogState(raw, now = Date.now()) {
+  function frogState(raw, now = Date.now(), dailyFocusSeconds = 0) {
     raw = raw && typeof raw === 'object' ? raw : {};
     const wakeHour = clamp(raw.wakeHour ?? 5, 0, 23, 5);
     const date = new Date(now);
@@ -22,8 +23,12 @@
       tickedOff: !rolled && raw.tickedOff === true,
     };
     if (result.enabled && new Date(now).getHours() >= wakeHour && result.cycleDate === dateKey(new Date(now))) result.armed = true;
-    result.locked = result.enabled && result.armed && !(result.tickedOff && result.trackedSeconds >= result.requiredSeconds);
-    result.phase = !result.enabled || !result.armed ? 'not-armed' : !result.frog ? 'pick-frog' : result.locked ? 'working' : 'complete';
+    result.dailyFocusSeconds = clamp(dailyFocusSeconds, 0, Number.MAX_SAFE_INTEGER, 0);
+    result.disabledByDailyFocus = result.dailyFocusSeconds > FROG_DAILY_FOCUS_LIMIT_SECONDS;
+    result.locked = result.enabled && result.armed && !result.disabledByDailyFocus
+      && !(result.tickedOff && result.trackedSeconds >= result.requiredSeconds);
+    result.phase = result.disabledByDailyFocus ? 'daily-focus-limit'
+      : !result.enabled || !result.armed ? 'not-armed' : !result.frog ? 'pick-frog' : result.locked ? 'working' : 'complete';
     return result;
   }
   function strictEnd(state, requested, now = Date.now()) {
@@ -64,5 +69,6 @@
     }
     return null;
   }
-  root.FocusLockFeatures = { frogState, strictEnd, timerState, elapsed, weeklyState, weeklyWindow };
+  root.FocusLockFeatures = { frogState, strictEnd, timerState, elapsed, weeklyState, weeklyWindow,
+    FROG_DAILY_FOCUS_LIMIT_SECONDS };
 })(typeof self !== 'undefined' ? self : globalThis);

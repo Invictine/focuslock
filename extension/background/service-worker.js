@@ -35,6 +35,81 @@ async function featureWrite(mutator) {
   mem.state = saved;
   return saved;
 }
+function focusItemsFromDashboard(dashboard, today) {
+  if (!dashboard || typeof dashboard !== 'object') return [];
+  const items = new Map();
+  const allowedSources = new Set(['chrome-extension', 'DESKTOP_TIMER', 'DESKTOP_MANUAL', 'VOID_LAUNCHER', 'MANUAL_ENTRY', 'TICKTICK_FOCUS_API']);
+  for (const session of Array.isArray(dashboard.sessions) ? dashboard.sessions : []) {
+    if (!allowedSources.has(String(session.source || ''))) continue;
+    const date = session.date || Store.todayKey(new Date(Number(session.timestamp) || 0));
+    if (date !== today) continue;
+    const id = `session:${String(session.sessionId || session.recordId || session._id || `${session.timestamp}:${session.title}`)}`;
+    items.set(id, Math.max(items.get(id) || 0, Math.max(0, Number(session.durationMinutes) || 0) * 60));
+  }
+  for (const record of Array.isArray(dashboard.records) ? dashboard.records : []) {
+    if (record.representsFocusSession || !allowedSources.has(String(record.source || ''))) continue;
+    const date = record.date || Store.todayKey(new Date(Number(record.timestamp) || 0));
+    if (date !== today) continue;
+    const id = `record:${String(record.recordId || record._id || `${record.timestamp}:${record.title}`)}`;
+    items.set(id, Math.max(items.get(id) || 0, Math.max(0, Number(record.durationMinutes) || 0) * 60));
+  }
+  return [...items].map(([id, seconds]) => ({ id, seconds }));
+}
+function dailyFocusSeconds(state, today, accountId) {
+  const items = new Map();
+  const summary = state.focusDailySummary;
+  if (summary?.date === today && summary.accountId === accountId) {
+    for (const row of summary.items || []) items.set(row.id, row.seconds);
+  }
+  for (const row of state.focusDailySessions || []) {
+    if (row.accountId === accountId && Store.todayKey(new Date(row.timestamp)) === today) {
+      items.set(`session:${row.id}`, Math.max(items.get(`session:${row.id}`) || 0, row.seconds));
+    }
+  }
+  return [...items.values()].reduce((sum, seconds) => sum + seconds, 0);
+}
+async function refreshDailyFocus() {
+  const today = Store.todayKey();
+  const current = await ensureState();
+  const previousAccountId = current.focusActiveAccountId || '';
+  const wasPaused = self.FocusLockFeatures.frogState(current.browserFrog, nowMs(),
+    dailyFocusSeconds(current, today, previousAccountId)).disabledByDailyFocus;
+  let activeAccountId = '';
+  let items = [];
+  try {
+    const status = await self.FocusLockCloud.status();
+    activeAccountId = status.signedIn ? status.accountId || '' : '';
+    if (activeAccountId) {
+      const cached = current.focusDailySummary;
+      if (cached?.date === today && cached.accountId === activeAccountId
+          && nowMs() - (Number(cached.fetchedAt) || 0) < 60_000) {
+        await featureWrite(state => { state.focusActiveAccountId = activeAccountId; return state; });
+        if (previousAccountId !== activeAccountId) await recheckWebsites();
+        return;
+      }
+      if (cached?.date === today && cached.accountId === activeAccountId) items = cached.items || [];
+      const result = await self.FocusLockCloud.getDashboard(today, today);
+      const afterStatus = await self.FocusLockCloud.status();
+      activeAccountId = afterStatus.signedIn ? afterStatus.accountId || '' : '';
+      if (result?.signedIn && result.accountId === activeAccountId && result.dashboard) {
+        items = focusItemsFromDashboard(result.dashboard, today);
+      } else if (activeAccountId !== cached?.accountId) {
+        items = [];
+      }
+    }
+  } catch (_) { /* switch to local account-matched evidence if auth or history is unavailable */ }
+  await featureWrite(state => {
+    state.focusActiveAccountId = activeAccountId;
+    state.focusDailySummary = activeAccountId
+      ? { date: today, accountId: activeAccountId, items, fetchedAt: nowMs() }
+      : { date: '', accountId: '', items: [], fetchedAt: nowMs() };
+    return state;
+  });
+  const latest = await ensureState();
+  const isPaused = self.FocusLockFeatures.frogState(latest.browserFrog, nowMs(),
+    dailyFocusSeconds(latest, today, activeAccountId)).disabledByDailyFocus;
+  if (wasPaused !== isPaused || previousAccountId !== activeAccountId) await recheckWebsites();
+}
 async function recheckWebsites() {
   const tabs = await chrome.tabs.query({});
   await Promise.allSettled(tabs.filter(tab => tab.id >= 0 && /^https?:/.test(tab.url || ''))
@@ -86,7 +161,8 @@ async function uploadStrict(pending) {
 async function changeFrog(message) {
   return featureSerial(async () => {
     const saved = await featureWrite(state => {
-      let frog = self.FocusLockFeatures.frogState(state.browserFrog);
+      const focusSeconds = dailyFocusSeconds(state, Store.todayKey(), state.focusActiveAccountId || '');
+      let frog = self.FocusLockFeatures.frogState(state.browserFrog, nowMs(), focusSeconds);
       if (message.type === 'frogConfigure') {
         if (frog.locked) throw new Error('Finish today’s Frog before changing its settings.');
         const required = Number(message.requiredMinutes), wake = Number(message.wakeHour);
@@ -96,7 +172,9 @@ async function changeFrog(message) {
       } else if (message.type === 'frogSelect') {
         const title = String(message.title || '').trim();
         if (!frog.enabled || !frog.armed) throw new Error('Enable Eat the Frog at or after your wake hour first.');
-        if (!frog.locked) throw new Error('Today’s Frog is already complete. Choose another tomorrow.');
+        if (!frog.locked) throw new Error(frog.disabledByDailyFocus
+          ? 'Eat the Frog is released for today after more than 30 minutes of focus.'
+          : 'Today’s Frog is already complete. Choose another tomorrow.');
         if (!title || title.length > 200) throw new Error('Enter a task title of up to 200 characters.');
         if (frog.frog && state.focusTimer) throw new Error('Finish the running focus session before changing your task.');
         frog.frog = { id: Store.uid('frog'), title }; frog.trackedSeconds = 0; frog.tickedOff = false;
@@ -108,7 +186,8 @@ async function changeFrog(message) {
       return state;
     });
     await recheckWebsites();
-    return { ok: true, frog: saved.browserFrog };
+    return { ok: true, frog: self.FocusLockFeatures.frogState(saved.browserFrog, nowMs(),
+      dailyFocusSeconds(saved, Store.todayKey(), saved.focusActiveAccountId || '')) };
   });
 }
 async function startFocusTimer(message) {
@@ -146,6 +225,13 @@ async function finishFocusTimerNow(completed) {
     if (frog.frog?.id === current.frogId && frog.cycleDate === current.frogCycle && frog.locked) frog.trackedSeconds += seconds;
     state.browserFrog = self.FocusLockFeatures.frogState(frog);
     state.focusTimer = null;
+    if (seconds > 0) {
+      state.focusDailySessions = Array.isArray(state.focusDailySessions) ? state.focusDailySessions : [];
+      if (!state.focusDailySessions.some(row => row.id === current.id)) state.focusDailySessions.push({
+        id: current.id, accountId: current.accountId || '', timestamp: current.startedAt, seconds,
+      });
+      state.focusDailySessions = state.focusDailySessions.slice(-500);
+    }
     if (minutes >= 5 && current.accountId) {
       state.pendingFocusSessions = state.pendingFocusSessions || [];
       if (!state.pendingFocusSessions.some(row => row.id === current.id)) state.pendingFocusSessions.push({
@@ -155,6 +241,11 @@ async function finishFocusTimerNow(completed) {
     }
     return state;
   });
+  const latest = await ensureState();
+  const focusDate = Store.todayKey();
+  const focusAccountId = latest.focusActiveAccountId || '';
+  if (self.FocusLockFeatures.frogState(latest.browserFrog, nowMs(),
+      dailyFocusSeconds(latest, focusDate, focusAccountId)).disabledByDailyFocus) await recheckWebsites();
   try { await uploadFocusSessions(); } catch (_) { /* durable account-bound pending record remains */ }
   return { ok: true, minutes, localOnly: !current.accountId, pending: (await ensureState()).pendingFocusSessions?.some(row => row.id === current.id) || false };
 }
@@ -172,6 +263,7 @@ async function maintainFeatures(upload = true) {
   if (!self.FocusLockFeatures) return;
   return featureSerial(async () => {
     const state = await ensureState();
+    if (state.browserFrog?.enabled === true) await refreshDailyFocus();
     const window = self.FocusLockFeatures.weeklyWindow(state.strictWeekly);
     if (window && state.strictWeekly.lastWindow !== window.key) {
       await featureWrite(state => { state.strictWeekly.lastWindow = window.key; return state; });
@@ -270,7 +362,10 @@ function verdictFor(urlStr, state, t) {
   // Windows. Keep local extension lists as additional browser-only rules.
   const sharedSite = (state.cloudSites || []).find((site) =>
     site.isBlocked && self.FocusLockMatcher.matchesAny(urlStr, [site.domain]));
-  const frog = self.FocusLockFeatures?.frogState(state.browserFrog, t);
+  const focusDate = Store.todayKey(new Date(t));
+  const focusAccountId = state.focusActiveAccountId || '';
+  const focusTodaySeconds = dailyFocusSeconds(state, focusDate, focusAccountId);
+  const frog = self.FocusLockFeatures?.frogState(state.browserFrog, t, focusTodaySeconds);
   if (frog?.locked && !authUrl && (sharedSite || state.lists.some(list => list.enabled
       && !(state.cloudSitesLoaded && ['list_social', 'list_video'].includes(list.id))
       && !M.matchesAny(urlStr, list.exceptions || [])
@@ -836,7 +931,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     } else if (msg.type === 'cloudSignOut') {
       const result = await self.FocusLockCloud.signOut();
       // Preserve cached rules and active strict commitments offline and across sign-out.
+      state.focusActiveAccountId = '';
+      state.focusDailySummary = { date: '', accountId: '', items: [], fetchedAt: nowMs() };
       await Store.save(state); mem.state = state;
+      await recheckWebsites();
       sendResponse(result);
     } else if (msg.type === 'permanentSiteAdded') {
       await syncCloud('edit');
@@ -866,11 +964,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse(result);
       }
     } else if (msg.type === 'frogStatus') {
-      sendResponse({ supported: true, ...self.FocusLockFeatures.frogState(state.browserFrog) });
+      await maintainFeatures(false);
+      const latest = await ensureState();
+      sendResponse({ supported: true, ...self.FocusLockFeatures.frogState(latest.browserFrog, nowMs(),
+        dailyFocusSeconds(latest, Store.todayKey(), latest.focusActiveAccountId || '')) });
     } else if (msg.type === 'featureStatus' || msg.type === 'featureRetry') {
       await maintainFeatures(msg.type === 'featureRetry');
       const latest = await ensureState();
-      sendResponse({ ok: true, frog: self.FocusLockFeatures.frogState(latest.browserFrog),
+      sendResponse({ ok: true, frog: self.FocusLockFeatures.frogState(latest.browserFrog, nowMs(),
+        dailyFocusSeconds(latest, Store.todayKey(), latest.focusActiveAccountId || '')),
         timer: latest.focusTimer, pendingSessions: latest.pendingFocusSessions?.length || 0,
         strictPending: Boolean(latest.strictPending), strictMode: strictIsActive(latest), strictEndsAt: latest.strictEndsAt,
         strictSessionId: latest.cloudPrefs?.strictSessionId || '', accountId: latest.cloudAccountId || '',

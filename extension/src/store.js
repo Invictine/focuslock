@@ -127,6 +127,9 @@
       strictSessionKey: '',
       browserFrog: { enabled: false, wakeHour: 5, requiredSeconds: 1800 },
       focusTimer: null,
+      focusDailySessions: [],
+      focusDailySummary: { date: '', accountId: '', items: [], fetchedAt: 0 },
+      focusActiveAccountId: '',
       pendingFocusSessions: [],
       strictPending: null,
       strictOriginAccountId: '',
@@ -223,6 +226,17 @@
       strictSessionKey: typeof s.strictSessionKey === 'string' ? s.strictSessionKey : '',
       browserFrog: root.FocusLockFeatures?.frogState(s.browserFrog) || d.browserFrog,
       focusTimer: root.FocusLockFeatures?.timerState(s.focusTimer) || null,
+      focusDailySessions: Array.isArray(s.focusDailySessions) ? s.focusDailySessions.filter(row =>
+        row && typeof row.id === 'string' && typeof row.accountId === 'string'
+          && Number.isFinite(row.timestamp) && Number.isFinite(row.seconds) && row.seconds >= 0).slice(-500) : [],
+      focusDailySummary: s.focusDailySummary && typeof s.focusDailySummary === 'object'
+        ? { date: /^\d{4}-\d{2}-\d{2}$/.test(s.focusDailySummary.date || '') ? s.focusDailySummary.date : '',
+          accountId: typeof s.focusDailySummary.accountId === 'string' ? s.focusDailySummary.accountId : '',
+          items: Array.isArray(s.focusDailySummary.items) ? s.focusDailySummary.items.filter(row => row && typeof row.id === 'string'
+            && Number.isFinite(row.seconds) && row.seconds >= 0).slice(-500) : [],
+          fetchedAt: Math.max(0, Number(s.focusDailySummary.fetchedAt) || 0) }
+        : d.focusDailySummary,
+      focusActiveAccountId: typeof s.focusActiveAccountId === 'string' ? s.focusActiveAccountId : '',
       pendingFocusSessions: Array.isArray(s.pendingFocusSessions) ? s.pendingFocusSessions.filter(row =>
         row && typeof row.id === 'string' && typeof row.accountId === 'string' && row.session && typeof row.session === 'object').slice(-100) : [],
       strictPending: s.strictPending && typeof s.strictPending.accountId === 'string' && s.strictPending.prefs
