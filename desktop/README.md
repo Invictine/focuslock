@@ -19,6 +19,8 @@ These changes concern FocusLock's host and its browser bridge. Shared `windows/v
 
 ## Desktop layout review
 
+Eat the Frog is temporarily disabled on the Windows desktop. The desktop hides its Frog card and launcher and ignores saved Frog-only native block targets; existing Frog preferences remain stored so they can be restored later. Other boundary, limit, and permanent-block rules continue to work. This is a FocusLock host setting and does not change the shared Void launcher or standalone Void.
+
 All five pages share page gutters and card spacing. Narrow windows use a single row of five navigation tabs; settings actions stack beneath their descriptions, and dialogs scroll within the available height. Strict mode has a dedicated section with labelled preset, timing, and duration/end-time fields and one Start/Extend action. These React host UI changes do not alter shared `windows/void/` source or standalone Void flows.
 
 Run `node scripts/verify-desktop-ui.mjs` from the repository root for isolated screen/dialog layout checks and screenshots in `build/ui-verification/`. The fixtures exercise the real React components without account writes or native blocking. They do not verify live sign-in, cross-device sync, or native launcher behavior.

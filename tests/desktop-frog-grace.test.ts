@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FROG_DAILY_GRACE_MS, FROG_KEYS, armIfDue, readFrogState } from "../desktop/src/frog";
 
+vi.mock("../desktop/src/features", () => ({ DESKTOP_FROG_ENABLED: true }));
+
 afterEach(() => vi.unstubAllGlobals());
 
 function useMemoryStorage() {

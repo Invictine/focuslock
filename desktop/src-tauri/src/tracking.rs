@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 const DEFAULT_REASON: &str = "blocked";
 // Matches desktop/src/features.ts.
-const DESKTOP_FROG_ENABLED: bool = true;
+const DESKTOP_FROG_ENABLED: bool = false;
 
 fn remove_disabled_frog_targets(targets: &mut BlockedTargets, reasons: &mut HashMap<String, String>) {
     if DESKTOP_FROG_ENABLED { return; }
@@ -1296,7 +1296,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn enabled_frog_targets_survive_reload_alongside_permanent_targets() {
+    fn disabled_frog_targets_are_removed_on_reload_alongside_preserving_other_targets() {
         let path = std::env::temp_dir().join(format!("focuslock-frog-enabled-{}.json", Uuid::new_v4()));
         let mut store = TrackingStore::new();
         store.blocked_targets = BlockedTargets {
@@ -1313,12 +1313,11 @@ mod tests {
         store.permanent_targets = vec!["permanent.exe".into()];
         persist_store(&path, &store).unwrap();
         let restored = load_store(&path).unwrap();
-        assert_eq!(restored.blocked_targets.app_ids, ["frog-only.exe", "limited.exe", "permanent.exe"]);
-        assert_eq!(restored.blocked_targets.domains, ["boundary.example", "frog.example"]);
+        assert_eq!(restored.blocked_targets.app_ids, ["limited.exe", "permanent.exe"]);
+        assert_eq!(restored.blocked_targets.domains, ["boundary.example"]);
         assert_eq!(restored.blocked_reasons.get("permanent.exe").map(String::as_str), Some(PERMANENT_REASON));
         assert_eq!(restored.blocked_reasons.get("limited.exe").map(String::as_str), Some("limit"));
-        assert_eq!(restored.blocked_reasons.get("frog-only.exe").map(String::as_str), Some("frog"));
-        assert_eq!(restored.blocked_reasons.get("frog.example").map(String::as_str), Some("frog"));
+        assert!(!restored.blocked_reasons.values().any(|reason| reason == "frog"));
         let _ = fs::remove_file(path);
     }
 
