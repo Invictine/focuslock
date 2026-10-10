@@ -81,4 +81,19 @@ class FrogHomeLauncherTest {
             )
         )
     }
+
+    @Test
+    fun unchangedSavedLauncherSkipsFallbackInventoryRefresh() {
+        assertEquals(false, FrogHomeLauncher.shouldCaptureFallback(niagara, niagara, "com.focuslock.app"))
+    }
+
+    @Test
+    fun focusLockAsCurrentLauncherDoesNotReplaceSavedFallback() {
+        assertEquals(false, FrogHomeLauncher.shouldCaptureFallback(focusLock, niagara, "com.focuslock.app"))
+    }
+
+    @Test
+    fun changedExternalLauncherRefreshesFallback() {
+        assertEquals(true, FrogHomeLauncher.shouldCaptureFallback(stockLauncher, niagara, "com.focuslock.app"))
+    }
 }

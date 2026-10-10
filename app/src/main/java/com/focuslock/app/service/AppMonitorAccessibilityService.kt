@@ -880,6 +880,13 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             }
             if (reason != null) decisions[window.id] = reason
         }
+        // The first snapshot found no windows to shield. Clear any stale overlays
+        // immediately and skip the second full accessibility-window scan, which is
+        // otherwise repeated every second even on the normal single-window path.
+        if (decisions.isEmpty()) {
+            if (!popupShield.update(emptyList())) Log.w(TAG, "Popup shield unavailable: ${popupShield.lastError}")
+            return
+        }
         if (!isScreenInteractive() || keyguard?.isKeyguardLocked == true) {
             popupShield.clear()
             return

@@ -3,6 +3,8 @@ param(
     [string]$ConfigPath,
     [string]$StatePath,
     [switch]$ValidateOnly,
+    [ValidateSet('Debug', 'Performance')]
+    [string]$BuildVariant = 'Performance',
     [string]$Notes,
     [ValidateRange(2, 2100000000)]
     [int]$VersionCode
@@ -137,6 +139,7 @@ if (-not $firebase) { Stop-WithError 'Firebase CLI was not found on PATH. Instal
 
 Write-Output "Distribution config is valid for project $($config.projectId); Firebase app $($config.appId)."
 Write-Output "JDK 17, Android SDK build-tools, Gradle wrapper, and Firebase CLI are available."
+Write-Output "Selected Android build variant: $BuildVariant."
 if ($ValidateOnly) {
     Write-Output 'Validation only: no Firebase calls, build, or upload were performed.'
     exit 0
@@ -187,11 +190,13 @@ if ($VersionCode -gt 0) {
 }
 if ($nextCode -gt 2100000000) { Stop-WithError 'Generated versionCode exceeds the Android update counter limit.' }
 [IO.File]::WriteAllText($statePath, (@{ lastVersionCode = $nextCode } | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
-Write-Output "Building debug APK with versionCode $nextCode."
-Invoke-Native $gradleWrapper @('testDebugUnitTest', 'lintDebug', 'assembleDebug', "-PfocuslockVersionCode=$nextCode", '--no-daemon', '--console=plain') 'Android validation and debug build' | Out-Null
+Write-Output "Building $BuildVariant APK with versionCode $nextCode."
+Invoke-Native $gradleWrapper @('testDebugUnitTest', 'lintDebug', "assemble$BuildVariant", "-PfocuslockVersionCode=$nextCode", '--no-daemon', '--console=plain') "Android validation and $BuildVariant build" | Out-Null
 
-$apkPath = Join-Path $repoRoot 'app\build\outputs\apk\debug\app-debug.apk'
-if (-not (Test-Path -LiteralPath $apkPath -PathType Leaf)) { Stop-WithError 'Gradle completed but the expected debug APK was not produced.' }
+$variantDirectory = $BuildVariant.ToLowerInvariant()
+$apkName = "app-$variantDirectory.apk"
+$apkPath = Join-Path $repoRoot "app\build\outputs\apk\$variantDirectory\$apkName"
+if (-not (Test-Path -LiteralPath $apkPath -PathType Leaf)) { Stop-WithError "Gradle completed but the expected $BuildVariant APK was not produced: $apkPath" }
 Invoke-Native $tools.Signer @('verify', '--verbose', $apkPath) 'APK signature verification' | Out-Null
 $badging = Invoke-Native $tools.Aapt @('dump', 'badging', $apkPath) 'APK metadata inspection'
 $badgingText = $badging -join "`n"
@@ -201,7 +206,7 @@ if (-not $PSBoundParameters.ContainsKey('Notes')) {
     $commit = 'unknown'
     $commitLines = @(& git -C $repoRoot rev-parse --short HEAD 2>$null)
     if ($LASTEXITCODE -eq 0 -and $commitLines.Count -gt 0) { $commit = [string]$commitLines[0] }
-    $Notes = "FocusLock Android debug build $nextCode (source commit $commit)."
+    $Notes = "FocusLock Android $($BuildVariant.ToLowerInvariant()) build $nextCode (source commit $commit)."
 }
 $notesPath = Join-Path ([IO.Path]::GetTempPath()) ("focuslock-release-notes-" + [guid]::NewGuid().ToString('N') + '.txt')
 try {

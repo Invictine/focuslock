@@ -92,6 +92,7 @@ private data class FrogEssentialAppsData(
 internal fun FrogEssentialAppsScreen(
     onBack: () -> Unit,
     repository: FrogRepository = FocusLockApplication.instance.frogRepository,
+    showTopBar: Boolean = true,
 ) {
     val context = LocalContext.current
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -173,14 +174,16 @@ internal fun FrogEssentialAppsScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text("Essential apps", maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                navigationIcon = {
-                    IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                    }
-                },
-            )
+            if (showTopBar) {
+                TopAppBar(
+                    title = { Text("Essential apps", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                    navigationIcon = {
+                        IconButton(onClick = onBack, modifier = Modifier.size(48.dp)) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        }
+                    },
+                )
+            }
         },
         bottomBar = {
             Surface(shadowElevation = 4.dp, color = MaterialTheme.colorScheme.surface) {
@@ -223,25 +226,9 @@ internal fun FrogEssentialAppsScreen(
         },
     ) { insets ->
         Column(
-            Modifier.fillMaxSize().padding(insets).consumeWindowInsets(insets).padding(horizontal = 20.dp).imePadding(),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            Modifier.fillMaxSize().padding(insets).consumeWindowInsets(insets).padding(horizontal = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text(
-                "Calls, messages, clock and TickTick stay available. Safety and recovery apps remain available too.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 4.dp),
-            )
-            Text(
-                "Choose apps available for every frog.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                "Apps in Boundaries can't be essential apps.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
             OutlinedTextField(
                 value = search,
                 onValueChange = { search = it },
@@ -261,6 +248,23 @@ internal fun FrogEssentialAppsScreen(
                     modifier = Modifier.weight(1f),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
+                    item(key = "guidance") {
+                        Column(
+                            Modifier.fillMaxWidth().padding(top = 4.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Text(
+                                "Choose apps that stay available during every Frog. Calls, messages, clock, TickTick, and safety apps stay available.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                "Boundary apps can't be essential.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                     items(filteredRows, key = { it.packageName }) { row ->
                         val checked = !row.isBoundary && (row.isCore || row.isSafetyEssential || row.packageName in selected)
                         EssentialAppRowView(
@@ -318,7 +322,7 @@ private fun EssentialAppRowView(
             }
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(row.label, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(row.label, style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurface)
                 Text(
                     text = when {
                         row.isBoundary -> "Boundary app · Can't be essential"

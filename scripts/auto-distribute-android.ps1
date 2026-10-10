@@ -106,13 +106,13 @@ function Invoke-QueuedJob([string]$Root, [string]$JobPath) {
         if (Test-Path -LiteralPath $localProps -PathType Leaf) { Copy-Item -LiteralPath $localProps -Destination (Join-Path $buildRoot 'local.properties') -Force }
         $runner = Join-Path $buildRoot 'scripts\distribute-android.ps1'
         if (-not (Test-Path -LiteralPath $runner -PathType Leaf)) { throw "Distribution script is absent from committed snapshot $commit" }
-        $sourceNotes = "FocusLock Android debug build (source commit $commit)."
+        $sourceNotes = "FocusLock Android performance build (source commit $commit)."
         $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
         if (-not (Test-Path -LiteralPath $powershell)) { $powershell = 'powershell.exe' }
         $previousPreference = $ErrorActionPreference
         try {
             $ErrorActionPreference = 'Continue'
-            $distributorLines = @(& $powershell -NoProfile -ExecutionPolicy Bypass -File $runner -ConfigPath (Join-Path $buildRoot 'firebase-distribution.local.json') -StatePath (Join-Path $gitRoot 'artifacts\firebase-distribution-state.json') -Notes $sourceNotes 2>&1 | ForEach-Object { [string]$_ })
+            $distributorLines = @(& $powershell -NoProfile -ExecutionPolicy Bypass -File $runner -ConfigPath (Join-Path $buildRoot 'firebase-distribution.local.json') -StatePath (Join-Path $gitRoot 'artifacts\firebase-distribution-state.json') -BuildVariant Performance -Notes $sourceNotes 2>&1 | ForEach-Object { [string]$_ })
             $distributorExitCode = $LASTEXITCODE
         } finally { $ErrorActionPreference = $previousPreference }
         if ($distributorLines.Count -gt 0) { [IO.File]::AppendAllLines($logPath, [string[]]$distributorLines, (New-Object Text.UTF8Encoding($false))) }

@@ -5,7 +5,11 @@ import android.graphics.Bitmap
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
@@ -57,8 +61,10 @@ class FrogEssentialAppsUiTest {
         compose.onNode(hasText("Google Pay") and isToggleable()).performScrollTo().assertIsOn()
         compose.onNode(hasText("Spotify") and isToggleable()).performScrollTo().assertIsOn().performClick().assertIsOff()
         val search = compose.onNodeWithText("Search installed apps")
+        search.performClick()
         search.performTextInput("Chrome")
         compose.onNode(hasText("Chrome") and isToggleable()).assertIsOff().performClick().assertIsOn()
+        compose.onNodeWithText("Save").assertIsDisplayed()
         search.performTextClearance()
         search.performTextInput("Settings")
         compose.onNode(hasText("Settings") and isToggleable()).assertIsOn().assertIsNotEnabled()
@@ -92,6 +98,36 @@ class FrogEssentialAppsUiTest {
         compose.onNodeWithContentDescription("Back").performClick()
         compose.runOnIdle { assertTrue(closed) }
         assertEquals(emptySet<String>(), repository.currentState().essentialAppPackages)
+    }
+
+    @Test fun largeFontScaleKeepsRowsReadableAndSaveReachable() {
+        var minRowHeightPx = 0f
+        compose.setContent {
+            val baseDensity = LocalDensity.current
+            val largeFontDensity = Density(baseDensity.density, fontScale = 1.6f)
+            minRowHeightPx = with(largeFontDensity) { 64.dp.toPx() }
+            CompositionLocalProvider(LocalDensity provides largeFontDensity) {
+                FocusLockTheme {
+                    FrogEssentialAppsScreen(onBack = {}, repository = repository, showTopBar = false)
+                }
+            }
+        }
+        compose.waitUntil(10_000) {
+            compose.onAllNodes(hasScrollToIndexAction()).fetchSemanticsNodes().isNotEmpty()
+        }
+
+        compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("Google Pay"))
+        val essentialRow = compose.onNode(hasText("Google Pay") and isToggleable()).performScrollTo()
+        essentialRow.assertIsDisplayed()
+        compose.onNodeWithText("Search installed apps").assertIsDisplayed()
+        compose.onNodeWithText("Save").assertIsDisplayed()
+        capture("frog-essential-apps-large-font.png")
+        val rowBounds = essentialRow.fetchSemanticsNode().boundsInRoot
+        val searchBounds = compose.onNodeWithText("Search installed apps").fetchSemanticsNode().boundsInRoot
+        val saveBounds = compose.onNodeWithText("Save").fetchSemanticsNode().boundsInRoot
+        assertTrue("Rows must grow to fit scaled text", rowBounds.height >= minRowHeightPx)
+        assertTrue("The essential-app row must remain below the pinned search field", rowBounds.top >= searchBounds.bottom)
+        assertTrue("The essential-app row must remain above the fixed save action", rowBounds.bottom <= saveBounds.top)
     }
 
     private fun capture(name: String) {

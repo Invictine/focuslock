@@ -1,7 +1,9 @@
 package com.focuslock.app
 
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollTo
@@ -33,12 +35,24 @@ class SettingsNavigationUiTest {
             compose.waitForIdle()
             compose.onNodeWithContentDescription("Settings").performClick()
             compose.onNodeWithText("Account & devices").assertIsDisplayed()
+            compose.onAllNodesWithText("Settings").assertCountEquals(1)
 
             compose.onNodeWithText("Connections").performClick()
             compose.onNodeWithText("Connections").assertIsDisplayed()
+            compose.onAllNodesWithText("Connections").assertCountEquals(1)
             compose.onNodeWithText("Or paste a personal token (tp_...) instead").assertDoesNotExist()
             compose.onNodeWithText("Advanced provider options").performClick()
-            compose.onNodeWithText("Or paste a personal token (tp_...) instead").assertIsDisplayed()
+            compose.onNodeWithText("Alternative ways to connect TickTick").assertIsDisplayed()
+            compose.onAllNodesWithText("Advanced provider options").assertCountEquals(1)
+            compose.onNodeWithText("TickTick Account & Sync").assertDoesNotExist()
+            compose.onNodeWithText("Connect with a personal token").assertIsDisplayed()
+            scenario.recreate()
+            compose.waitForIdle()
+            compose.onAllNodesWithText("Advanced provider options").assertCountEquals(1)
+            compose.onNodeWithText("Alternative ways to connect TickTick").assertIsDisplayed()
+            scenario.onActivity { it.onBackPressedDispatcher.onBackPressed() }
+            compose.onNodeWithText("TickTick Account & Sync").assertIsDisplayed()
+            compose.onAllNodesWithText("Connections").assertCountEquals(1)
             compose.onNodeWithContentDescription("Back to Settings").performClick()
             compose.onNodeWithText("Preferences").performClick()
             compose.onNodeWithText("Preferences").assertIsDisplayed()
@@ -61,7 +75,7 @@ class SettingsNavigationUiTest {
 
             compose.onNodeWithText("Daily priority routine").performClick()
             compose.onNodeWithText("Essential apps").performScrollTo().performClick()
-            compose.onNodeWithText("Choose apps available for every frog.").assertIsDisplayed()
+            compose.onNodeWithText("Search installed apps").assertIsDisplayed()
             compose.onNodeWithContentDescription("Back to Settings").performClick()
             compose.onNodeWithText("Choose what's available each morning").performScrollTo().assertIsDisplayed()
         } finally {

@@ -1,6 +1,6 @@
 # Android tester distribution
 
-FocusLock distributes the existing **debug** Android build through Firebase App Distribution. The script does not install anything on a connected phone. It builds, verifies, and uploads the APK, then Firebase emails the configured testers.
+FocusLock distributes the optimized **performance** Android build through Firebase App Distribution. This variant enables release shrinking and optimization while using the existing development/debug signing key, so it can update a locally installed build without clearing app data. The script does not install anything on a connected phone. It builds, verifies, and uploads the APK, then Firebase emails the configured testers.
 
 ## One-time setup
 
@@ -13,7 +13,7 @@ FocusLock distributes the existing **debug** Android build through Firebase App 
 
 2. In the Firebase console, create or select a project, add an Android app whose package is `com.focuslock.app`, and enable App Distribution. Copy its project ID and Android App ID. Alternatively, create the project with `firebase projects:create <project-id> --display-name FocusLock` and register the app with `firebase apps:create ANDROID FocusLock --package-name com.focuslock.app --project <project-id>`; then obtain the app ID with `firebase apps:list --project <project-id>`.
 3. Copy `firebase-distribution.example.json` to `firebase-distribution.local.json` in the repository root. Fill in `projectId`, `appId`, and at least one of `testers` (email addresses) or `groups` (Firebase tester group aliases). Keep this local file private; it is ignored by Git.
-4. Make sure the same Android debug signing key is used for every build. Firebase testers should install the App Tester app or accept Firebase's invitation, then use the release link they receive.
+4. Make sure the same development signing key is used for every build. Firebase testers should install the App Tester app or accept Firebase's invitation, then use the release link they receive.
 
 Upload authentication uses the local Firebase CLI account. Builds are distributed through Firebase App Distribution; testers receive Firebase's release link and install or update with the App Tester app.
 
@@ -26,11 +26,13 @@ npm run android:distribute:check
 npm run android:distribute
 ```
 
-The normal command runs Android unit tests and lint, assembles the debug variant, verifies its signature and package/version metadata, and uploads it to the configured testers/groups. It uses a monotonically increasing Android `versionCode`; generated counter state is stored under ignored `artifacts/` and the user-visible app version remains unchanged. To provide release notes or choose a specific higher code:
+The normal command runs Android unit tests and lint, assembles the optimized performance variant, verifies its signature and package/version metadata, and uploads it to the configured testers/groups. It uses a monotonically increasing Android `versionCode`; generated counter state is stored under ignored `artifacts/` and the user-visible app version remains unchanged. To provide release notes or choose a specific higher code:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/distribute-android.ps1 -Notes "What changed`nSecond line" -VersionCode 2000000000
 ```
+
+The optimized performance build is the default. To explicitly distribute a debug APK for diagnostics, pass `-BuildVariant Debug`; both variants use the development signing key. The build still runs `testDebugUnitTest` and `lintDebug` before assembling either variant.
 
 Omit `-VersionCode` to use the persisted automatic counter. A supplied code must exceed the last persisted code. `-ValidateOnly` checks the config and local tools without contacting Firebase, building, or uploading.
 
@@ -47,8 +49,8 @@ returns promptly and preserves any existing post-commit hook. It does not change
 other Git hooks or the repository's `core.hooksPath` setting.
 
 The worker builds an archive of the exact commit, copies the checkout's ignored
-Firebase configuration and Android local properties, and uses the same Android
-debug signing key. It runs tests, lint, APK checks, and upload in that isolated
+Firebase configuration and Android local properties, and uses the same development
+signing key. It runs tests, lint, APK checks, and upload in that isolated
 snapshot. Uncommitted edits and builds in the working checkout do not enter the
 queued release. Jobs run one at a time and share the checkout's version counter
 with manual distribution. Repeated requests for a commit with a recorded result

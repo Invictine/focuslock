@@ -264,6 +264,7 @@ class MainActivity : ComponentActivity() {
                     var settingsReturnTab by rememberSaveable { mutableStateOf(NavigationItem.DASHBOARD) }
                     var accountReturnTab by rememberSaveable { mutableStateOf(NavigationItem.DASHBOARD) }
                     var settingsHasDetail by remember { mutableStateOf(false) }
+                    var settingsPageTitle by remember { mutableStateOf("Settings") }
                     var settingsSection by rememberSaveable { mutableStateOf(SettingsSection.OVERVIEW) }
                     val openSettings: (SettingsSection) -> Unit = { section ->
                         if (currentTab != NavigationItem.SETTINGS) settingsReturnTab = currentTab
@@ -340,6 +341,7 @@ class MainActivity : ComponentActivity() {
                                         text = when {
                                             showAccountSignIn -> "Sign in"
                                             showDebug -> "Debug data"
+                                            currentTab == NavigationItem.SETTINGS -> settingsPageTitle
                                             else -> currentTab.title
                                         },
                                         style = MaterialTheme.typography.titleLarge.copy(
@@ -374,7 +376,7 @@ class MainActivity : ComponentActivity() {
                         }
                     },
                     bottomBar = {
-                        if (!showAccountSignIn) {
+                        if (!showAccountSignIn && currentTab != NavigationItem.SETTINGS) {
                         NavigationBar(
                             containerColor = MaterialTheme.colorScheme.surfaceContainer,
                             tonalElevation = 0.dp
@@ -421,6 +423,7 @@ class MainActivity : ComponentActivity() {
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(innerPadding)
+                            .consumeWindowInsets(innerPadding)
                             .background(MaterialTheme.colorScheme.background),
                         contentAlignment = Alignment.TopCenter
                     ) {
@@ -467,6 +470,7 @@ class MainActivity : ComponentActivity() {
                             NavigationItem.SETTINGS -> SettingsScreen(
                                 initialSection = settingsSection,
                                 onNavigationStateChanged = { settingsHasDetail = it },
+                                onPageTitleChanged = { settingsPageTitle = it },
                                 onOpenAccount = { accountReturnTab = NavigationItem.SETTINGS; currentTab = NavigationItem.ACCOUNT },
                                 // highlightKind omitted (defaults null): the screen derives
                                 // the next missing permission from its own checks.

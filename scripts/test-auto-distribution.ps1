@@ -77,7 +77,7 @@ echo prior-hook-ran >> "__PRIOR_LOG__"
     $priorHash = (Get-FileHash -LiteralPath $activeHook -Algorithm SHA256).Hash
 
     $runner = @'
-param([string]$ConfigPath, [string]$StatePath, [string]$Notes)
+param([string]$ConfigPath, [string]$StatePath, [string]$BuildVariant, [string]$Notes)
 $ErrorActionPreference = 'Stop'
 $folder = Split-Path -Parent $StatePath
 $active = Join-Path $folder 'runner-active.lock'
@@ -90,7 +90,7 @@ try {
     [IO.File]::AppendAllText($trace, "START|$marker`n")
     Start-Sleep -Milliseconds 2000
     [IO.File]::AppendAllText($trace, "END|$marker`n")
-    Write-Output "fixture runner startup marker=$marker notes=$Notes"
+    Write-Output "fixture runner startup marker=$marker variant=$BuildVariant notes=$Notes"
     if ($mode -eq 'fail') {
         $previousPreference = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
@@ -146,6 +146,10 @@ try {
     Assert-True (($trace -join '|') -notmatch 'OVERLAP') 'Distribution runners overlapped.'
     Assert-True ($trace[0] -eq 'START|snapshot-alpha' -and $trace[1] -eq 'END|snapshot-alpha') 'Alpha used the dirty working copy instead of its committed snapshot.'
     Assert-True ($trace[2] -eq 'START|snapshot-beta' -and $trace[3] -eq 'END|snapshot-beta') 'Beta snapshot marker or queue ordering was wrong.'
+    $alphaLog = Get-Content -LiteralPath (Join-Path (Join-Path $stateRoot 'logs') "$alpha.log") -Raw
+    $betaLog = Get-Content -LiteralPath (Join-Path (Join-Path $stateRoot 'logs') "$beta.log") -Raw
+    Assert-True ($alphaLog -match 'variant=Performance notes=FocusLock Android performance build') 'Automatic distribution did not select the optimized performance variant.'
+    Assert-True ($betaLog -match 'variant=Performance notes=FocusLock Android performance build') 'Automatic distribution did not select the optimized performance variant for the next queued commit.'
 
     $enqueueScript = Join-Path $scripts 'auto-distribute-android.ps1'
     $repeat = Invoke-PowerShell $enqueueScript @('-Enqueue', '-SourceRoot', $fixtureRoot, '-StateRoot', $stateRoot, '-Commit', $alpha) $fixtureRoot

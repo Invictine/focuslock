@@ -91,6 +91,7 @@ fun SettingsScreen(
     initialSection: SettingsSection = SettingsSection.OVERVIEW,
     onOpenAccount: () -> Unit = {},
     onNavigationStateChanged: (Boolean) -> Unit = {},
+    onPageTitleChanged: (String) -> Unit = {},
     highlightKind: PermissionKind? = null,
     onOpenDebug: () -> Unit = {},
     onReplayOnboarding: () -> Unit = {},
@@ -126,6 +127,7 @@ fun SettingsScreen(
     LaunchedEffect(initialSection) {
         if (initialSection != lastRequestedSection) {
             selectedSection = initialSection
+            showAdvancedProviderOptions = false
             lastRequestedSection = initialSection
         }
     }
@@ -332,7 +334,23 @@ fun SettingsScreen(
     // no extra getNextMissingPermission binder sweep per resume. POST_NOTIFICATIONS is
     // the only kind without a collected boolean and its check is in-process (no IPC).
     // Order matches PermissionHelper.getMissingPermissions (PermissionKind.entries).
-    val scrollState = rememberScrollState()
+    // Each destination owns a saveable scroll state. Reusing one state and restoring
+    // an offset before the new page is measured can clamp it to the previous page's
+    // height and lose the position on return.
+    val overviewScroll = rememberScrollState()
+    val connectionsScroll = rememberScrollState()
+    val advancedScroll = rememberScrollState()
+    val routineScroll = rememberScrollState()
+    val protectionScroll = rememberScrollState()
+    val preferencesScroll = rememberScrollState()
+    val scrollState = when {
+        showAdvancedProviderOptions -> advancedScroll
+        selectedSection == SettingsSection.CONNECTIONS -> connectionsScroll
+        selectedSection == SettingsSection.ROUTINE -> routineScroll
+        selectedSection == SettingsSection.PROTECTION -> protectionScroll
+        selectedSection == SettingsSection.PREFERENCES -> preferencesScroll
+        else -> overviewScroll
+    }
     val resolvedHighlight: PermissionKind? = if (
         isAccessibilityOn == null || isUsageOn == null || isOverlayOn == null ||
         isNotifOn == null || isBatteryIgnored == null || isDeviceAdminOn == null
@@ -350,7 +368,9 @@ fun SettingsScreen(
     }
     val effectiveHighlight = highlightKind ?: resolvedHighlight
     LaunchedEffect(effectiveHighlight, selectedSection) {
-        scrollState.scrollTo(0)
+        if (selectedSection == SettingsSection.PROTECTION && highlightKind != null) {
+            scrollState.scrollTo(0)
+        }
         if (selectedSection == SettingsSection.PROTECTION &&
             (effectiveHighlight == PermissionKind.BATTERY || effectiveHighlight == PermissionKind.DEVICE_ADMIN)) {
             scrollState.animateScrollTo(scrollState.maxValue)
@@ -406,13 +426,64 @@ fun SettingsScreen(
         }
     }
 
-    SideEffect { onNavigationStateChanged(selectedSection != SettingsSection.OVERVIEW || showFrogEssentialApps) }
-    BackHandler(enabled = selectedSection != SettingsSection.OVERVIEW && !showFrogEssentialApps) {
+    fun savePersonalToken() {
+        scope.launch {
+            isVerifying = true
+            val token = editPersonalToken.trim()
+            if (token.isBlank()) {
+                Toast.makeText(context, "Paste your token first", Toast.LENGTH_SHORT).show()
+                isVerifying = false
+                return@launch
+            }
+            val accountAtRequest = settings.tickTickConnectionState().accountId
+            val valid = TickTickApiClient().verifyToken(token)
+            if (valid) {
+                val profile = TickTickApiClient().fetchUserProfile(token)
+                val name = profile?.nickname ?: profile?.username ?: "TickTick User"
+                val saved = settings.setTickTickAuthSuccess(token, name, expectedAccountId = accountAtRequest)
+                if (!saved) {
+                    Toast.makeText(context, "Account changed. Connect TickTick again.", Toast.LENGTH_LONG).show()
+                    isVerifying = false
+                    return@launch
+                }
+                Toast.makeText(context, "Connected as $name!", Toast.LENGTH_LONG).show()
+                showTokenField = false
+                refreshTick++
+                // Use the fresh token because the collected flow has not updated on this frame.
+                doSync(showToast = false, tokenOverride = token)
+            } else {
+                Toast.makeText(context, "Token invalid — check it starts with tp_ and try again.", Toast.LENGTH_LONG).show()
+            }
+            isVerifying = false
+        }
+    }
+
+    val pageTitle = when {
+        showFrogEssentialApps -> "Essential apps"
+        showAdvancedProviderOptions -> "Advanced provider options"
+        selectedSection == SettingsSection.OVERVIEW -> "Settings"
+        selectedSection == SettingsSection.CONNECTIONS -> "Connections"
+        selectedSection == SettingsSection.ROUTINE -> "Daily priority routine"
+        selectedSection == SettingsSection.PROTECTION -> "Permissions & protection"
+        selectedSection == SettingsSection.PREFERENCES -> "Preferences"
+        else -> "Settings"
+    }
+    SideEffect {
+        onNavigationStateChanged(selectedSection != SettingsSection.OVERVIEW || showFrogEssentialApps)
+        onPageTitleChanged(pageTitle)
+    }
+    BackHandler(enabled = showAdvancedProviderOptions) {
+        showAdvancedProviderOptions = false
+    }
+    BackHandler(enabled = selectedSection != SettingsSection.OVERVIEW && !showFrogEssentialApps && !showAdvancedProviderOptions) {
         selectedSection = SettingsSection.OVERVIEW
     }
     BackHandler(enabled = showFrogEssentialApps) { showFrogEssentialApps = false }
     if (showFrogEssentialApps) {
-        FrogEssentialAppsScreen(onBack = { showFrogEssentialApps = false })
+        FrogEssentialAppsScreen(
+            onBack = { showFrogEssentialApps = false },
+            showTopBar = false,
+        )
         return
     }
 
@@ -427,11 +498,6 @@ fun SettingsScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         if (selectedSection == SettingsSection.OVERVIEW) {
-            Text(
-                text = "Settings",
-                style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.SemiBold),
-                color = MaterialTheme.colorScheme.onSurface
-            )
             SettingsDestinationRow(
                 title = "Account & devices",
                 subtitle = "Manage your account and signed-in devices",
@@ -461,25 +527,6 @@ fun SettingsScreen(
                 subtitle = "Goals, conversion, reminders, and backups",
                 onClick = { selectedSection = SettingsSection.PREFERENCES }
             )
-        } else {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                TextButton(onClick = { selectedSection = SettingsSection.OVERVIEW }) {
-                    Text("‹  Settings")
-                }
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    text = when (selectedSection) {
-                        SettingsSection.OVERVIEW -> "Settings"
-                        SettingsSection.CONNECTIONS -> "Connections"
-                        SettingsSection.ROUTINE -> "Daily priority routine"
-                        SettingsSection.PROTECTION -> "Permissions & protection"
-                        SettingsSection.PREFERENCES -> "Preferences"
-                    },
-                    style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.SemiBold),
-                    color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.weight(1f)
-                )
-            }
         }
 
         if (selectedSection == SettingsSection.PREFERENCES) {
@@ -607,7 +654,7 @@ fun SettingsScreen(
 
         }
 
-        if (selectedSection == SettingsSection.CONNECTIONS) {
+        if (selectedSection == SettingsSection.CONNECTIONS && !showAdvancedProviderOptions) {
         // 6. TickTick Integration Card — simplified: token-first, OAuth advanced
         Card(
             colors = CardDefaults.cardColors(
@@ -741,125 +788,17 @@ fun SettingsScreen(
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("Connect with TickTick")
                     }
+                    TextButton(onClick = { showAdvancedProviderOptions = true }) {
+                        Text("Advanced provider options")
+                    }
                     // TickTick only allows http(s) redirects, so the browser lands on a
                     // loopback address that can't load on-device. Paste it back here.
-                    TextButton(onClick = { showAdvancedProviderOptions = !showAdvancedProviderOptions }) {
-                        Text(if (showAdvancedProviderOptions) "Hide advanced provider options" else "Advanced provider options")
-                    }
-                    if (showAdvancedProviderOptions && showManualCallback) {
-                        Text(
-                            "After approving in the browser you'll land on http://127.0.0.1:8080/?code=… which can't load on the phone — copy that full address and paste it here.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        OutlinedTextField(
-                            value = editManualCallback,
-                            onValueChange = { editManualCallback = it.trim() },
-                            label = { Text("Pasted redirect address or code") },
-                            placeholder = { Text("http://127.0.0.1:8080/?code=…&state=…") },
-                            singleLine = true,
-                            shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Button(
-                            onClick = { completeManualLogin() },
-                            enabled = editManualCallback.isNotBlank() && !isCompletingManual,
-                            shape = MaterialTheme.shapes.medium,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text(if (isCompletingManual) "Connecting..." else "Complete connection")
-                        }
-                    } else {
-                        TextButton(onClick = { showManualCallback = true }) {
-                            Text("Already approved? Paste the redirect address", style = MaterialTheme.typography.labelMedium)
-                        }
-                    }
                     if (!canOAuth) {
                         Text(
-                            "TickTick login is not configured on this build. Open Advanced provider options to connect.",
+                            "TickTick login is not configured on this build. Use a personal token or configure OAuth.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.error
                         )
-                    }
-
-                    if (showAdvancedProviderOptions) {
-                        if (!showManualCallback) {
-                            TextButton(onClick = { showManualCallback = true }) {
-                                Text("Need help finishing connection?")
-                            }
-                        }
-                    if (!showTokenField) {
-                        TextButton(onClick = { showTokenField = true }) {
-                            Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(14.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Or paste a personal token (tp_...) instead")
-                        }
-                        TextButton(onClick = { showOAuthCredentialsDialog = true }) {
-                            Text("Advanced: override OAuth credentials", style = MaterialTheme.typography.labelMedium)
-                        }
-                    } else {
-                        OutlinedTextField(
-                            value = editPersonalToken,
-                            onValueChange = { editPersonalToken = it.trim() },
-                            label = { Text("Personal Access Token (tp_...)") },
-                            singleLine = true,
-                            shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)
-                        ) {
-                            Button(
-                                onClick = {
-                                    scope.launch {
-                                        isVerifying = true
-                                        val token = editPersonalToken.trim()
-                                        if (token.isBlank()) {
-                                            Toast.makeText(context, "Paste your token first", Toast.LENGTH_SHORT).show()
-                                            isVerifying = false
-                                            return@launch
-                                        }
-                                        val accountAtRequest = settings.tickTickConnectionState().accountId
-                                        val valid = TickTickApiClient().verifyToken(token)
-                                        if (valid) {
-                                            val profile = TickTickApiClient().fetchUserProfile(token)
-                                            val name = profile?.nickname ?: profile?.username ?: "TickTick User"
-                                            val saved = settings.setTickTickAuthSuccess(token, name,
-                                                expectedAccountId = accountAtRequest)
-                                            if (!saved) {
-                                                Toast.makeText(context, "Account changed. Connect TickTick again.", Toast.LENGTH_LONG).show()
-                                                isVerifying = false
-                                                return@launch
-                                            }
-                                            Toast.makeText(context, "Connected as $name!", Toast.LENGTH_LONG).show()
-                                            showTokenField = false
-                                            refreshTick++
-                                            // Pass the fresh token explicitly: the collected flow state is
-                                            // still stale on this frame and would toast "Connect TickTick first".
-                                            doSync(showToast = false, tokenOverride = token)
-                                        } else {
-                                            Toast.makeText(context, "Token invalid — check it starts with tp_ and try again.", Toast.LENGTH_LONG).show()
-                                        }
-                                        isVerifying = false
-                                    }
-                                },
-                                enabled = !isVerifying,
-                                shape = MaterialTheme.shapes.medium,
-                                modifier = Modifier.weight(1f)
-                            ) {
-                                Text(if (isVerifying) "Verifying..." else "Save & Verify")
-                            }
-                            TextButton(onClick = {
-                                showTokenField = false
-                                editPersonalToken = tickTickToken
-                            }) { Text("Cancel") }
-                        }
-                        TextButton(onClick = { showOAuthCredentialsDialog = true }) {
-                            Text("Or configure OAuth instead", style = MaterialTheme.typography.labelMedium)
-                        }
-                    }
-
                     }
 
                     syncMessage?.let {
@@ -899,6 +838,29 @@ fun SettingsScreen(
             }
         }
 
+        }
+
+        if (selectedSection == SettingsSection.CONNECTIONS && showAdvancedProviderOptions) {
+            AdvancedTickTickOptions(
+                showManualCallback = showManualCallback,
+                editManualCallback = editManualCallback,
+                isCompletingManual = isCompletingManual,
+                showTokenField = showTokenField,
+                editPersonalToken = editPersonalToken,
+                isVerifying = isVerifying,
+                syncMessage = syncMessage,
+                onManualCallbackChanged = { editManualCallback = it.trim() },
+                onShowManualCallback = { showManualCallback = true },
+                onCompleteManualLogin = ::completeManualLogin,
+                onShowTokenField = { showTokenField = true },
+                onPersonalTokenChanged = { editPersonalToken = it.trim() },
+                onSaveToken = ::savePersonalToken,
+                onCancelToken = {
+                    showTokenField = false
+                    editPersonalToken = tickTickToken
+                },
+                onOverrideOAuthCredentials = { showOAuthCredentialsDialog = true },
+            )
         }
 
         if (selectedSection == SettingsSection.PROTECTION) {
@@ -2471,6 +2433,115 @@ private fun FrogSettingsCard(onOpenEssentialApps: () -> Unit) {
                     )
                 }
                 Text("›", style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+    }
+}
+
+@Composable
+private fun AdvancedTickTickOptions(
+    showManualCallback: Boolean,
+    editManualCallback: String,
+    isCompletingManual: Boolean,
+    showTokenField: Boolean,
+    editPersonalToken: String,
+    isVerifying: Boolean,
+    syncMessage: String?,
+    onManualCallbackChanged: (String) -> Unit,
+    onShowManualCallback: () -> Unit,
+    onCompleteManualLogin: () -> Unit,
+    onShowTokenField: () -> Unit,
+    onPersonalTokenChanged: (String) -> Unit,
+    onSaveToken: () -> Unit,
+    onCancelToken: () -> Unit,
+    onOverrideOAuthCredentials: () -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+        shape = MaterialTheme.shapes.large,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                "Alternative ways to connect TickTick",
+                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+            )
+            Text(
+                "Use a personal access token, finish browser login by pasting its redirect address, or configure your own OAuth app.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+
+            if (showManualCallback) {
+                Text(
+                    "After approving in the browser you'll land on http://127.0.0.1:8080/?code=… which can't load on the phone. Copy that full address and paste it here.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    value = editManualCallback,
+                    onValueChange = onManualCallbackChanged,
+                    label = { Text("Pasted redirect address or code") },
+                    placeholder = { Text("http://127.0.0.1:8080/?code=…&state=…") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Button(
+                    onClick = onCompleteManualLogin,
+                    enabled = editManualCallback.isNotBlank() && !isCompletingManual,
+                    shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (isCompletingManual) "Connecting..." else "Complete connection")
+                }
+            } else {
+                OutlinedButton(onClick = onShowManualCallback, modifier = Modifier.fillMaxWidth()) {
+                    Text("Paste browser redirect address")
+                }
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.surfaceContainerHighest)
+
+            if (showTokenField) {
+                OutlinedTextField(
+                    value = editPersonalToken,
+                    onValueChange = onPersonalTokenChanged,
+                    label = { Text("Personal Access Token (tp_...)") },
+                    singleLine = true,
+                    shape = RoundedCornerShape(14.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Button(
+                        onClick = onSaveToken,
+                        enabled = !isVerifying,
+                        shape = MaterialTheme.shapes.medium,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text(if (isVerifying) "Verifying..." else "Save & Verify")
+                    }
+                    TextButton(onClick = onCancelToken) { Text("Cancel") }
+                }
+            } else {
+                OutlinedButton(onClick = onShowTokenField, modifier = Modifier.fillMaxWidth()) {
+                    Icon(Icons.Default.Key, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Connect with a personal token")
+                }
+            }
+
+            OutlinedButton(onClick = onOverrideOAuthCredentials, modifier = Modifier.fillMaxWidth()) {
+                Text("Configure OAuth credentials")
+            }
+            syncMessage?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }

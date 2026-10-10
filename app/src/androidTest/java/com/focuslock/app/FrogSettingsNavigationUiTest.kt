@@ -30,7 +30,7 @@ class FrogSettingsNavigationUiTest {
             compose.onNodeWithContentDescription("Settings").performClick()
             compose.onNodeWithText("Daily priority routine").performClick()
             compose.onNodeWithText("Essential apps").performScrollTo().performClick()
-            compose.onNodeWithText("Choose apps available for every frog.").assertIsDisplayed()
+            compose.onNodeWithText("Search installed apps").assertIsDisplayed()
             compose.onNodeWithText("Save").assertIsDisplayed()
             scenario.onActivity { it.onBackPressedDispatcher.onBackPressed() }
             compose.onNodeWithText("Choose what's available each morning").performScrollTo().assertIsDisplayed()

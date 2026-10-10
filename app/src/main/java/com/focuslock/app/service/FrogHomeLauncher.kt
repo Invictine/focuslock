@@ -21,12 +21,18 @@ object FrogHomeLauncher {
             ?.activityInfo?.let { it.packageName == context.packageName && it.name == FrogHomeActivity::class.java.name } == true
 
     fun captureFallback(context: Context) {
-        val validCandidates = validHomeCandidates(context)
         val component = currentDefaultComponent(context) ?: return
-        if (component.flattenToString() !in validCandidates) return
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
-            .putString(FALLBACK, component.flattenToString()).apply()
+        val componentName = component.flattenToString()
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val saved = prefs.getString(FALLBACK, null)
+        if (!shouldCaptureFallback(componentName, saved, context.packageName)) return
+        if (componentName !in validHomeCandidates(context)) return
+        prefs.edit().putString(FALLBACK, componentName).apply()
     }
+
+    /** Avoid a full launcher inventory query when the current fallback is already known. */
+    internal fun shouldCaptureFallback(current: String?, saved: String?, appPackage: String): Boolean =
+        current != null && current.substringBefore('/') != appPackage && current != saved
 
     private fun fallbackComponent(context: Context): ComponentName? {
         val validCandidates = validHomeCandidates(context)
