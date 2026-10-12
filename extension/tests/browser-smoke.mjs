@@ -110,17 +110,21 @@ try {
   checks.push('Merged app and website caps block at the cached usage limit and reject snoozes');
 
   await worker.evaluate(async () => {
-    const state = await ensureState();
-    state.cloudPolicy.groups = [];
-    state.cloudUsage = { date: FocusLockStore.todayKey(), groups: [], targets: [] };
-    state.cloudPolicy.state.creditBalanceSeconds = 60;
-    state.leisureStats = {};
-    await FocusLockStore.save(state);
+    // Use the production writer: a timer maintenance pass may replace mem.state
+    // while an independent save waits. Match the live snapshot's account too.
+    await featureWrite(state => {
+      state.cloudAccountId = 'smoke-account';
+      state.cloudPolicy.groups = [];
+      state.cloudUsage = { date: FocusLockStore.todayKey(), groups: [], targets: [] };
+      state.cloudPolicy.state.creditBalanceSeconds = 60;
+      state.leisureStats = {};
+      return state;
+    });
     await syncCloud('live', { ok: true, signedIn: true, userId: 'smoke-account', isCurrent: async () => true,
       prefs: { strictMode: true, strictEndsAt: Date.now() + 60000 } });
   });
   const funded = await worker.evaluate(async () => verdictFor('http://127.0.0.1/', await ensureState()));
-  assert.equal(funded.blocked, false, 'Strict Mode does not itself block an earned-time site');
+  assert.equal(funded.blocked, false, `Strict Mode does not itself block an earned-time site: ${JSON.stringify(funded)}`);
   await worker.evaluate(async () => {
     const state = await ensureState(); state.cloudPolicy.state.creditBalanceSeconds = 0; state.leisureStats = {}; state.snoozes = {};
     await FocusLockStore.save(state); mem.state = state;
