@@ -20,6 +20,9 @@ function useMemoryStorage() {
 describe("daily device-local Frog grace", () => {
   it("starts at the first active input after wake, persists through restart, then arms at five minutes", () => {
     const entries = useMemoryStorage();
+    entries.set(FROG_KEYS.setupComplete, "1");
+    entries.set(FROG_KEYS.enabled, "1");
+    entries.set(FROG_KEYS.essentialAppIds, JSON.stringify(["code.exe"]));
     const now = new Date(2026, 9, 9, 8, 0, 0).getTime();
 
     expect(armIfDue(now, true)).toBe(false);
@@ -36,6 +39,8 @@ describe("daily device-local Frog grace", () => {
 
   it("does not start before the configured wake hour", () => {
     const entries = useMemoryStorage();
+    entries.set(FROG_KEYS.setupComplete, "1");
+    entries.set(FROG_KEYS.enabled, "1");
     entries.set(FROG_KEYS.wakeHour, "9");
     const beforeWake = new Date(2026, 9, 9, 8, 59, 0).getTime();
     expect(armIfDue(beforeWake, false, beforeWake)).toBe(false);

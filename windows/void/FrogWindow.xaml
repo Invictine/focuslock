@@ -37,15 +37,11 @@
        <TextBox x:Name="TaskInput" FontSize="24" MaxLength="200" Width="440" AutomationProperties.Name="Today's task"/>
        <Button Content="Continue" Click="Continue_Click" HorizontalAlignment="Center" Margin="0,20,0,0"/>
       </StackPanel>
-      <StackPanel x:Name="ToolsStep" Visibility="Collapsed">
+      <StackPanel x:Name="ToolsStep">
        <TextBlock Text="Only what you need" Foreground="#999999" TextAlignment="Center" Margin="0,0,0,12"/>
        <ScrollViewer MaxHeight="250" VerticalScrollBarVisibility="Auto"><StackPanel x:Name="EssentialChoices"/></ScrollViewer>
-       <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-        <Button Content="Choose another app…" Click="BrowseEssential_Click"/>
-        <Button Content="Installed apps…" Click="InstalledEssential_Click"/>
-       </StackPanel>
-       <TextBox x:Name="SitesInput" Width="440" FontSize="15" AutomationProperties.Name="Essential websites, separated by commas"/>
-       <TextBlock Text="Websites, separated by commas" Foreground="#777777" FontSize="12" Margin="8,8,0,12"/>
+       <TextBlock Text="Websites available in Chrome" Foreground="#999999" TextAlignment="Center" Margin="0,16,0,8"/>
+       <WrapPanel x:Name="EssentialDomains" HorizontalAlignment="Center"/>
        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
         <Button Content="Back" Click="BackToTask_Click"/>
         <Button x:Name="UseTaskButton" Content="Use this task" Click="UseTask_Click"/>
@@ -70,6 +66,6 @@
   <StackPanel x:Name="FooterPanel" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,24">
    <Button Content="Open FocusLock" Click="OpenFocusLock_Click"/><Button Content="Back to desktop" Click="CloseSurface_Click"/>
   </StackPanel>
-  <TextBlock x:Name="RecoveryText" Text="Ctrl+Alt+Space · return    |    Ctrl+Alt+Shift+F12 · close" Foreground="#666666" FontSize="11" TextAlignment="Center" VerticalAlignment="Bottom" TextWrapping="Wrap"/>
+  <TextBlock x:Name="RecoveryText" Text="Ctrl+Alt+Space · return    |    Ctrl+Shift+Alt+F12 disables Eat the Frog until you enable it again in FocusLock." Foreground="#666666" FontSize="11" TextAlignment="Center" VerticalAlignment="Bottom" TextWrapping="Wrap"/>
  </Grid>
 </Window>

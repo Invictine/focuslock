@@ -31,6 +31,8 @@ import { browserProtectionPolicy, browserProtectionStatusLabel } from "./browser
 import { signOutProtectionPolicy } from "./signOutProtection";
 import { DESKTOP_FROG_ENABLED } from "./features";
 import FrogCard from "./FrogCard";
+import FrogSetup from "./FrogSetup";
+import { configureDesktopFrog, useNativeFrogPolicy } from "./frogNative";
 import { VoidLauncherBridge } from "./voidLauncher";
 import ApprovalUnlockPanel from "./ApprovalUnlockPanel";
 import { useStrictActive } from "./useStrictActive";
@@ -938,6 +940,8 @@ export function evaluateBlockedTargets({
   //    and exhausted limits so the frog can actually be worked on.
   const frogApps = new Set<string>();
   const frogDomains = new Set<string>();
+  const boundaryApps = new Set(appIds);
+  const boundaryDomains = new Set(domains);
   if (frog?.locked) {
     const allowApps = new Set(
       (frog.neededAppIds || []).map((key) => targetKeyFor("app", key)).filter(Boolean),
@@ -1011,13 +1015,13 @@ export function evaluateBlockedTargets({
       }
     }
     for (const key of catalogDomains) {
-      if (allowDomains.has(key)) continue;
+      if ([...allowDomains].some((allowed) => domainBelongsTo(key, allowed))) continue;
       domains.add(key);
       frogDomains.add(key);
     }
 
     for (const value of [...appIds]) {
-      if (allowApps.has(targetKeyFor("app", value))) appIds.delete(value);
+      if (!boundaryApps.has(value) && allowApps.has(targetKeyFor("app", value))) appIds.delete(value);
     }
     // Suffix-aware removal: Rust matches `m.youtube.com` against a blocked
     // `youtube.com`, so an allowlisted parent domain must also release its
@@ -1025,7 +1029,7 @@ export function evaluateBlockedTargets({
     for (const value of [...domains]) {
       const key = targetKeyFor("website", value);
       for (const allow of allowDomains) {
-        if (domainBelongsTo(key, allow)) {
+        if (!boundaryDomains.has(value) && domainBelongsTo(key, allow)) {
           domains.delete(value);
           break;
         }
@@ -1039,7 +1043,7 @@ export function evaluateBlockedTargets({
     // govern browsing.
     if ((frog.neededDomains || []).length > 0) {
       for (const value of [...appIds]) {
-        if (FROG_BROWSER_APP_IDS.has(targetKeyFor("app", value))) {
+        if (!boundaryApps.has(value) && FROG_BROWSER_APP_IDS.has(targetKeyFor("app", value))) {
           appIds.delete(value);
           frogApps.delete(value);
         }
@@ -1065,7 +1069,7 @@ export function evaluateBlockedTargets({
   for (const key of appIds) {
     reasons[key] = permanentApps.has(key)
       ? "permanent"
-      : frogApps.has(key)
+      : frogApps.has(key) && !boundaryApps.has(key)
         ? "frog"
         : limitApps.has(key)
           ? "limit"
@@ -1074,7 +1078,7 @@ export function evaluateBlockedTargets({
   for (const key of domains) {
     reasons[key] = permanentWebsiteKeys.has(targetKeyFor("website", key))
       ? "permanent"
-      : frogDomains.has(key)
+      : frogDomains.has(key) && !boundaryDomains.has(key)
         ? "frog"
         : limitDomains.has(key)
           ? "limit"
@@ -1498,6 +1502,44 @@ function DesktopApp() {
       ? snapshot.current.capturedAtMs - snapshot.current.idleMillis
       : undefined,
   );
+  const frogBoundaryApps = useMemo(() => [...new Set([
+    ...(dashboard?.apps || []).filter((app: AppItem) => app.isBlocked).map((app: AppItem) => app.packageName.toLowerCase()),
+    ...permanentTargets.map((id: string) => id.toLowerCase()),
+    ...(groups || []).flatMap((group: TargetGroup) => group.members.filter((member) => member.targetKind === "app").map((member) => member.targetKey.toLowerCase())),
+    ...(dashboard?.limits || []).filter((limit: any) => limit.targetKind === "app").map((limit: any) => String(limit.targetKey).toLowerCase()),
+  ])], [dashboard, groups, permanentTargets]);
+  const frogBoundaryDomains = useMemo(() => [...new Set<string>([
+    ...(dashboard?.sites || []).filter((site: SiteItem) => site.isBlocked).map((site: SiteItem) => normalizeSiteKey(site.domain)),
+    ...(dashboard?.permanentBlocks || []).filter((target: any) => target.targetKind === "website").map((target: any) => normalizeSiteKey(target.targetKey)),
+    ...(groups || []).flatMap((group: TargetGroup) => group.members.filter((member) => member.targetKind === "website").map((member) => normalizeSiteKey(member.targetKey))),
+    ...(dashboard?.limits || []).filter((limit: any) => limit.targetKind === "website").map((limit: any) => normalizeSiteKey(limit.targetKey)),
+  ])], [dashboard, groups]);
+  const nativeFrog = useNativeFrogPolicy(frog.state, frogBoundaryApps, frogBoundaryDomains);
+  const launcherFrog = { ...frog.state,
+    essentialAppIds: frog.state.essentialAppIds.filter((id) => !frogBoundaryApps.includes(id.toLowerCase())),
+    essentialDomains: frog.state.essentialDomains.filter((host) => !frogBoundaryDomains.some((blocked) => domainBelongsTo(host, blocked) || domainBelongsTo(blocked, host))),
+  };
+  const [frogSetupOpen, setFrogSetupOpen] = useState(false);
+  const [frogSetupPending, setFrogSetupPending] = useState(false);
+  const [frogSetupError, setFrogSetupError] = useState<string | null>(null);
+  useEffect(() => {
+    const setup = () => { setFrogSetupError(null); setFrogSetupOpen(true); };
+    window.addEventListener("focuslock:frog-setup", setup);
+    return () => window.removeEventListener("focuslock:frog-setup", setup);
+  }, []);
+  const saveFrogSetup = async (appIds: string[], domains: string[]) => {
+    setFrogSetupPending(true);
+    setFrogSetupError(null);
+    try {
+      if (!tauriAvailable()) throw new Error("Enable Eat the Frog in the installed Windows app.");
+      if (appIds.some((id) => frogBoundaryApps.includes(id.toLowerCase())) || domains.some((host) => frogBoundaryDomains.some((blocked) => domainBelongsTo(host, blocked) || domainBelongsTo(blocked, host)))) {
+        throw new Error("Boundary apps and websites cannot be essential. Review your selection.");
+      }
+      await configureDesktopFrog(true, appIds, domains);
+      setFrogSetupOpen(false);
+    } catch (reason) { setFrogSetupError(String(reason)); }
+    finally { setFrogSetupPending(false); }
+  };
   const signOutStrictActive = useStrictActive(Boolean(configuration?.prefs?.strictMode), configuration?.prefs?.strictEndsAt);
   const signOutPolicy = useMemo(
     () => {
@@ -1532,10 +1574,10 @@ function DesktopApp() {
   const frogLock = useMemo(
     () => ({
       locked: DESKTOP_FROG_ENABLED && frog.state.locked,
-      neededAppIds: DESKTOP_FROG_ENABLED ? frog.state.frog?.neededAppIds || [] : [],
-      neededDomains: DESKTOP_FROG_ENABLED ? frog.state.frog?.neededDomains || [] : [],
+      neededAppIds: DESKTOP_FROG_ENABLED ? frog.state.essentialAppIds : [],
+      neededDomains: DESKTOP_FROG_ENABLED ? frog.state.essentialDomains : [],
     }),
-    [frog.state.locked, frog.state.frog],
+    [frog.state.locked, frog.state.essentialAppIds, frog.state.essentialDomains],
   );
   const lastHeartbeatRef = useRef(0);
   const lastUsageUploadRef = useRef(0);
@@ -1744,7 +1786,7 @@ function DesktopApp() {
       groups,
       summary: todayUsage,
       usage: snapshotRef.current?.usage || EMPTY_USAGE,
-      frog: frogLock,
+      frog: undefined,
       permanentAppIds: permanentTargets,
     });
     if (exceeded.length) {
@@ -1831,9 +1873,20 @@ function DesktopApp() {
   const clearPendingMerge = useCallback(() => setPendingMerge(null), []);
   return (
     <div className="app-frame">
+      {frogSetupOpen && <FrogSetup
+        initialApps={frog.state.essentialAppIds}
+        initialDomains={frog.state.essentialDomains}
+        catalog={{ apps: (dashboard?.apps || []).filter((app: AppItem) => app.category === "Windows").map((app: AppItem) => ({ appId: app.packageName, appName: app.appName })) }}
+        blockedAppIds={frogBoundaryApps}
+        blockedDomains={frogBoundaryDomains}
+        pending={frogSetupPending}
+        error={frogSetupError}
+        onSave={saveFrogSetup}
+        onCancel={() => setFrogSetupOpen(false)}
+      />}
       {uninstallGuardError && <p role="alert" className="error-text">{uninstallGuardError}</p>}
       {DESKTOP_FROG_ENABLED && (
-        <VoidLauncherBridge frog={frog.state} actions={frog.actions} workRatio={workRatio} />
+        <VoidLauncherBridge frog={launcherFrog} actions={frog.actions} workRatio={workRatio} />
       )}
       <aside className="rail">
         <div className="brand">
@@ -1952,6 +2005,7 @@ function DesktopApp() {
             taskBonus={taskBonus}
             setTaskBonus={setTaskBonus}
             frog={frog}
+            nativeFrog={nativeFrog}
             boundariesLock={boundariesLock}
             setBoundariesLock={setBoundariesLock}
             lastSyncAt={lastSyncAt}
@@ -5012,6 +5066,7 @@ function SettingsPage({
   taskBonus,
   setTaskBonus,
   frog,
+  nativeFrog,
   boundariesLock,
   setBoundariesLock,
   lastSyncAt,
@@ -5403,18 +5458,25 @@ function SettingsPage({
         <SettingRow
           icon="lock"
           title="Eat the Frog"
-          detail="Hard-lock every boundary app and website until today's frog is ticked off with enough focus tracked. Device-local, like Android."
+          detail="Only essential apps and Chrome websites stay available while you finish today's priority. Set up and enable this PC manually first."
         >
           <button
             className={`switch ${frog?.state?.enabled ? "on" : ""}`}
             role="switch"
             aria-checked={Boolean(frog?.state?.enabled)}
             aria-label="Toggle Eat the Frog"
-            onClick={() => frog?.actions?.setEnabled(!frog?.state?.enabled)}
+            disabled={(strictActive && frog?.state?.enabled) || !nativeFrog?.ready} onClick={() => {
+              if (!frog?.state?.enabled) window.dispatchEvent(new Event("focuslock:frog-setup"));
+              else void configureDesktopFrog(false, frog.state.essentialAppIds, frog.state.essentialDomains).catch((reason) => window.alert(String(reason)));
+            }}
           >
             <span />
           </button>
         </SettingRow>
+        <p className="frog-settings-note">Ctrl+Shift+Alt+F12 immediately exits Frog and keeps it disabled until you manually enable it again, including during Strict Mode.</p>
+        {frog?.state?.emergencyDisabled && <p role="status" className="frog-settings-note">Emergency exit used. Eat the Frog is disabled on this PC.</p>}
+        {nativeFrog?.error && <p role="alert" className="inline-error">{nativeFrog.error}</p>}
+        {frog?.state?.setupComplete && <button type="button" className="secondary-button" disabled={frog.state.enabled && strictActive} onClick={() => window.dispatchEvent(new Event("focuslock:frog-setup"))}>Review essential apps and websites</button>}
         {frog?.state?.enabled && <>
           <div className="setting-row">
             <span className="setting-icon"><Icon name="clock" /></span>

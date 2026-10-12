@@ -1,0 +1,23 @@
+// Fixture-only visual walkthrough for the desktop Frog onboarding dialog.
+import { createRequire } from "node:module";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { mkdir, readFile } from "node:fs/promises";
+import path from "node:path";
+import assert from "node:assert/strict";
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const out = path.join(root, "build/ui-verification");
+await mkdir(out, { recursive: true });
+const req = createRequire(path.join(root, "desktop/package.json"));
+const resolve = (name) => { for (const base of [path.join(root,"desktop"),path.join(root,"extension"), root]) { try { return createRequire(path.join(base,"package.json")).resolve(name); } catch {} } throw new Error(`Missing ${name}`); };
+const { build } = await import(pathToFileURL(resolve("esbuild")));
+const playwright = await import(pathToFileURL(resolve("playwright-core")));
+const chromium = playwright.chromium || playwright.default.chromium;
+const entry = path.join(out, "frog-setup-entry.tsx");
+const source = `import React,{useState} from "react";import{createRoot}from "react-dom/client";import ${JSON.stringify(path.join(root,"desktop/src/styles.css"))};import FrogSetup from ${JSON.stringify(path.join(root,"desktop/src/FrogSetup.tsx"))};function App(){const [open,setOpen]=useState(true);const [pending,setPending]=useState(false);return <main><button id="opener" onClick={()=>setOpen(true)}>Open setup</button>{open&&<FrogSetup pending={pending} catalog={{apps:[{appId:"chrome.exe",appName:"Chrome"},{appId:"focuslock.exe",appName:"FocusLock"},{appId:"study.exe",appName:"Study"}],domains:["docs.google.com"]}} blockedAppIds={["focuslock.exe"]} blockedDomains={["youtube.com"]} onCancel={()=>setOpen(false)} onSave={async(a,d)=>{setPending(true);await new Promise(r=>setTimeout(r,80));setPending(false);window.__saved={a,d};}}/>}</main>}createRoot(document.getElementById("root")).render(<App/>);`;
+await (await import("node:fs/promises")).writeFile(entry, source);
+const result = await build({ absWorkingDir:path.join(root,"desktop"), nodePaths:[path.join(root,"desktop/node_modules")], entryPoints:[entry], bundle:true, write:false, format:"iife", platform:"browser", target:"es2020", jsx:"automatic", plugins:[{name:"frog-fixtures",setup(b){b.onResolve({filter:/^react$/},()=>({path:req.resolve("react")}));b.onResolve({filter:/^react-dom\/client$/},()=>({path:req.resolve("react-dom/client")}));b.onResolve({filter:/@tauri-apps[\\/]api[\\/]core/},()=>({path:"tauri",namespace:"fixture"}));b.onResolve({filter:/\.css$/},a=>({path:path.resolve(a.resolveDir,a.path),namespace:"css"}));b.onLoad({filter:/.*/,namespace:"fixture"},()=>({contents:"export async function invoke(c){return c==='get_running_apps'?[{appId:'study.exe',appName:'Study'}]:[]}",loader:"js"}));b.onLoad({filter:/.*/,namespace:"css"},async a=>({contents:`const s=document.createElement('style');s.textContent=${JSON.stringify(await readFile(a.path,"utf8"))};document.head.appendChild(s)`,loader:"js"}));}}]});
+const html=`<!doctype html><meta name="viewport" content="width=device-width"><div id="root"></div><script>${result.outputFiles[0].text}</script>`;
+const browser=await chromium.launch({headless:true,executablePath:"C:/Program Files/Google/Chrome/Application/chrome.exe"});
+for(const width of [1000,520]){const page=await browser.newPage({viewport:{width,height:900}});await page.setContent(html);await page.waitForSelector('[role=dialog]');assert.equal(await page.locator('input[aria-label="App executable"]').count(),1);await page.locator('input[aria-label="App executable"]').fill("C:\\bad\\thing.exe");await page.getByRole('button',{name:'Add app'}).click();assert.match(await page.getByRole('alert').innerText(),/executable/i);await page.locator('input[aria-label="Website domain"]').fill('youtube.com');await page.getByRole('button',{name:'Add website'}).click();assert.match(await page.getByRole('alert').innerText(),/valid/i);await page.getByRole('button',{name:'Enable Eat the Frog'}).click();assert.match(await page.getByRole('alert').innerText(),/choose at least one/i);await page.locator('input[aria-label="Website domain"]').fill('docs.google.com');await page.getByRole('button',{name:'Add website'}).click();await page.getByRole('button',{name:'Enable Eat the Frog'}).click();await page.screenshot({path:path.join(out,`frog-onboarding-${width}.png`),fullPage:true});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),true);await page.close();}
+await browser.close();console.log("Desktop Frog setup fixture verification passed");

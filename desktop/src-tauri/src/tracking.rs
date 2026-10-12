@@ -25,11 +25,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use uuid::Uuid;
 
 const DEFAULT_REASON: &str = "blocked";
-// Matches desktop/src/features.ts.
-const DESKTOP_FROG_ENABLED: bool = false;
-
 fn remove_disabled_frog_targets(targets: &mut BlockedTargets, reasons: &mut HashMap<String, String>) {
-    if DESKTOP_FROG_ENABLED { return; }
+    // Frog is enforced by native allow-only policy, never by a renderer's
+    // catalog-sized list. Retire old renderer targets on load and every flush.
     targets.app_ids.retain(|id| reasons.get(id).is_none_or(|reason| reason != "frog"));
     targets.domains.retain(|id| reasons.get(id).is_none_or(|reason| reason != "frog"));
     reasons.retain(|_, reason| reason != "frog");
@@ -79,6 +77,38 @@ const PROTECTED_APP_IDS: &[&str] = &[
 const CAPTURE_ERROR_HIDE_THRESHOLD: u32 = 5;
 
 const STORE_VERSION: u8 = 1;
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FrogPolicy {
+    pub setup_complete: bool,
+    pub enabled: bool,
+    pub emergency_disabled: bool,
+    pub locked: bool,
+    #[serde(default)] pub app_ids: Vec<String>,
+    #[serde(default)] pub domains: Vec<String>,
+    #[serde(default)] pub effective_app_ids: Vec<String>,
+    #[serde(default)] pub effective_domains: Vec<String>,
+    #[serde(skip_deserializing, default)] pub hotkey_available: bool,
+    #[serde(skip_deserializing, default)] pub strict_settings_locked: bool,
+}
+
+impl FrogPolicy {
+    fn normalized(mut self) -> Self {
+        self.app_ids = clean_values(self.app_ids).into_iter().filter(|v| !is_protected_app_id(v)).collect();
+        self.domains = clean_values(self.domains);
+        self.effective_app_ids = clean_values(self.effective_app_ids);
+        self.effective_domains = clean_values(self.effective_domains);
+        self
+    }
+    pub(crate) fn active(&self) -> bool { self.setup_complete && self.enabled && !self.emergency_disabled && self.locked }
+    fn synced(mut self, locked: bool, app_ids: Vec<String>, domains: Vec<String>) -> Self {
+        self.locked = locked && self.setup_complete && self.enabled && !self.emergency_disabled;
+        self.effective_app_ids = clean_values(app_ids).into_iter().filter(|id| self.app_ids.contains(id)).collect();
+        self.effective_domains = clean_values(domains).into_iter().filter(|domain| self.domains.contains(domain)).collect();
+        self
+    }
+}
 
 /// Usage days older than this are pruned from the store. The UI only renders
 /// today's entries and the cloud sync uploads buckets by date, so 30 days is a
@@ -279,6 +309,18 @@ pub struct BlockedMatcher {
     own_app_id: String,
 }
 
+fn frog_matches(policy: &FrogPolicy, captured: &CapturedWindow) -> bool {
+    if !policy.active() || is_protected_app_id(&captured.app_id) { return false; }
+    if crate::browser_guard::is_browser(&captured.app_id) {
+        if !captured.app_id.eq_ignore_ascii_case("chrome.exe") { return true; }
+        let Some(domain) = captured.browser_domain.as_deref() else { return true; };
+        let domain = normalize_key(domain);
+        return !policy.effective_domains.iter().any(|allowed| domain == *allowed || domain.ends_with(&format!(".{allowed}")));
+    }
+    if policy.effective_app_ids.iter().any(|id| id.eq_ignore_ascii_case(&captured.app_id)) { return false; }
+    true
+}
+
 impl BlockedMatcher {
     pub fn new(targets: &BlockedTargets, reasons: &HashMap<String, String>) -> Self {
         Self {
@@ -362,6 +404,8 @@ struct TrackingStore {
     browser_protection_enabled: bool,
     #[serde(default)]
     browser_protection_locked_until_ms: u64,
+    #[serde(default)]
+    frog_policy: FrogPolicy,
     usage: BTreeMap<String, UsageEntry>,
     /// Set by `record` when usage data changed; the worker persists only when
     /// this is set instead of rewriting the file on a fixed timer.
@@ -399,6 +443,7 @@ impl TrackingStore {
             browser_protection_required: false,
             browser_protection_enabled: false,
             browser_protection_locked_until_ms: 0,
+            frog_policy: FrogPolicy::default(),
             usage: BTreeMap::new(),
             dirty: false,
             usage_generation: 0,
@@ -477,6 +522,7 @@ pub struct TrackerStatus {
     pub browser_protection: Option<BrowserProtectionStatus>,
     pub browser_protection_scan_state: &'static str,
     pub browser_protection_error: Option<String>,
+    pub frog: FrogPolicy,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -533,6 +579,8 @@ impl TrackerRuntime {
     pub fn browser_protection_active(&self) -> bool {
         self.store.lock().map(|s| s.browser_protection_active()).unwrap_or(false)
     }
+    pub fn frog_policy(&self) -> FrogPolicy { self.store.lock().map(|s| s.frog_policy.clone()).unwrap_or_default() }
+    pub fn mark_hotkey_available(&self) { if let Ok(mut s) = self.store.lock() { s.frog_policy.hotkey_available = true; let _ = persist_store(&self.store_path, &s); } }
     pub fn load(store_path: PathBuf) -> Result<Self, String> {
         let store = load_store(&store_path)?;
         let matcher = Arc::new(BlockedMatcher::new(
@@ -621,7 +669,14 @@ impl TrackerRuntime {
                         Ok(Some(captured)) => {
                             consecutive_capture_errors = 0;
                             // Explicit app blocks keep precedence (including Frog and permanent).
-                            let blocked_match = matcher.match_target(&captured);
+                            let blocked_match = matcher.match_target(&captured).or_else(|| {
+                                let policy = store.lock().ok().map(|s| s.frog_policy.clone())?;
+                                frog_matches(&policy, &captured).then_some(BlockedMatch {
+                                    target: captured.browser_domain.clone().unwrap_or_else(|| captured.app_id.clone()),
+                                    kind: if captured.browser_domain.is_some() { "domain" } else { "app" },
+                                    reason: "frog".into(),
+                                })
+                            });
                             let observation = ActivityObservation {
                                 captured_at_ms: now_ms(),
                                 app_id: captured.app_id.clone(),
@@ -781,7 +836,7 @@ impl TrackerRuntime {
         let enforcement_active = self
             .store
             .lock()
-            .map(|s| !s.blocked_targets.app_ids.is_empty() || !s.blocked_targets.domains.is_empty() || s.browser_protection_active())
+            .map(|s| !s.blocked_targets.app_ids.is_empty() || !s.blocked_targets.domains.is_empty() || s.browser_protection_active() || s.frog_policy.active())
             .unwrap_or(false);
         let scan = self.browser_protection.lock().map(|v| v.clone()).unwrap_or_else(|_| BrowserProtectionScan {
             state: "scan_error", browser: None, error: Some("Browser status is unavailable".into()),
@@ -805,6 +860,7 @@ impl TrackerRuntime {
             browser_protection,
             browser_protection_scan_state: scan.state,
             browser_protection_error: scan.error,
+            frog: self.frog_policy(),
         }
     }
     /// Pausing the tracker is refused while device-local permanent blocks
@@ -819,7 +875,7 @@ impl TrackerRuntime {
         if store.browser_protection_active() {
             return Err("Browser extension protection is active. Remove your website boundaries or wait for the commitment to end before pausing.".into());
         }
-        if !store.blocked_targets.app_ids.is_empty() || !store.blocked_targets.domains.is_empty() {
+        if !store.blocked_targets.app_ids.is_empty() || !store.blocked_targets.domains.is_empty() || store.frog_policy.active() {
             return Err("Active boundaries are being enforced. Protection cannot be paused or quit until those boundaries allow access.".into());
         }
         if store.permanent_targets.is_empty() {
@@ -867,6 +923,17 @@ impl TrackerRuntime {
     }
 }
 
+pub fn register_emergency_hotkey(app: AppHandle) -> Result<(), String> {
+    crate::frog_hotkey::start(move || {
+        if let (Some(state), Some(blocker)) = (app.try_state::<TrackerRuntime>(), app.try_state::<BlockerRuntime>()) {
+            if let Err(error) = emergency_disable_frog(app.clone(), state, blocker) {
+                app.state::<TrackerRuntime>().note_control_error(format!("Frog recovery could not persist: {error}"));
+                eprintln!("Frog recovery: {error}");
+            }
+        }
+    }).map(|_| ())
+}
+
 impl Drop for TrackerRuntime {
     fn drop(&mut self) {
         self.running.store(false, Ordering::SeqCst);
@@ -889,6 +956,100 @@ pub fn get_tracking_snapshot(state: State<'_, TrackerRuntime>) -> Result<Trackin
 #[tauri::command]
 pub fn get_tracker_status(state: State<'_, TrackerRuntime>) -> TrackerStatus {
     state.status()
+}
+#[tauri::command]
+pub fn get_frog_policy(app: AppHandle, state: State<'_, TrackerRuntime>) -> FrogPolicy {
+    let mut policy = state.frog_policy();
+    policy.strict_settings_locked = app.state::<crate::uninstall_guard::UninstallGuardRuntime>().check(now_ms()).unwrap_or(true);
+    policy
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrogPolicyConfig { pub enabled: bool, pub app_ids: Vec<String>, pub domains: Vec<String> }
+
+#[tauri::command]
+pub fn configure_frog_policy(app: AppHandle, config: FrogPolicyConfig, state: State<'_, TrackerRuntime>) -> Result<FrogPolicy, String> {
+    let mut store = state.store.lock().map_err(|_| "Tracking store lock was poisoned".to_string())?;
+    if config.enabled && !store.frog_policy.hotkey_available { return Err("Emergency hotkey is unavailable.".into()); }
+    if store.frog_policy.enabled && !config.enabled {
+        if app.state::<crate::uninstall_guard::UninstallGuardRuntime>().check(now_ms())? { return Err("Strict Mode is active.".into()); }
+    }
+    if store.frog_policy.enabled && config.enabled && (!config.app_ids.iter().all(|x| store.frog_policy.app_ids.contains(&normalize_key(x))) || !config.domains.iter().all(|x| store.frog_policy.domains.contains(&normalize_key(x)))) {
+        if app.state::<crate::uninstall_guard::UninstallGuardRuntime>().check(now_ms())? { return Err("Strict Mode is active.".into()); }
+    }
+    if config.app_ids.len() > 64 || config.domains.len() > 512 { return Err("Too many essential tools.".into()); }
+    if config.app_ids.iter().any(|id| !id.to_ascii_lowercase().ends_with(".exe") || id.contains(['\\', '/', '*', '?', '\0']) || id.len() > 260) {
+        return Err("Essential apps must be executable names such as study.exe.".into());
+    }
+    if config.domains.iter().any(|host| host.len() > 253 || !host.contains('.') || host.split('.').any(|label| label.is_empty() || label.starts_with('-') || label.ends_with('-') || !label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))) {
+        return Err("Enter valid essential website domains.".into());
+    }
+    let old = store.frog_policy.clone();
+    let next = FrogPolicy { setup_complete: true, enabled: config.enabled, emergency_disabled: false,
+        locked: config.enabled && old.active(), app_ids: config.app_ids, domains: config.domains,
+        hotkey_available: old.hotkey_available, ..FrogPolicy::default() }.normalized();
+    if config.enabled && next.app_ids.is_empty() && next.domains.is_empty() { return Err("Choose at least one essential app or website.".into()); }
+    if next.app_ids.iter().any(|id| store.permanent_targets.contains(id) || store.blocked_targets.app_ids.contains(id)) {
+        return Err("Essential apps cannot include boundaries or permanent blocks.".into());
+    }
+    if next.domains.iter().any(|host| store.blocked_targets.domains.iter().any(|blocked| host == blocked || host.ends_with(&format!(".{blocked}")) || blocked.ends_with(&format!(".{host}")))) {
+        return Err("Essential websites cannot include boundaries or permanent blocks.".into());
+    }
+    store.frog_policy = next.clone();
+    if let Err(error) = persist_store(&state.store_path, &store) { store.frog_policy = old; return Err(error); }
+    drop(store);
+    if !next.enabled {
+        if let Some(blocker) = app.try_state::<BlockerRuntime>() {
+            if blocker.state().reason.as_deref() == Some("frog") { blocker.hide(&app); }
+        }
+        if let Some(helper) = app.try_state::<crate::void_launcher::VoidSessionState>() {
+            crate::void_launcher::stop_from_host(helper.inner())?;
+        }
+    }
+    Ok(next)
+}
+
+#[tauri::command]
+pub fn sync_frog_lock(app: AppHandle, locked: bool, app_ids: Vec<String>, domains: Vec<String>, state: State<'_, TrackerRuntime>) -> Result<FrogPolicy, String> {
+    let mut store = state.store.lock().map_err(|_| "Tracking store lock was poisoned".to_string())?;
+    let current = store.frog_policy.clone();
+    if locked && (!current.enabled || current.emergency_disabled) { return Err("Frog is disabled.".into()); }
+    let next = current.clone().synced(locked, app_ids, domains);
+    if next == current { return Ok(current); }
+    store.frog_policy = next;
+    persist_store(&state.store_path, &store)?;
+    let policy = store.frog_policy.clone();
+    drop(store);
+    if policy.active() { state.start(app); }
+    else if let Some(blocker) = app.try_state::<BlockerRuntime>() {
+        if blocker.state().reason.as_deref() == Some("frog") { blocker.hide(&app); }
+    }
+    Ok(policy)
+}
+
+#[tauri::command]
+pub fn emergency_disable_frog(app: AppHandle, state: State<'_, TrackerRuntime>, blocker: State<'_, BlockerRuntime>) -> Result<FrogPolicy, String> {
+    let mut store = state.store.lock().map_err(|_| "Tracking store lock was poisoned".to_string())?;
+    store.frog_policy.emergency_disabled = true;
+    store.frog_policy.enabled = false;
+    store.frog_policy.locked = false;
+    let reasons = store.blocked_reasons.clone();
+    store.blocked_targets.app_ids.retain(|id| reasons.get(id).is_none_or(|r| r != "frog"));
+    store.blocked_targets.domains.retain(|id| reasons.get(id).is_none_or(|r| r != "frog"));
+    store.blocked_reasons.retain(|_, r| r != "frog");
+    let persistence = persist_store(&state.store_path, &store);
+    let matcher = BlockedMatcher::new(&store.blocked_targets, &store.blocked_reasons);
+    let policy = store.frog_policy.clone();
+    drop(store);
+    if let Ok(mut current) = state.matcher.lock() { *current = Arc::new(matcher); }
+    if blocker.state().reason.as_deref() == Some("frog") { blocker.hide(&app); }
+    let _ = app.emit("focuslock-frog-emergency", &policy);
+    if let Some(helper) = app.try_state::<crate::void_launcher::VoidSessionState>() {
+        crate::void_launcher::stop_from_host(helper.inner())?;
+    }
+    persistence?;
+    Ok(policy)
 }
 #[tauri::command]
 pub fn get_running_apps() -> Result<Vec<crate::windows_capture::RunningApp>, String> {
@@ -1097,7 +1258,7 @@ pub fn set_blocked_targets(
         *value = Arc::new(matcher);
     }
     // Nothing left to enforce: make sure a visible blocker is not stranded.
-    if normalized.app_ids.is_empty() && normalized.domains.is_empty() {
+    if normalized.app_ids.is_empty() && normalized.domains.is_empty() && !state.frog_policy().active() {
         blocker.hide(&app);
     } else {
         // A pause made before adding rules must not create an enforcement bypass.
@@ -1164,7 +1325,17 @@ fn persist_store(path: &Path, store: &TrackingStore) -> Result<(), String> {
     }
     let bytes = serde_json::to_vec_pretty(store)
         .map_err(|e| format!("Could not encode tracking data: {e}"))?;
-    fs::write(path, bytes).map_err(|e| format!("Could not save tracking data: {e}"))
+    let temporary = path.with_extension(format!("{}.tmp", Uuid::new_v4()));
+    let result = (|| {
+        use std::io::Write;
+        let mut file = fs::File::create(&temporary)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&temporary, path)
+    })();
+    if result.is_err() { let _ = fs::remove_file(&temporary); }
+    result.map_err(|e| format!("Could not save tracking data: {e}"))
 }
 
 fn update_browser_repair_guard(
@@ -1290,6 +1461,10 @@ fn observe_browser_samples(
         else { "no_browser" };
     (BrowserProtectionScan { state, browser, error }, repair, due)
 }
+
+#[cfg(test)]
+#[path = "frog_policy_tests.rs"]
+mod frog_policy_tests;
 
 #[cfg(test)]
 mod tests {

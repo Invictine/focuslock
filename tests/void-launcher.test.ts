@@ -25,6 +25,10 @@ const workingFrog: FrogState = {
   locked: true,
   requiredMinutes: 30,
   wakeHour: 5,
+  setupComplete: true,
+  emergencyDisabled: false,
+  essentialAppIds: ["Code.exe", "chrome.exe"],
+  essentialDomains: ["docs.google.com", "calendar.google.com"],
 };
 
 describe("Void launcher protocol", () => {
@@ -40,12 +44,12 @@ describe("Void launcher protocol", () => {
       running: true,
       remainingSeconds: 600,
       blockMinutes: 10,
-      tools: [{ id: "Code.exe", label: "Code.exe" }],
-      domains: ["docs.google.com"],
+      tools: [{ id: "Code.exe", label: "Code.exe" }, { id: "chrome.exe", label: "chrome.exe" }],
+      domains: ["docs.google.com", "calendar.google.com"],
     });
     expect(isVoidLauncherState(state)).toBe(true);
-    expect(state.tools).toEqual([{ id: "Code.exe", label: "Code.exe" }]);
-    expect(state.domains).toEqual(["docs.google.com"]);
+    expect(state.tools).toEqual([{ id: "Code.exe", label: "Code.exe" }, { id: "chrome.exe", label: "chrome.exe" }]);
+    expect(state.domains).toEqual(["docs.google.com", "calendar.google.com"]);
 
     const grace = buildVoidLauncherState({
       ...workingFrog,
@@ -69,10 +73,20 @@ describe("Void launcher protocol", () => {
       title: "Pick one task",
       graceRemainingSeconds: 0,
       running: false,
-      tools: [],
-      domains: [],
+      tools: [{ id: "Code.exe", label: "Code.exe" }, { id: "chrome.exe", label: "chrome.exe" }],
+      domains: ["docs.google.com", "calendar.google.com"],
     });
     expect(isVoidLauncherState(picking)).toBe(true);
+    expect(picking?.tools.map(tool => tool.id)).toEqual(["Code.exe", "chrome.exe"]);
+    expect(picking?.domains).toEqual(["docs.google.com", "calendar.google.com"]);
+    // Task selections cannot widen the host-configured essential snapshot.
+    const maliciousTask = buildVoidLauncherState({
+      ...workingFrog,
+      frog: { ...workingFrog.frog!, neededAppIds: ["notepad.exe"], neededDomains: ["evil.example"] },
+      phase: "working",
+    }, true, 600, 10);
+    expect(maliciousTask?.tools.map(tool => tool.id)).toEqual(["Code.exe", "chrome.exe"]);
+    expect(maliciousTask?.domains).toEqual(["docs.google.com", "calendar.google.com"]);
     expect(isVoidLauncherState({ ...state, graceRemainingSeconds: 301 })).toBe(false);
     expect(isVoidLauncherState({ ...state, graceRemainingSeconds: -1 })).toBe(false);
     expect(isVoidLauncherState({ ...state, graceRemainingSeconds: Number.NaN })).toBe(false);

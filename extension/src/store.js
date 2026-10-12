@@ -126,6 +126,7 @@
       strictAttempts: 0,
       strictSessionKey: '',
       browserFrog: { enabled: false, wakeHour: 5, requiredSeconds: 1800 },
+      desktopFrog: null,
       focusTimer: null,
       focusDailySessions: [],
       focusDailySummary: { date: '', accountId: '', items: [], fetchedAt: 0 },
@@ -225,6 +226,7 @@
       strictAttempts: Math.max(0, finite(s.strictAttempts)),
       strictSessionKey: typeof s.strictSessionKey === 'string' ? s.strictSessionKey : '',
       browserFrog: root.FocusLockFeatures?.frogState(s.browserFrog) || d.browserFrog,
+      desktopFrog: s.desktopFrog && typeof s.desktopFrog === 'object' ? s.desktopFrog : null,
       focusTimer: root.FocusLockFeatures?.timerState(s.focusTimer) || null,
       focusDailySessions: Array.isArray(s.focusDailySessions) ? s.focusDailySessions.filter(row =>
         row && typeof row.id === 'string' && typeof row.accountId === 'string'

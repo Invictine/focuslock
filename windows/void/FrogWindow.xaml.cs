@@ -12,7 +12,6 @@ namespace VoidApp;
 public partial class FrogWindow : Window
 {
     private const int ToggleHotkey = 1;
-    private const int EmergencyHotkey = 2;
     private const int WmHotkey = 0x0312;
     private const int WmReturnToFrog = 0x8003;
     private const uint ModAlt = 0x0001, ModControl = 0x0002, ModShift = 0x0004;
@@ -22,7 +21,6 @@ public partial class FrogWindow : Window
     private FocusLockSessionState? state;
     private bool allowClose;
     private bool recoveryHotkeyAvailable;
-    private bool emergencyHotkeyAvailable;
     private bool applyingState;
     private readonly DispatcherTimer heartbeat = new() { Interval = TimeSpan.FromSeconds(1) };
     private long lastStateTimestamp;
@@ -57,7 +55,7 @@ public partial class FrogWindow : Window
         state = next;
         if (previousCycle is not null && previousCycle != next.CycleDate)
         {
-            TaskInput.Clear(); SitesInput.Clear();
+            TaskInput.Clear();
             essentialTools.Clear(); EssentialChoices.Children.Clear(); pickerLoaded = false;
             toolLayoutKey = domainLayoutKey = null;
             UseTaskButton.IsEnabled = true;
@@ -89,7 +87,7 @@ public partial class FrogWindow : Window
             if (IsLoaded && next.Phase == "pick_frog") TaskInput.Focus();
         }
         ProgressText.Text = next.Phase == "grace" ? "Eat the frog starts after this countdown" : $"{FormatMinutes(next.TrackedSeconds)} / {FormatMinutes(next.RequiredSeconds)} minutes";
-        if (next.Phase == "pick_frog" && !pickerLoaded) LoadEssentialTools();
+        if (next.Phase == "pick_frog") LoadEssentialTools(next);
         if (next.Phase == "working") { UseTaskButton.IsEnabled = true; if (StatusText.Text == "Saving your task…") StatusText.Text = ""; }
         // A manually opened countdown does not change the desktop environment.
         if (IsLoaded && next.Phase is ("pick_frog" or "working")) BeginEnvironment();
@@ -128,7 +126,7 @@ public partial class FrogWindow : Window
     private void BeginEnvironment()
     {
         if (environmentStarted) return;
-        if (!recoveryHotkeyAvailable || !emergencyHotkeyAvailable) return;
+        if (!recoveryHotkeyAvailable) return;
         try
         {
             TaskbarSession.Begin();
@@ -168,36 +166,27 @@ public partial class FrogWindow : Window
         if (state?.Phase == "grace" && e.ChangedButton == System.Windows.Input.MouseButton.Left) DragMove();
     }
 
-    private void LoadEssentialTools()
+    private void LoadEssentialTools(FocusLockSessionState snapshot)
     {
+        var snapshotKey = string.Join("\n", snapshot.Tools.Select(tool => $"{tool.Id}\0{tool.Label}\0{tool.ExecutablePath}\0{tool.AppUserModelId}")) + "\n--\n" + string.Join("\n", snapshot.Domains);
+        if (pickerLoaded && string.Equals(toolLayoutKey, snapshotKey, StringComparison.Ordinal)) return;
         pickerLoaded = true;
-        foreach (var app in config.Apps.Where(app => !string.IsNullOrWhiteSpace(app.Path)))
-            AddEssential(new FocusLockTool { Id = Path.GetFileName(app.Path), Label = app.Name, ExecutablePath = app.Path, AppUserModelId = app.AppUserModelId });
-        foreach (var process in Process.GetProcesses())
-        {
-            using (process)
-            {
-                try
-                {
-                    if (process.MainWindowHandle == 0) continue;
-                    var path = process.MainModule?.FileName;
-                    if (path is null || process.Id == Environment.ProcessId || process.ProcessName.Equals("FocusLock", StringComparison.OrdinalIgnoreCase)) continue;
-                    AddEssential(new FocusLockTool { Id = Path.GetFileName(path), Label = process.ProcessName, ExecutablePath = path });
-                }
-                catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException or NotSupportedException) { }
-            }
-        }
+        toolLayoutKey = snapshotKey;
+        essentialTools.Clear();
+        EssentialChoices.Children.Clear();
+        foreach (var tool in snapshot.Tools) AddEssential(tool, true);
+        RebuildEssentialDomains(snapshot);
     }
-
     private void AddEssential(FocusLockTool tool, bool selected = false)
     {
         if (essentialTools.ContainsKey(tool.Id))
         {
-            if (selected) foreach (var box in EssentialChoices.Children.OfType<CheckBox>().Where(box => string.Equals((string)box.Tag, tool.Id, StringComparison.OrdinalIgnoreCase))) box.IsChecked = true;
             return;
         }
         essentialTools.Add(tool.Id, tool);
-        EssentialChoices.Children.Add(new CheckBox { Content = tool.Label, Tag = tool.Id, IsChecked = selected });
+        var button = new Button { Content = tool.Label, Tag = tool };
+        button.Click += Tool_Click;
+        EssentialChoices.Children.Add(button);
     }
 
     private void Continue_Click(object sender, RoutedEventArgs e)
@@ -209,30 +198,8 @@ public partial class FrogWindow : Window
 
     private void BackToTask_Click(object sender, RoutedEventArgs e)
     {
-        ToolsStep.Visibility = Visibility.Collapsed; TaskStep.Visibility = Visibility.Visible;
+        ToolsStep.Visibility = Visibility.Visible; TaskStep.Visibility = Visibility.Visible;
         TaskInput.Focus();
-    }
-
-    private void BrowseEssential_Click(object sender, RoutedEventArgs e)
-    {
-        var dialog = new OpenFileDialog { Title = "Choose an essential app", Filter = "Applications (*.exe)|*.exe", CheckFileExists = true };
-        if (dialog.ShowDialog(this) == true)
-            AddEssential(new FocusLockTool { Id = Path.GetFileName(dialog.FileName), Label = Path.GetFileNameWithoutExtension(dialog.FileName), ExecutablePath = dialog.FileName }, true);
-    }
-
-    private async void InstalledEssential_Click(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            StatusText.Text = "Finding installed apps…";
-            var apps = (await InstalledApps.LoadAsync()).Where(app => !string.IsNullOrWhiteSpace(app.ExecutableName)).ToList();
-            if (!CanUseLatestState() || state?.Phase != "pick_frog") return;
-            var selected = ChooseInstalledApp(apps);
-            if (selected is not null)
-                AddEssential(new FocusLockTool { Id = selected.ExecutableName!, Label = selected.Name, AppUserModelId = selected.AppUserModelId }, true);
-            StatusText.Text = "";
-        }
-        catch (Exception ex) { StatusText.Text = "Could not list apps: " + ex.Message; }
     }
 
     private void UseTask_Click(object sender, RoutedEventArgs e)
@@ -240,9 +207,8 @@ public partial class FrogWindow : Window
         if (!CanUseLatestState() || state?.Phase != "pick_frog") return;
         try
         {
-            var domains = SitesInput.Text.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
-                .Select(FocusLockSessionState.NormalizeHttpsDomain).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-            var apps = EssentialChoices.Children.OfType<CheckBox>().Where(box => box.IsChecked == true).Select(box => (string)box.Tag).ToList();
+            var domains = state.Domains.ToList();
+            var apps = state.Tools.Select(tool => tool.Id).ToList();
             if (apps.Count > 64 || domains.Count > 64) throw new InvalidDataException("Choose up to 64 essential apps and websites.");
             protocol.WriteAction(new FocusLockAction { Action = "select_frog", Title = TaskInput.Text.Trim(), AppIds = apps, Domains = domains });
             UseTaskButton.IsEnabled = false;
@@ -259,6 +225,17 @@ public partial class FrogWindow : Window
             var button = new Button { Content = domain, Tag = domain };
             button.Click += Domain_Click;
             DomainsPanel.Children.Add(button);
+        }
+    }
+
+    private void RebuildEssentialDomains(FocusLockSessionState next)
+    {
+        EssentialDomains.Children.Clear();
+        foreach (var domain in next.Domains)
+        {
+            var button = new Button { Content = domain, Tag = domain };
+            button.Click += Domain_Click;
+            EssentialDomains.Children.Add(button);
         }
     }
 
@@ -369,8 +346,22 @@ public partial class FrogWindow : Window
     private void Domain_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { Tag: string domain } || !CanUseLatestState()) return;
-        try { Process.Start(new ProcessStartInfo("https://" + domain) { UseShellExecute = true }); Topmost = false; StatusText.Text = ""; }
+        try { LaunchChrome("https://" + domain); Topmost = false; StatusText.Text = ""; }
         catch (Exception ex) { ShowActionError(domain, ex); }
+    }
+
+    private static void LaunchChrome(string url)
+    {
+        var candidates = new[]
+        {
+            "chrome.exe",
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Google\\Chrome\\Application\\chrome.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Google\\Chrome\\Application\\chrome.exe"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "Google\\Chrome\\Application\\chrome.exe"),
+        };
+        var executable = candidates.FirstOrDefault(path => path.Equals("chrome.exe", StringComparison.OrdinalIgnoreCase) || File.Exists(path));
+        if (executable is null) throw new FileNotFoundException("Google Chrome was not found.");
+        Process.Start(new ProcessStartInfo(executable, url) { UseShellExecute = true });
     }
 
     private bool CanUseLatestState()
@@ -420,9 +411,9 @@ public partial class FrogWindow : Window
         source?.AddHook(WindowMessage);
         heartbeat.Start();
         recoveryHotkeyAvailable = NativeMethods.RegisterHotKey(new WindowInteropHelper(this).Handle, ToggleHotkey, ModControl | ModAlt, 0x20);
-        emergencyHotkeyAvailable = NativeMethods.RegisterHotKey(new WindowInteropHelper(this).Handle, EmergencyHotkey, ModControl | ModAlt | ModShift, 0x7B);
-        if (!recoveryHotkeyAvailable || !emergencyHotkeyAvailable)
-            RecoveryText.Text = $"Hotkey unavailable: {string.Join(" and ", new[] { !recoveryHotkeyAvailable ? "Ctrl+Alt+Space" : null, !emergencyHotkeyAvailable ? "Ctrl+Alt+Shift+F12" : null }.Where(x => x is not null))}. Use Back to desktop to close this screen.";
+        // The host owns the emergency shortcut so it can disable Eat the Frog persistently.
+        if (!recoveryHotkeyAvailable)
+            RecoveryText.Text = "Hotkey unavailable: Ctrl+Alt+Space. Use Back to desktop to close this screen.";
         if (state?.Phase is "pick_frog" or "working") BeginEnvironment();
         if (state?.Phase == "pick_frog") TaskInput.Focus();
     }
@@ -443,12 +434,6 @@ public partial class FrogWindow : Window
             if (wParam.ToInt32() == ToggleHotkey)
             {
                 RestoreFrogSurface();
-            }
-            else if (wParam.ToInt32() == EmergencyHotkey)
-            {
-                allowClose = true;
-                protocol.WriteAction(new FocusLockAction { Action = "closed" });
-                Close();
             }
             handled = true;
         }
@@ -498,7 +483,6 @@ public partial class FrogWindow : Window
     {
         var hwnd = new WindowInteropHelper(this).Handle;
         if (recoveryHotkeyAvailable) NativeMethods.UnregisterHotKey(hwnd, ToggleHotkey);
-        if (emergencyHotkeyAvailable) NativeMethods.UnregisterHotKey(hwnd, EmergencyHotkey);
         source?.RemoveHook(WindowMessage);
         protocol.RequestStop();
         heartbeat.Stop();

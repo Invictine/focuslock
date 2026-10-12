@@ -233,3 +233,34 @@ test('start is idempotent, change events request a fresh heartbeat, stop detache
   assert.equal(chrome.tabs.onUpdated.size, 0);
   assert.equal(ports[0].disconnected, true);
 });
+
+test('delivers only validated desktop policy snapshots and rejects stale ports', async () => {
+  const policies = [];
+  const { bridge, chrome, ports } = harness();
+  bridge.start(chrome, policy => policies.push(policy));
+  await tick();
+  const first = ports[0];
+  first.onMessage.fire({ ok: true, desktopFrog: {
+    setupComplete: true, enabled: true, emergencyDisabled: false, locked: true,
+    domains: ['docs.google.com']
+  }});
+  first.onMessage.fire({ ok: true, desktopFrog: {
+    setupComplete: true, enabled: true, emergencyDisabled: false, locked: true,
+    domains: ['docs.google.com', 'https://evil.example/path']
+  }});
+  assert.equal(policies.length, 1);
+  assert.equal(policies[0].domains[0], 'docs.google.com');
+  first.onDisconnect.fire();
+  await new Promise(resolve => setTimeout(resolve, 5100));
+  await tick();
+  assert.equal(ports.length, 2);
+  first.onMessage.fire({ ok: true, desktopFrog: {
+    setupComplete: true, enabled: false, emergencyDisabled: true, locked: false, domains: []
+  }});
+  assert.equal(policies.length, 1, 'messages from a disconnected generation are ignored');
+  ports[1].onMessage.fire({ ok: true, desktopFrog: {
+    setupComplete: true, enabled: false, emergencyDisabled: true, locked: false, domains: []
+  }});
+  assert.equal(policies.length, 2);
+  bridge.stop();
+});

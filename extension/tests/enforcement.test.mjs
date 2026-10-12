@@ -57,6 +57,26 @@ const engine = context.self.FocusLockEngine;
 assert.equal(engine.verdictFor('https://www.reddit.com/r/focus/', state, 100).blocked, true);
 assert.equal(engine.verdictFor('chrome://settings/', state, 100).blocked, false);
 
+// Desktop policy is inactive until the one-time native setup completes.
+const desktopBase = structuredClone(state);
+desktopBase.desktopFrog = { setupComplete: false, enabled: true, emergencyDisabled: false,
+  locked: true, domains: ['docs.google.com'] };
+assert.equal(engine.verdictFor('https://unapproved.example/', desktopBase, 100).blocked, false);
+
+// Once active, only the configured host and its subdomains are reachable.
+desktopBase.desktopFrog.setupComplete = true;
+assert.equal(engine.verdictFor('https://docs.google.com/document', desktopBase, 100).blocked, false);
+assert.equal(engine.verdictFor('https://sub.docs.google.com/', desktopBase, 100).blocked, false);
+assert.equal(engine.verdictFor('https://docs.google.com.evil.example/', desktopBase, 100).blocked, true);
+assert.equal(engine.verdictFor('https://unapproved.example/', desktopBase, 100).blocked, true);
+
+// Emergency disable releases the persisted desktop boundary and blocks a
+// browser Frog from reopening it locally.
+desktopBase.desktopFrog.emergencyDisabled = true;
+desktopBase.desktopFrog.enabled = false;
+desktopBase.browserFrog = { ...desktopBase.browserFrog, enabled: false, armed: false };
+assert.equal(engine.verdictFor('https://unapproved.example/', desktopBase, 100).blocked, false);
+
 // Daily allowance permits the site before the recorded budget is exhausted and
 // produces a distinct verdict afterward.
 const limited = structuredClone(state);

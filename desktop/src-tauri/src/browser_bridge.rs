@@ -36,6 +36,10 @@ struct HostMessage {
     windows: Vec<ExtensionWindow>,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopFrogWire { setup_complete: bool, enabled: bool, emergency_disabled: bool, locked: bool, app_ids: Vec<String>, domains: Vec<String> }
+
 #[derive(Clone, Debug, Deserialize)]
 struct ExtensionWindow {
     id: i32,
@@ -374,12 +378,12 @@ fn run_host() -> Result<(), String> {
         let message = match parse_message_payload(&bytes) {
             Ok(message) => message,
             Err(_) => {
-                write_response(&mut stdout, false)?;
+                write_response(&mut stdout, false, None)?;
                 continue;
             }
         };
         if !valid_message(&message) {
-            write_response(&mut stdout, false)?;
+            write_response(&mut stdout, false, None)?;
             continue;
         }
         let lease = resolve_lease(&message, &browser);
@@ -388,7 +392,7 @@ fn run_host() -> Result<(), String> {
         } else {
             let _ = fs::remove_file(&lease_path);
         }
-        write_response(&mut stdout, true)?;
+        write_response(&mut stdout, true, Some(read_desktop_frog(&data_dir)?))?;
     }
     Ok(())
 }
@@ -424,17 +428,27 @@ fn native_host_data_dir(app_id: &str) -> Result<std::path::PathBuf, String> {
 }
 
 #[cfg(windows)]
-fn write_response(output: &mut impl std::io::Write, ok: bool) -> Result<(), String> {
-    let bytes: &[u8] = if ok {
-        br#"{"ok":true}"#
-    } else {
-        br#"{"ok":false}"#
-    };
+fn write_response(output: &mut impl std::io::Write, ok: bool, frog: Option<DesktopFrogWire>) -> Result<(), String> {
+    let payload = serde_json::json!({"ok": ok, "desktopFrog": frog});
+    let bytes = serde_json::to_vec(&payload).map_err(|e| e.to_string())?;
     output
         .write_all(&(bytes.len() as u32).to_le_bytes())
-        .and_then(|_| output.write_all(bytes))
+        .and_then(|_| output.write_all(&bytes))
         .and_then(|_| output.flush())
         .map_err(|e| format!("Write native response: {e}"))
+}
+
+#[cfg(windows)]
+fn read_desktop_frog(data_dir: &Path) -> Result<DesktopFrogWire, String> {
+    let path = data_dir.join("activity-v1.json");
+    let raw = fs::read_to_string(path).map_err(|error| format!("Read desktop Frog policy: {error}"))?;
+    let value: serde_json::Value = serde_json::from_str(&raw).map_err(|error| format!("Decode desktop Frog policy: {error}"))?;
+    let mut frog = value.get("frogPolicy").cloned().unwrap_or_default();
+    if frog["locked"] == true {
+        frog["appIds"] = frog["effectiveAppIds"].clone();
+        frog["domains"] = frog["effectiveDomains"].clone();
+    }
+    Ok(serde_json::from_value(frog).unwrap_or(DesktopFrogWire { setup_complete:false, enabled:false, emergency_disabled:false, locked:false, app_ids:vec![], domains:vec![] }))
 }
 
 fn valid_message(message: &HostMessage) -> bool {
@@ -728,6 +742,27 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn desktop_frog_bridge_reads_camel_case_store_and_effective_whitelist() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("activity-v1.json");
+        fs::write(&path, serde_json::to_vec(&serde_json::json!({"frogPolicy": {
+            "setupComplete": true, "enabled": true, "emergencyDisabled": false, "locked": true,
+            "appIds": ["code.exe", "game.exe"], "domains": ["docs.google.com", "games.example"],
+            "effectiveAppIds": ["code.exe"], "effectiveDomains": ["docs.google.com"]
+        }})).unwrap()).unwrap();
+        let wire = read_desktop_frog(directory.path()).unwrap();
+        assert!(wire.enabled && wire.locked);
+        assert_eq!(wire.domains, ["docs.google.com"]);
+        assert_eq!(wire.app_ids, ["code.exe"]);
+        fs::write(&path, serde_json::to_vec(&serde_json::json!({"frogPolicy": {
+            "setupComplete": true, "enabled": false, "emergencyDisabled": true, "locked": false,
+            "appIds": ["code.exe"], "domains": ["docs.google.com"]
+        }})).unwrap()).unwrap();
+        let wire = read_desktop_frog(directory.path()).unwrap();
+        assert!(wire.emergency_disabled && !wire.enabled && !wire.locked);
+    }
     use tempfile::tempdir;
 
     fn lease(

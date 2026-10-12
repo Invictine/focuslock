@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DESKTOP_FROG_ENABLED } from "./features";
+import { assertStrictSettingChange } from "./strictSettings";
 
 // ---------------------------------------------------------------------------
 // "Eat the frog" — desktop port of the Android reference:
@@ -12,7 +13,7 @@ import { DESKTOP_FROG_ENABLED } from "./features";
 //
 // Ported verbatim from Kotlin: frogCycleDate, computeFrogLocked, canArmNow,
 // shouldRolloverFrogCycle, FrogPhase.from, the lazy daily rollover rule and the
-// defaults (enabled = true, requiredMinutes = 30, wakeHour = 5).
+// Desktop adds explicit device consent; requiredMinutes = 30, wakeHour = 5.
 // ---------------------------------------------------------------------------
 
 /** One pickable frog: the day's single "most important task" and its allowlist. */
@@ -41,6 +42,10 @@ export type FrogState = {
   requiredMinutes: number;
   wakeHour: number;
   graceRemainingSeconds: number;
+  setupComplete: boolean;
+  emergencyDisabled: boolean;
+  essentialAppIds: string[];
+  essentialDomains: string[];
 };
 
 export type FrogActions = {
@@ -53,6 +58,8 @@ export type FrogActions = {
   tickOffFrog: (tickedOff?: boolean) => void;
   addTrackedSeconds: (seconds: number) => void;
   refresh: () => void;
+  completeSetup: (appIds: string[], domains: string[]) => void;
+  emergencyDisable: () => void;
 };
 
 // localStorage keys, namespaced like the other desktop device-local values
@@ -69,10 +76,14 @@ export const FROG_KEYS = {
   selected: `${FROG_STORAGE_PREFIX}selected`,
   tickedOff: `${FROG_STORAGE_PREFIX}ticked_off`,
   trackedSeconds: `${FROG_STORAGE_PREFIX}tracked_seconds`,
+  setupComplete: `${FROG_STORAGE_PREFIX}setup_complete`,
+  emergencyDisabled: `${FROG_STORAGE_PREFIX}emergency_disabled`,
+  essentialAppIds: `${FROG_STORAGE_PREFIX}essential_app_ids`,
+  essentialDomains: `${FROG_STORAGE_PREFIX}essential_domains`,
 } as const;
 
 // Android FrogRepository defaults / bounds.
-export const FROG_DEFAULT_ENABLED = true;
+export const FROG_DEFAULT_ENABLED = false;
 export const FROG_DEFAULT_REQUIRED_MINUTES = 30;
 export const FROG_DEFAULT_WAKE_HOUR = 5;
 export const FROG_MIN_REQUIRED_MINUTES = 1;
@@ -90,6 +101,9 @@ const FROG_CHANGED_EVENT = "focuslock:frog-changed";
 const FROG_TICK_MS = 1_000;
 export const FROG_DAILY_GRACE_MS = 5 * 60_000;
 const INT_MAX = 2_147_483_647;
+let nativeFrogReady = false;
+export function setNativeFrogReady(ready: boolean): void { nativeFrogReady = Boolean(ready); notifyFrogChanged(); }
+function nativeReady(): boolean { return typeof window === "undefined" || !((window as any).__TAURI_INTERNALS__ || (window as any).__TAURI__ ) || nativeFrogReady; }
 
 type FrogPrefs = {
   enabled: boolean;
@@ -101,6 +115,10 @@ type FrogPrefs = {
   selectedJson: string;
   tickedOff: boolean;
   trackedSeconds: number;
+  setupComplete: boolean;
+  emergencyDisabled: boolean;
+  essentialAppIds: string[];
+  essentialDomains: string[];
 };
 
 function defaultPrefs(): FrogPrefs {
@@ -114,6 +132,10 @@ function defaultPrefs(): FrogPrefs {
     selectedJson: "",
     tickedOff: false,
     trackedSeconds: 0,
+    setupComplete: false,
+    emergencyDisabled: false,
+    essentialAppIds: [],
+    essentialDomains: [],
   };
 }
 
@@ -126,6 +148,11 @@ function intValue(raw: string | null, fallback: number): number {
   if (raw === null || raw === "") return fallback;
   const num = Number(raw);
   return Number.isFinite(num) ? Math.trunc(num) : fallback;
+}
+
+function listValue(raw: string | null): string[] {
+  if (!raw) return [];
+  try { const value = JSON.parse(raw); return Array.isArray(value) ? value.filter((x): x is string => typeof x === "string") : []; } catch { return []; }
 }
 
 function clampRequiredMinutes(minutes: number): number {
@@ -164,6 +191,10 @@ function readPrefs(): FrogPrefs {
       selectedJson: store.getItem(FROG_KEYS.selected) || "",
       tickedOff: boolValue(store.getItem(FROG_KEYS.tickedOff), false),
       trackedSeconds: Math.max(0, intValue(store.getItem(FROG_KEYS.trackedSeconds), 0)),
+      setupComplete: boolValue(store.getItem(FROG_KEYS.setupComplete), false),
+      emergencyDisabled: boolValue(store.getItem(FROG_KEYS.emergencyDisabled), false),
+      essentialAppIds: listValue(store.getItem(FROG_KEYS.essentialAppIds)),
+      essentialDomains: listValue(store.getItem(FROG_KEYS.essentialDomains)),
     };
   } catch {
     return defaultPrefs();
@@ -182,6 +213,10 @@ function writePrefs(prefs: FrogPrefs): void {
     store.setItem(FROG_KEYS.selected, prefs.selectedJson);
     store.setItem(FROG_KEYS.tickedOff, prefs.tickedOff ? "1" : "0");
     store.setItem(FROG_KEYS.trackedSeconds, String(Math.max(0, prefs.trackedSeconds)));
+    store.setItem(FROG_KEYS.setupComplete, prefs.setupComplete ? "1" : "0");
+    store.setItem(FROG_KEYS.emergencyDisabled, prefs.emergencyDisabled ? "1" : "0");
+    store.setItem(FROG_KEYS.essentialAppIds, JSON.stringify(prefs.essentialAppIds));
+    store.setItem(FROG_KEYS.essentialDomains, JSON.stringify(prefs.essentialDomains));
   } catch {
     // Storage blocked: keep the change in memory only (same behaviour as the
     // other desktop local flags).
@@ -273,6 +308,12 @@ function decodeFrog(raw: string): FrogTask | null {
   }
 }
 
+function restrictToEssentials(task: FrogTask, prefs: FrogPrefs): FrogTask {
+  const apps = new Set(prefs.essentialAppIds.map(normalizeAppKey));
+  const domains = new Set(prefs.essentialDomains.map(normalizeDomainKey));
+  return { ...task, neededAppIds: task.neededAppIds.filter((x) => apps.has(normalizeAppKey(x))), neededDomains: task.neededDomains.filter((x) => domains.has(normalizeDomainKey(x))) };
+}
+
 // ---------------------------------------------------------------------------
 // Pure helpers — byte-for-byte ports of the FrogRepository Kotlin functions.
 // ---------------------------------------------------------------------------
@@ -358,6 +399,8 @@ export function formatFrogClock(seconds: number): string {
 /** Current frog snapshot for the cycle day [nowMillis] falls in. Pure read. */
 export function readFrogState(nowMillis: number = Date.now()): FrogState {
   const prefs = readPrefs();
+  prefs.enabled = prefs.enabled && prefs.setupComplete && !prefs.emergencyDisabled && nativeReady();
+  if (!prefs.enabled) { prefs.armed = false; prefs.graceStartedAtMs = 0; }
   const requiredMinutes = clampRequiredMinutes(prefs.requiredMinutes);
   const requiredSeconds = requiredMinutes * 60;
   const today = frogCycleDate(nowMillis, prefs.wakeHour);
@@ -375,6 +418,10 @@ export function readFrogState(nowMillis: number = Date.now()): FrogState {
       requiredMinutes,
       wakeHour: clampWakeHour(prefs.wakeHour),
       graceRemainingSeconds: 0,
+      setupComplete: prefs.setupComplete,
+      emergencyDisabled: prefs.emergencyDisabled,
+      essentialAppIds: prefs.essentialAppIds,
+      essentialDomains: prefs.essentialDomains,
     };
   }
   // Stale OR newer cycle date (clock moved back / wake hour moved forward):
@@ -383,7 +430,7 @@ export function readFrogState(nowMillis: number = Date.now()): FrogState {
   if (prefs.cycleDate !== today) {
     return {
       cycleDate: today,
-      enabled: prefs.enabled,
+      enabled: prefs.enabled && nativeReady(),
       armed: false,
       phase: frogPhaseFrom(false, false, false, 0, requiredSeconds),
       frog: null,
@@ -394,18 +441,23 @@ export function readFrogState(nowMillis: number = Date.now()): FrogState {
       requiredMinutes,
       wakeHour: clampWakeHour(prefs.wakeHour),
       graceRemainingSeconds: 0,
+      setupComplete: prefs.setupComplete,
+      emergencyDisabled: prefs.emergencyDisabled,
+      essentialAppIds: prefs.essentialAppIds,
+      essentialDomains: prefs.essentialDomains,
     };
   }
   const frog = decodeFrog(prefs.selectedJson);
+  const effectiveFrog = frog ? restrictToEssentials(frog, prefs) : null;
   const tickedOff = prefs.tickedOff;
   const trackedSeconds = Math.max(0, prefs.trackedSeconds);
   return {
     cycleDate: today,
-    enabled: prefs.enabled,
+    enabled: prefs.enabled && nativeReady(),
     armed: prefs.armed,
     phase: prefs.graceStartedAtMs > 0 && !prefs.armed && prefs.graceStartedAtMs + FROG_DAILY_GRACE_MS > nowMillis
       ? "grace" : frogPhaseFrom(prefs.armed, frog !== null, tickedOff, trackedSeconds, requiredSeconds),
-    frog,
+    frog: effectiveFrog,
     tickedOff,
     trackedSeconds,
     requiredSeconds,
@@ -414,6 +466,10 @@ export function readFrogState(nowMillis: number = Date.now()): FrogState {
     wakeHour: clampWakeHour(prefs.wakeHour),
     graceRemainingSeconds: prefs.graceStartedAtMs > 0
       ? Math.max(0, Math.ceil((prefs.graceStartedAtMs + FROG_DAILY_GRACE_MS - nowMillis) / 1000)) : 0,
+    setupComplete: prefs.setupComplete,
+    emergencyDisabled: prefs.emergencyDisabled,
+    essentialAppIds: prefs.essentialAppIds,
+    essentialDomains: prefs.essentialDomains,
   };
 }
 
@@ -448,21 +504,53 @@ export function rolloverIfNeeded(nowMillis: number = Date.now()): boolean {
 export function setEnabled(enabled: boolean): void {
   if (!DESKTOP_FROG_ENABLED) return;
   rolloverIfNeeded();
-  writePrefs({ ...readPrefs(), enabled: Boolean(enabled) });
+  const prefs = readPrefs();
+  const next = Boolean(enabled);
+  if (next && !prefs.setupComplete) throw new Error("Complete Eat the Frog setup before enabling it.");
+  if (next && prefs.emergencyDisabled) throw new Error("Eat the Frog was emergency-disabled. Re-enable it manually in Settings.");
+  assertStrictSettingChange("enabled", prefs.enabled, next);
+  writePrefs({ ...prefs, enabled: next });
+}
+
+export function completeSetup(appIds: string[], domains: string[]): void {
+  if (!DESKTOP_FROG_ENABLED) return;
+  const prefs = readPrefs();
+  const apps = [...new Set(appIds.map(normalizeAppKey).filter(Boolean))].sort();
+  const sites = [...new Set(domains.map(normalizeDomainKey).filter(Boolean))].sort();
+  if (!apps.length && !sites.length) throw new Error("Choose at least one essential app or website.");
+  writePrefs({ ...prefs, setupComplete: true, emergencyDisabled: false, essentialAppIds: apps, essentialDomains: sites });
+}
+
+export function emergencyDisable(): void {
+  if (!DESKTOP_FROG_ENABLED) return;
+  const prefs = readPrefs();
+  writePrefs({ ...prefs, enabled: false, armed: false, graceStartedAtMs: 0, emergencyDisabled: true });
+}
+
+export function applyNativeFrogEnabled(enabled: boolean): void {
+  if (!DESKTOP_FROG_ENABLED) return;
+  const prefs = readPrefs();
+  writePrefs({ ...prefs, enabled: Boolean(enabled), emergencyDisabled: !enabled && prefs.emergencyDisabled });
 }
 
 /** Persists required focus minutes, clamped to the Android 1..480 range. */
 export function setRequiredMinutes(minutes: number): void {
   if (!DESKTOP_FROG_ENABLED) return;
   rolloverIfNeeded();
-  writePrefs({ ...readPrefs(), requiredMinutes: clampRequiredMinutes(minutes) });
+  const prefs = readPrefs();
+  const next = clampRequiredMinutes(minutes);
+  assertStrictSettingChange("requiredMinutes", prefs.requiredMinutes, next);
+  writePrefs({ ...prefs, requiredMinutes: next });
 }
 
 /** Persists the wake hour, clamped to 0..23. */
 export function setWakeHour(hour: number): void {
   if (!DESKTOP_FROG_ENABLED) return;
   rolloverIfNeeded();
-  writePrefs({ ...readPrefs(), wakeHour: clampWakeHour(hour) });
+  const prefs = readPrefs();
+  const next = clampWakeHour(hour);
+  assertStrictSettingChange("wakeHour", prefs.wakeHour, next);
+  writePrefs({ ...prefs, wakeHour: next });
 }
 
 /**
@@ -475,10 +563,10 @@ export function armIfDue(
   deviceIdle = true,
   lastInputAtMs?: number,
 ): boolean {
-  if (!DESKTOP_FROG_ENABLED) return false;
+  if (!DESKTOP_FROG_ENABLED || !nativeReady()) return false;
   rolloverIfNeeded(nowMillis);
   const prefs = readPrefs();
-  if (!canArmNow(nowMillis, prefs.wakeHour, prefs.cycleDate, prefs.enabled, prefs.armed)) {
+  if (!canArmNow(nowMillis, prefs.wakeHour, prefs.cycleDate, prefs.enabled && prefs.setupComplete && !prefs.emergencyDisabled, prefs.armed)) {
     return false;
   }
   if (!prefs.graceStartedAtMs) {
@@ -504,13 +592,25 @@ export function selectFrog(task: FrogTask, nowMillis: number = Date.now()): void
   if (!DESKTOP_FROG_ENABLED) return;
   rolloverIfNeeded(nowMillis);
   const prefs = readPrefs();
-  const next = sanitizeFrogTask(task);
+  const next = restrictToEssentials(sanitizeFrogTask(task), prefs);
   const previous = decodeFrog(prefs.selectedJson);
   const sameFrog = previous !== null && frogTaskKey(previous) === frogTaskKey(next);
   writePrefs({
     ...prefs,
     selectedJson: JSON.stringify(next),
     ...(sameFrog ? {} : { tickedOff: false, trackedSeconds: 0 }),
+  });
+}
+
+export type NativeFrogPolicy = { setupComplete: boolean; enabled: boolean; emergencyDisabled?: boolean; appIds?: string[]; domains?: string[] };
+export function applyNativeFrogPolicy(policy: NativeFrogPolicy): void {
+  if (!DESKTOP_FROG_ENABLED) return;
+  const current = readPrefs();
+  const apps = [...new Set((policy.appIds || []).map(normalizeAppKey).filter(Boolean))].sort();
+  const domains = [...new Set((policy.domains || []).map(normalizeDomainKey).filter(Boolean))].sort();
+  const enabled = Boolean(policy.enabled && policy.setupComplete && !policy.emergencyDisabled);
+  writePrefs({ ...current, setupComplete: Boolean(policy.setupComplete), enabled, emergencyDisabled: Boolean(policy.emergencyDisabled), essentialAppIds: apps, essentialDomains: domains,
+    ...(!enabled ? { armed: false, graceStartedAtMs: 0 } : {}),
   });
 }
 
@@ -551,6 +651,7 @@ export function addTrackedSeconds(seconds: number, nowMillis: number = Date.now(
   if (!Number.isFinite(seconds) || seconds <= 0) return;
   rolloverIfNeeded(nowMillis);
   const prefs = readPrefs();
+  if (!prefs.enabled || !prefs.setupComplete || prefs.emergencyDisabled || !nativeReady()) return;
   const requiredSeconds = clampRequiredMinutes(prefs.requiredMinutes) * 60;
   const trackedSeconds = Math.max(0, prefs.trackedSeconds);
   const selected = decodeFrog(prefs.selectedJson);
@@ -626,6 +727,8 @@ export function useFrogState(deviceIdle = true, lastInputAtMs?: number): { state
       clearFrog: () => run(() => clearFrog()),
       tickOffFrog: (tickedOff = true) => run(() => tickOffFrog(tickedOff)),
       addTrackedSeconds: (seconds) => run(() => addTrackedSeconds(seconds)),
+      completeSetup: (appIds, domains) => run(() => completeSetup(appIds, domains)),
+      emergencyDisable: () => run(() => emergencyDisable()),
       refresh,
     };
   }, [refresh]);

@@ -1,6 +1,6 @@
 /* FocusLock service worker — tracking + blocking engine (Cold Turkey core). */
 importScripts('../src/matcher.js', '../src/features.js', '../src/store.js', '../src/policy.js', '../dist/cloud-sync.js', '../src/desktop-bridge.js');
-self.FocusLockDesktopBridge.start(chrome);
+self.FocusLockDesktopBridge.start(chrome, policy => applyDesktopFrogPolicy(policy));
 
 const M = self.FocusLockMatcher;
 const Store = self.FocusLockStore;
@@ -112,8 +112,33 @@ async function refreshDailyFocus() {
 }
 async function recheckWebsites() {
   const tabs = await chrome.tabs.query({});
-  await Promise.allSettled(tabs.filter(tab => tab.id >= 0 && /^https?:/.test(tab.url || ''))
-    .map(tab => enforceTab(tab.id, tab.url)));
+  await Promise.allSettled(tabs.filter(tab => tab.id >= 0).map(async tab => {
+    if (/^https?:/.test(tab.url || '')) return enforceTab(tab.id, tab.url);
+    if (!(tab.url || '').startsWith(chrome.runtime.getURL('blocked/blocked.html'))) return;
+    const page = new URL(tab.url);
+    if (page.searchParams.get('mode') !== 'frog') return;
+    const original = page.searchParams.get('url');
+    if (!/^https?:\/\//i.test(original || '')) return;
+    if (!verdictFor(original, await ensureState()).blocked) {
+      mem.lastEnforced.delete(tab.id);
+      mem.lastAttempt.delete(tab.id);
+      return chrome.tabs.update(tab.id, { url: original });
+    }
+  }));
+}
+async function applyDesktopFrogPolicy(policy) {
+  const next = { setupComplete: policy.setupComplete, enabled: policy.enabled,
+    emergencyDisabled: policy.emergencyDisabled, locked: policy.locked, domains: policy.domains };
+  return featureSerial(async () => {
+    const state = await ensureState();
+    if (JSON.stringify(state.desktopFrog) === JSON.stringify(next)) return;
+    await featureWrite(current => {
+      current.desktopFrog = next;
+      if (next.emergencyDisabled) current.browserFrog = { ...current.browserFrog, enabled: false, armed: false };
+      return current;
+    });
+    await recheckWebsites();
+  });
 }
 async function commitStrict(message) {
   return featureSerial(() => commitStrictNow(message));
@@ -164,6 +189,7 @@ async function changeFrog(message) {
       const focusSeconds = dailyFocusSeconds(state, Store.todayKey(), state.focusActiveAccountId || '');
       let frog = self.FocusLockFeatures.frogState(state.browserFrog, nowMs(), focusSeconds);
       if (message.type === 'frogConfigure') {
+        if (message.enabled === true && state.desktopFrog?.emergencyDisabled) throw new Error('Eat the Frog was emergency-disabled on this PC. Enable it again in FocusLock desktop Settings.');
         if (frog.locked) throw new Error('Finish today’s Frog before changing its settings.');
         const required = Number(message.requiredMinutes), wake = Number(message.wakeHour);
         if (!Number.isInteger(required) || required < 1 || required > 480 || !Number.isInteger(wake) || wake < 0 || wake > 23) throw new Error('Choose 1–480 minutes and a wake hour from 0–23.');
@@ -366,7 +392,12 @@ function verdictFor(urlStr, state, t) {
   const focusAccountId = state.focusActiveAccountId || '';
   const focusTodaySeconds = dailyFocusSeconds(state, focusDate, focusAccountId);
   const frog = self.FocusLockFeatures?.frogState(state.browserFrog, t, focusTodaySeconds);
-  if (frog?.locked && !authUrl && (sharedSite || state.lists.some(list => list.enabled
+  const desktopFrog = state.desktopFrog;
+  if (desktopFrog?.setupComplete && desktopFrog.enabled && !desktopFrog.emergencyDisabled && desktopFrog.locked && !authUrl &&
+      !(desktopFrog.domains || []).some(host => domain === host || domain.endsWith('.' + host))) {
+    return { blocked: true, mode: 'frog', listId: '__desktop_frog', listName: 'Eat the Frog', reason: 'desktop-frog' };
+  }
+  if (!desktopFrog?.emergencyDisabled && frog?.locked && !authUrl && (sharedSite || state.lists.some(list => list.enabled
       && !(state.cloudSitesLoaded && ['list_social', 'list_video'].includes(list.id))
       && !M.matchesAny(urlStr, list.exceptions || [])
       && (list.mode === 'whitelist' ? !M.matchesAny(urlStr, list.sites) : M.matchesAny(urlStr, list.sites))))) {

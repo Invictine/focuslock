@@ -8,7 +8,7 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
-    sync::{mpsc, Arc, Mutex},
+    sync::{mpsc, Arc, Mutex, atomic::{AtomicBool, Ordering}},
     thread,
     time::{Duration, Instant},
 };
@@ -81,6 +81,7 @@ pub struct VoidSessionState {
     child: Arc<Mutex<Option<ManagedChild>>>,
     launch_lock: Arc<Mutex<()>>,
     last_error: Arc<Mutex<Option<String>>>,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl VoidSnapshot {
@@ -260,6 +261,7 @@ pub async fn start_void_launcher(
     session: State<'_, VoidSessionState>,
     state: VoidSnapshot,
 ) -> Result<VoidLauncherStatus, String> {
+    ensure_frog_enabled(&app)?;
     // Use an explicit argument key at the Tauri boundary so callers send
     // `{ state: snapshot }`, matching the frontend API contract.
     let app = app.clone();
@@ -271,9 +273,12 @@ pub async fn start_void_launcher(
 
 #[tauri::command]
 pub fn update_void_launcher(
+    app: AppHandle,
     session: State<'_, VoidSessionState>,
     state: VoidSnapshot,
 ) -> Result<(), String> {
+    let _launch_guard = session.launch_lock.lock().map_err(|_| "Void launcher lock is unavailable")?;
+    ensure_frog_enabled(&app)?;
     if session
         .child
         .lock()
@@ -399,6 +404,8 @@ fn start_or_update(
         .launch_lock
         .lock()
         .map_err(|_| "Void launcher lock is unavailable")?;
+    ensure_frog_enabled(app)?;
+    state.cancelled.store(false, Ordering::SeqCst);
     let snapshot = raw_snapshot.validate_and_resolve()?;
     {
         let mut slot = state
@@ -454,10 +461,15 @@ fn start_or_update(
         .last_error
         .lock()
         .map_err(|_| "Void launcher status lock is unavailable")? = None;
-    *state
-        .child
-        .lock()
-        .map_err(|_| "Void launcher lock is unavailable")? = Some(ManagedChild { child, stdin });
+    {
+        let mut slot = state.child.lock().map_err(|_| "Void launcher lock is unavailable")?;
+        if state.cancelled.load(Ordering::SeqCst) || ensure_frog_enabled(app).is_err() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Frog launcher startup was cancelled.".into());
+        }
+        *slot = Some(ManagedChild { child, stdin });
+    }
     spawn_stdout_reader(app.clone(), state.clone(), pid, Some(ready_sender), stdout);
     spawn_stderr_reader(stderr);
     spawn_child_monitor(state.clone(), app.clone(), pid);
@@ -479,7 +491,18 @@ fn start_or_update(
     })
 }
 
+fn ensure_frog_enabled(app: &AppHandle) -> Result<(), String> {
+    let policy = app.state::<crate::tracking::TrackerRuntime>().frog_policy();
+    if !policy.setup_complete || !policy.enabled || policy.emergency_disabled {
+        return Err("Eat the Frog is disabled on this PC. Enable it manually in Settings.".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn stop_from_host(state: &VoidSessionState) -> Result<(), String> { stop(state) }
+
 fn stop(state: &VoidSessionState) -> Result<(), String> {
+    state.cancelled.store(true, Ordering::SeqCst);
     let mut slot = state
         .child
         .lock()

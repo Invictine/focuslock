@@ -10,6 +10,7 @@ mod browser_guard;
 mod browser_launch;
 mod browser_warning;
 mod browser_window;
+mod frog_hotkey;
 mod tracking;
 mod uninstall_guard;
 mod void_launcher;
@@ -53,6 +54,9 @@ fn main() {
             app.manage(browser_warning::BrowserRepairRuntime::default());
             app.manage(void_launcher::VoidSessionState::default());
             app.manage(runtime);
+            if let Err(error) = tracking::register_emergency_hotkey(app.handle().clone()) {
+                eprintln!("Emergency Frog hotkey unavailable: {error}");
+            } else { app.state::<TrackerRuntime>().mark_hotkey_available(); }
             app.manage(background::BackgroundRuntime::default());
             // The blocker window exists for the whole app lifetime, hidden.
             // If it cannot be created the tracker falls back to minimizing.
@@ -125,6 +129,10 @@ fn main() {
             tracking::get_device_identity,
             tracking::get_tracking_snapshot,
             tracking::get_tracker_status,
+            tracking::get_frog_policy,
+            tracking::configure_frog_policy,
+            tracking::sync_frog_lock,
+            tracking::emergency_disable_frog,
             tracking::get_running_apps,
             tracking::set_tracker_config,
             tracking::set_browser_protection_policy,

@@ -94,6 +94,15 @@
 .frog-picker-section > .section-label {
   margin: 0;
 }
+.frog-setup-dialog { display: grid; gap: 16px; padding: 24px; background: var(--fl-surface-container, #171717); color: var(--fl-on-surface, #eee); border: 1px solid var(--fl-outline-variant, #444); border-radius: var(--fl-radius-medium, 12px); }
+.frog-setup-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 20px; background: rgb(0 0 0 / 55%); }
+.frog-setup-dialog h2, .frog-setup-dialog p { margin: 0; }
+.frog-setup-dialog fieldset { border: 0; padding: 0; margin: 0; }
+.frog-setup-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.frog-setup-chips label, .frog-setup-chip { padding: 7px 9px; border: 1px solid var(--fl-outline-variant); border-radius: var(--fl-radius-small); background: transparent; color: var(--fl-on-surface); font: inherit; font-size: 12px; }
+.frog-setup-add, .frog-setup-actions { display: flex; gap: 8px; align-items: center; }
+.frog-setup-add input { min-width: 0; flex: 1; }
+.frog-setup-actions { justify-content: flex-end; }
 
 @media (max-width: 680px) {
   .frog-card {

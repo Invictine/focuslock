@@ -24,6 +24,7 @@
     let listeners = [];
     let missingHostFailures = 0;
     let connectedAt = 0;
+    let policyHandler = null;
 
     function listen(event, handler) {
       if (!event || typeof event.addListener !== 'function') return;
@@ -209,7 +210,15 @@
         disconnectCurrent(nextPort, ownGeneration, false);
         handleConnectFailure(errorMessage || 'Native host exited.');
       });
-      if (nextPort.onMessage) portListen(nextPort.onMessage, () => {});
+      if (nextPort.onMessage) portListen(nextPort.onMessage, (message) => {
+        if (!running || port !== nextPort || generation !== ownGeneration || message?.ok !== true) return;
+        const policy = message.desktopFrog;
+        if (!policy || typeof policy !== 'object' || typeof policy.setupComplete !== 'boolean' ||
+            typeof policy.enabled !== 'boolean' || typeof policy.emergencyDisabled !== 'boolean' ||
+            typeof policy.locked !== 'boolean' || !Array.isArray(policy.domains) || policy.domains.length > 512 ||
+            !policy.domains.every(domain => typeof domain === 'string' && domain.length <= 253 && /^[a-z0-9.-]+$/i.test(domain))) return;
+        if (policyHandler) safely(policyHandler(policy));
+      });
 
       requestHeartbeat();
       clearHeartbeatTimer();
@@ -222,13 +231,14 @@
       else requestHeartbeat();
     }
 
-    function start(chromeApi) {
+    function start(chromeApi, onPolicy) {
       if (running) return;
       if (!chromeApi || !chromeApi.runtime || typeof chromeApi.runtime.connectNative !== 'function' ||
           !chromeApi.windows || typeof chromeApi.windows.getAll !== 'function' ||
           !chromeApi.permissions || typeof chromeApi.permissions.contains !== 'function' ||
           !chromeApi.extension || typeof chromeApi.extension.isAllowedIncognitoAccess !== 'function') return;
       api = chromeApi;
+      policyHandler = typeof onPolicy === 'function' ? onPolicy : null;
       running = true;
 
       const changed = () => requestHeartbeat();
@@ -272,6 +282,7 @@
         try { oldPort.disconnect(); } catch (_) { /* already disconnected */ }
       }
       api = null;
+      policyHandler = null;
       collecting = false;
       collectionDirty = false;
       collectionGeneration += 1;

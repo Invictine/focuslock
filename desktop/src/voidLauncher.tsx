@@ -128,9 +128,9 @@ export function buildVoidLauncherState(
     blockMinutes: Math.min(MAX_BLOCK_MINUTES, Math.max(1, Math.trunc(blockMinutes))),
     graceRemainingSeconds: frog.graceRemainingSeconds || 0,
     tools: [
-      ...(frog.phase === "working" ? frog.frog?.neededAppIds || [] : []).map((id) => ({ id, label: id })),
+      ...(frog.phase !== "grace" ? frog.essentialAppIds || [] : []).map((id) => ({ id, label: id })),
     ],
-    domains: frog.phase === "working" ? [...frog.frog?.neededDomains || []] : [],
+    domains: frog.phase !== "grace" ? [...frog.essentialDomains || []] : [],
   };
 }
 
@@ -433,7 +433,7 @@ export function VoidLauncherBridge({ frog, actions, workRatio }: {
           break;
         case "select_frog":
           if (frogRef.current.enabled && frogRef.current.phase === "pick_frog") {
-            actionRef.current.selectFrog({ title: event.title, neededAppIds: event.appIds, neededDomains: event.domains });
+            actionRef.current.selectFrog({ title: event.title, neededAppIds: frogRef.current.essentialAppIds, neededDomains: frogRef.current.essentialDomains });
           }
           break;
         case "open_focuslock":
