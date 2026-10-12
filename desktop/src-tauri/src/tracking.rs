@@ -706,6 +706,14 @@ impl TrackerRuntime {
                                     let covered = blocker
                                         .as_ref()
                                         .is_some_and(|blocker| blocker.show_for(&app, matched));
+                                    // Recovery can arrive after this sample matched but
+                                    // before its window was shown. Recheck after showing
+                                    // so a late sample cannot strand a Frog overlay.
+                                    if matched.reason == "frog" && !store.lock().map(|value| value.frog_policy.active()).unwrap_or(false) {
+                                        if let Some(blocker) = blocker.as_ref() {
+                                            if blocker.state().reason.as_deref() == Some("frog") { blocker.hide(&app); }
+                                        }
+                                    }
                                     if covered {
                                         let _ = app
                                             .emit("focuslock://target-blocked", &observation);
