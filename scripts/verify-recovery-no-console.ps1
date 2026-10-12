@@ -153,17 +153,21 @@ if (-not $Natural) {
 $observer.Wait()
 $events = @($observer.GetEvents())
 $finalTaskInfo = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
+$finalTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 $taskRanDuringObservation = $false
 if ($finalTaskInfo -and $finalTaskInfo.LastRunTime -gt $initialTaskInfo.LastRunTime) {
     $taskRanDuringObservation = $true
 }
+# IgnoreNew suppresses minute triggers while the persistent supervisor runs.
+# In that case LastRunTime stays unchanged and we observe the existing task.
+$taskRemainedRunning = $task.State -eq 'Running' -and $finalTask -and $finalTask.State -eq 'Running'
 
 $reportDirectory = Join-Path $PSScriptRoot '..\build\recovery-no-console'
 $reportDirectory = [IO.Path]::GetFullPath($reportDirectory)
 New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null
 $reportPath = Join-Path $reportDirectory ("recovery-no-console-{0:yyyyMMdd-HHmmss-fff}.json" -f [DateTime]::UtcNow)
 
-$passed = ($events.Count -eq 0) -and (-not $startError) -and $taskRanDuringObservation
+$passed = ($events.Count -eq 0) -and (-not $startError) -and ($taskRanDuringObservation -or $taskRemainedRunning)
 $report = [ordered]@{
     taskName = $TaskName
     mode = if ($Natural) { 'natural-trigger' } else { 'explicit-start' }
@@ -172,6 +176,7 @@ $report = [ordered]@{
     completedAtUtc = [DateTimeOffset]::UtcNow.ToString('o')
     baselineVisibleTerminalWindowCount = $observer.BaselineWindowCount
     taskRanDuringObservation = $taskRanDuringObservation
+    taskRemainedRunning = $taskRemainedRunning
     taskLastRunTime = if ($finalTaskInfo) { $finalTaskInfo.LastRunTime } else { $null }
     startError = $startError
     passed = $passed
@@ -188,7 +193,7 @@ if ($startError) {
     Write-Error ("Could not start the scheduled task: {0}" -f $startError)
     exit 1
 }
-if (-not $taskRanDuringObservation) {
+if (-not ($taskRanDuringObservation -or $taskRemainedRunning)) {
     Write-Error 'The scheduled task did not record a run during the observation interval; the result is inconclusive.'
     exit 1
 }
