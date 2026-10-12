@@ -116,15 +116,10 @@ pub(super) fn start(exe: &Path, dir: &Path, attempt: u32) -> Result<(), String> 
                 .collect::<Vec<_>>(),
         )
     };
-    // Use Windows' own launcher to start the GUI executable and wait for it.
-    // This gives Task Scheduler a stable task lifetime and a hidden window,
-    // with the native supervisor as its independent child.
-    let bootstrap = format!("$ErrorActionPreference = 'Stop'; $child = Start-Process -FilePath {} -ArgumentList {} -WindowStyle Hidden -PassThru; $child.WaitForExit(); exit $child.ExitCode",
-        ps_literal(&exe.to_string_lossy()), ps_literal(&supervisor_arguments));
-    let arguments = format!(
-        "-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand {}",
-        encode_script(&bootstrap)
-    );
+    // Schedule the GUI-subsystem supervisor directly. A scheduled console
+    // launcher can open Windows Terminal before -WindowStyle Hidden takes
+    // effect, even when its child is hidden. The native supervisor already
+    // stays alive and owns the exclusive recovery lock itself.
     let powershell = std::path::PathBuf::from(
         std::env::var_os("SystemRoot").ok_or("Missing Windows system directory")?,
     )
@@ -151,8 +146,8 @@ if (!$existing -or $existing.Actions.Execute -ne $exe -or $existing.Actions.Argu
 Start-ScheduledTask -TaskName $taskName
 "#,
         name = ps_literal(&name),
-        exe = ps_literal(&powershell.to_string_lossy()),
-        arguments = ps_literal(&arguments)
+        exe = ps_literal(&exe.to_string_lossy()),
+        arguments = ps_literal(&supervisor_arguments)
     );
     // EncodedCommand transports literal paths (spaces, apostrophes, $, Unicode)
     // without passing them through a shell's interpolation or command quoting.

@@ -75,27 +75,15 @@ function Get-DesktopProcesses([string]$ImagePath) {
 }
 
 function Test-RecoveryTaskAction($Actions, [string]$ImagePath, [string]$AppData) {
-    foreach ($action in @($Actions)) {
-        $execute = [string]$action.Execute
-        $arguments = [string]$action.Arguments
-        if ([IO.Path]::GetFileName($execute) -ieq 'powershell.exe' -and
-            $arguments -match '(?i)(?:^|\s)-NoProfile(?:\s|$)' -and
-            $arguments -match '(?i)(?:^|\s)-NonInteractive(?:\s|$)' -and
-            $arguments -match '(?i)(?:^|\s)-WindowStyle\s+Hidden(?:\s|$)' -and
-            $arguments -match '(?i)(?:^|\s)-EncodedCommand\s+(?<encoded>[A-Za-z0-9+/=]+)') {
-            try {
-                $bootstrap = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($Matches.encoded))
-                $hasExe = $bootstrap.IndexOf($ImagePath, [StringComparison]::OrdinalIgnoreCase) -ge 0
-                $hasDataDir = $bootstrap.IndexOf($AppData, [StringComparison]::OrdinalIgnoreCase) -ge 0
-                $hasSupervisorMode = $bootstrap.Contains('--focuslock-supervisor')
-                $hasWaitAndExit = $bootstrap -match '(?is)\$child\.WaitForExit\s*\(\s*\)' -and $bootstrap -match '(?i)\$child\.ExitCode'
-                if ($hasExe -and $hasDataDir -and $hasSupervisorMode -and $hasWaitAndExit -and $bootstrap -match '(?i)Start-Process') { return $true }
-            } catch { return $false }
-        }
-        if ([string]::Equals([IO.Path]::GetFullPath($execute), $ImagePath, [StringComparison]::OrdinalIgnoreCase) -and
-            $arguments -match '(?i)--focuslock-supervisor' -and $arguments.Contains($AppData)) { return $true }
-    }
-    return $false
+    $actions = @($Actions)
+    if ($actions.Count -ne 1) { return $false }
+
+    $execute = [IO.Path]::GetFullPath([string]$actions[0].Execute)
+    $expectedImagePath = [IO.Path]::GetFullPath($ImagePath)
+    $expectedArguments = '--focuslock-supervisor "{0}"' -f $AppData
+
+    return [string]::Equals($execute, $expectedImagePath, [StringComparison]::OrdinalIgnoreCase) -and
+        [string]::Equals([string]$actions[0].Arguments, $expectedArguments, [StringComparison]::Ordinal)
 }
 
 function Stop-ExactProcess([int]$Id, [string]$ImagePath) {
@@ -279,7 +267,7 @@ try {
 
     Wait-Until { if ($desktop.HasExited) { throw ('QA desktop exited during startup: ' + $desktop.ExitCode + '; ' + (Get-Content -LiteralPath (Join-Path $reportDir 'desktop-startup.stderr.log') -Raw -ErrorAction SilentlyContinue)) }; Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue } 90 'QA recovery task was not registered.' | Out-Null
     $task = Get-ScheduledTask -TaskName $TaskName
-    Assert-Check (Test-RecoveryTaskAction $task.Actions $Exe $DataDir) 'scheduled_task_action' 'Action is the exact QA supervisor command or a hidden PowerShell bootstrap that launches and waits for it.'
+    Assert-Check (Test-RecoveryTaskAction $task.Actions $Exe $DataDir) 'scheduled_task_action' 'Action directly launches the exact desktop executable with the console-free native supervisor arguments.'
     $createdTask = $true
     Wait-Until { $t = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue; $t -and $t.State -eq 'Running' } 90 'QA recovery task did not enter Running state.' | Out-Null
     Assert-Check ([bool]($task.Triggers | Where-Object { $_.Repetition.Interval -eq 'PT1M' })) 'scheduled_task_repeats_each_minute' 'Expected one-minute repetition.'
