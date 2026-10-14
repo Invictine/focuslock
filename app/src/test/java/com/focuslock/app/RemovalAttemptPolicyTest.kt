@@ -40,6 +40,86 @@ class RemovalAttemptPolicyTest {
     }
 
     @Test
+    fun matchesInstallerConfirmationWithGenericOkButton() {
+        assertTrue(
+            RemovalAttemptPolicy.matches(
+                packageName = "com.google.android.packageinstaller",
+                windowClassName = "android.app.AlertDialog",
+                texts = listOf("FocusLock", "Do you want to uninstall this app?", "Cancel", "OK"),
+            )
+        )
+    }
+
+    @Test
+    fun matchesSettingsHostedConfirmationQuestionForExactTarget() {
+        assertTrue(
+            RemovalAttemptPolicy.matches(
+                packageName = "com.android.settings",
+                windowClassName = "com.android.settings.applications.InstalledAppDetailsTop",
+                texts = listOf("FocusLock", "Are you sure you want to uninstall this app?", "Cancel", "Uninstall"),
+            )
+        )
+    }
+
+    @Test
+    fun matchesSettingsQuestionThatNamesExactTargetWithoutSeparateTitleNode() {
+        assertTrue(
+            RemovalAttemptPolicy.matches(
+                packageName = "com.android.settings",
+                windowClassName = "com.android.settings.applications.InstalledAppDetailsTop",
+                texts = listOf("Do you want to uninstall FocusLock?", "Cancel", "Uninstall"),
+            )
+        )
+    }
+
+    @Test
+    fun matchesLocalizedSettingsDialogWithTargetAndExactAction() {
+        assertTrue(
+            RemovalAttemptPolicy.matches(
+                packageName = "com.android.settings",
+                windowClassName = "android.app.AlertDialog",
+                texts = listOf("FocusLock", "Kya aap is app ko uninstall karna chahte hain?", "Cancel", "Uninstall"),
+            )
+        )
+    }
+
+    @Test
+    fun ignoresSettingsAppInfoUninstallButtonWithoutConfirmationDialog() {
+        assertFalse(
+            RemovalAttemptPolicy.matches(
+                packageName = "com.android.settings",
+                windowClassName = "com.android.settings.applications.InstalledAppDetailsTop",
+                texts = listOf("FocusLock", "Open", "Uninstall", "Force stop"),
+            )
+        )
+    }
+
+    @Test
+    fun ignoresSettingsPromptForAnotherAppAndBrowserSpoof() {
+        assertFalse(
+            RemovalAttemptPolicy.matches(
+                packageName = "com.android.settings",
+                windowClassName = "android.app.AlertDialog",
+                texts = listOf("Other App", "Are you sure you want to uninstall this app?", "Uninstall"),
+            )
+        )
+        assertFalse(
+            RemovalAttemptPolicy.matches(
+                packageName = "com.android.chrome",
+                windowClassName = "android.app.AlertDialog",
+                texts = listOf("FocusLock", "Are you sure you want to uninstall this app?", "Uninstall"),
+            )
+        )
+        assertFalse(
+            RemovalAttemptPolicy.matches(
+                packageName = "com.android.settings",
+                windowClassName = "com.android.settings.applications.InstalledAppDetailsTop",
+                texts = listOf("Do you want to uninstall FocusLock Helper?", "Cancel", "Uninstall"),
+            )
+        )
+    }
+
+    @Test
     fun ignoresInstallPromptForFocusLock() {
         assertFalse(
             RemovalAttemptPolicy.matches(

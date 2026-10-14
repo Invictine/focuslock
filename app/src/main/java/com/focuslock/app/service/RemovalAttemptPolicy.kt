@@ -3,9 +3,9 @@ package com.focuslock.app.service
 /**
  * Conservative matcher for system package-removal prompts targeting FocusLock.
  *
- * OEM and localized wording varies. Exact app identity is always required; the
- * uninstall class path supports localized dialogs, while English action wording
- * is only a fallback for installer windows whose class names are unhelpful.
+ * OEM and localized wording varies. Exact app identity is always required. Settings
+ * is handled more narrowly than installer apps because its ordinary App info page
+ * also contains an Uninstall action.
  */
 object RemovalAttemptPolicy {
     const val TARGET_PACKAGE = "com.focuslock.app"
@@ -20,25 +20,47 @@ object RemovalAttemptPolicy {
         "com.miui.packageinstaller",
     )
 
+    /** Settings-hosted prompts need stricter confirmation checks than installer dialogs. */
+    val promptPackages: Set<String> = installerPackages + "com.android.settings"
+
     private val uninstallConfirmation = Regex(
-        """^(?:do you want to uninstall(?: the app)?(?: [\"']?focuslock[\"']?)?[?.]?|uninstall(?: this app| app)?[?.]?)$""",
+        """^(?:(?:do you want to uninstall|are you sure you want to uninstall)(?: the app| this app)?(?: [\"']?focuslock[\"']?)?[?.]?|uninstall(?: this app| app)?[?.]?)$""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val explicitUninstallQuestion = Regex(
+        """^(?:do you want to uninstall|are you sure you want to uninstall)(?: the app| this app)?(?: [\"']?focuslock[\"']?)?[?.]?$""",
         RegexOption.IGNORE_CASE,
     )
 
     fun matches(packageName: String, windowClassName: String?, texts: List<String>): Boolean {
-        if (packageName.trim() !in installerPackages) return false
+        val sourcePackage = packageName.trim()
+        if (sourcePackage !in promptPackages) return false
 
         val normalizedTexts = texts.map(String::trim).filter(String::isNotEmpty)
-        val targetsFocusLock = normalizedTexts.any { text ->
+        val exactTargetIdentity = normalizedTexts.any { text ->
             text.equals(TARGET_TITLE, ignoreCase = true) || text == TARGET_PACKAGE
         }
+        val targetNamedInQuestion = normalizedTexts.any { text ->
+            explicitUninstallQuestion.matches(text) &&
+                text.contains(TARGET_TITLE, ignoreCase = true)
+        }
+        val targetsFocusLock = exactTargetIdentity || targetNamedInQuestion
         if (!targetsFocusLock) return false
+
+        val exactUninstallAction = normalizedTexts.any { it.equals("uninstall", ignoreCase = true) }
+        val explicitQuestion = normalizedTexts.any(explicitUninstallQuestion::matches)
+
+        if (sourcePackage == "com.android.settings") {
+            // App info itself has an Uninstall button. Require either a clear
+            // confirmation question or a dialog window with the exact action.
+            val confirmationDialog = windowClassName
+                ?.contains("dialog", ignoreCase = true) == true && exactUninstallAction
+            return explicitQuestion || confirmationDialog
+        }
 
         val uninstallActivity = windowClassName
             ?.contains("uninstall", ignoreCase = true) == true
-        val clearUninstallText = normalizedTexts.any { text ->
-            text.equals("uninstall", ignoreCase = true) || uninstallConfirmation.matches(text)
-        }
+        val clearUninstallText = exactUninstallAction || normalizedTexts.any(uninstallConfirmation::matches)
         return uninstallActivity || clearUninstallText
     }
 }

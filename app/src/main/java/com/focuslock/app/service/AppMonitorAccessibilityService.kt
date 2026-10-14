@@ -150,7 +150,6 @@ class AppMonitorAccessibilityService : AccessibilityService() {
 
     private val removalReminderStore by lazy { RemovalReminderStore(applicationContext) }
     private var lastRemovalScanMs = -1L
-    private var installerWindowClass: String? = null
     private var removalScanJob: Job? = null
 
     // Block-log dedupe: at most one event per (package, reason) per app entry.
@@ -639,15 +638,15 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             // Ignore only a demonstrably stale event; a real redirect is still checked.
             if (activePackage != null && activePackage != eventPackage) return
         }
-        val isInstallerEvent = eventPackage in RemovalAttemptPolicy.installerPackages
+        val isRemovalPromptEvent = eventPackage in RemovalAttemptPolicy.promptPackages
         val isForegroundBrowserEvent = eventPackage in BROWSER_PACKAGES &&
             eventPackage == currentForegroundPackage
 
         // Content-change events are extremely noisy across ordinary apps. They are only
-        // actionable here for installer reminders and the currently monitored browser;
+        // actionable here for removal reminders and the currently monitored browser;
         // discard all others before the remaining event-path work.
         if (eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
-            !isInstallerEvent && !isForegroundBrowserEvent
+            !isRemovalPromptEvent && !isForegroundBrowserEvent
         ) return
 
         // Our own package (BlockerActivity/NukeActivity overlay) means the tracked app
@@ -671,18 +670,20 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             return
         }
 
-        // Installer dialogs often populate after the window event, so inspect bounded,
-        // throttled content changes too. This remains active after admin is disabled.
-        if (isInstallerEvent) {
+        // Settings can host its own confirmation. Dialogs often populate after the
+        // window event, so retry briefly even if no content-change event follows.
+        if (isRemovalPromptEvent) {
             if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-                installerWindowClass = event.className?.toString()
+                removalScanJob?.cancel()
                 lastRemovalScanMs = -1L
             }
             if (checkRemovalReminder(eventPackage)) return
             if (removalReminderStore.enabled && removalScanJob?.isActive != true) {
                 removalScanJob = serviceScope.launch(Dispatchers.Main) {
-                    delay(550)
-                    checkRemovalReminder(eventPackage)
+                    repeat(3) {
+                        delay(550)
+                        if (checkRemovalReminder(eventPackage)) return@launch
+                    }
                 }
             }
         }
@@ -957,7 +958,11 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 }
             }
             collect(root, 0)
-            if (RemovalAttemptPolicy.matches(packageName, installerWindowClass, texts)) {
+            // Resolve the class from this root's window, never from an earlier
+            // installer dialog (which may belong to another package/window).
+            val windowClass = windowClasses[root.windowId]
+                ?.takeIf { it.first == packageName }?.second ?: root.className?.toString()
+            if (RemovalAttemptPolicy.matches(packageName, windowClass, texts)) {
                 // A voluntary reminder: Continue returns to the untouched system dialog.
                 return RemovalReminderController.show(this, "uninstall", fromForeground = true)
             }

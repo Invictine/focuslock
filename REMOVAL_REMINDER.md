@@ -11,7 +11,9 @@ is offered instead. Preview does not change device-admin status.
 - Android's admin-disable request and disabled callbacks attempt to show the reminder.
   The system's text warning remains available even if Android suppresses the activity.
 - With FocusLock accessibility enabled, recognized system uninstall dialogs targeting
-  FocusLock trigger the reminder even after device admin has been disabled.
+  FocusLock trigger the reminder even after device admin has been disabled. This
+  includes explicit confirmation dialogs hosted by Android Settings; the ordinary
+  FocusLock App info screen and its Uninstall button alone do not trigger it.
 - Continuing or dismissing the reminder briefly suppresses repeated triggers so the
   system removal flow remains usable. The app never presses the system's uninstall button.
 
@@ -38,8 +40,9 @@ and `RemovalReminderUiTest`. Physical-device verification should include:
 3. Enable the reminder and deactivate admin from FocusLock; test both choices.
 4. Request admin deactivation from Android Settings; check the system warning,
    custom reminder or notification fallback, and that continuing is still possible.
-5. Open the system uninstall confirmation for FocusLock with accessibility enabled;
-   cancel instead of completing uninstall. Verify other apps' uninstall dialogs and
+5. Open the system uninstall confirmation for FocusLock from Android Settings and
+   with accessibility enabled; cancel instead of completing uninstall. Verify
+   FocusLock's ordinary App info screen, other apps' uninstall dialogs, and
    FocusLock installation/update dialogs do not trigger it.
 6. Repeat with notification/overlay/accessibility permissions unavailable to verify
    graceful fallback. A missing reminder must never be presented as hard protection.
