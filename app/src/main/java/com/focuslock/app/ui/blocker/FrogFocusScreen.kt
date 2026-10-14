@@ -87,14 +87,21 @@ internal fun FrogFocusScreen(
                 putIfAbsent(FrogAppPolicy.GPAY_WALLET_PACKAGE, "Google Pay")
             }
             val essentials = FrogAppPolicy.configuredLaunchPackages(defaults, current.essentialAppPackages, current.boundaryAppPackages)
-            (essentials + extraPackages).distinct().map { pkg ->
-                val label = defaultLabels[pkg] ?: InstalledAppsRepository.getAppLabel(context, pkg)
-                FrogShortcut(
-                    packageName = pkg,
-                    label = label,
-                    icon = InstalledAppsRepository.getAppIconBitmap(context, pkg),
-                )
-            }
+            // Policy keeps fallback defaults so enforcement remains safe across devices.
+            // The launcher grid should only show packages that can actually be opened.
+            (essentials + extraPackages).distinct()
+                .filter { pkg ->
+                    runCatching { context.packageManager.getLaunchIntentForPackage(pkg) != null }
+                        .getOrDefault(false)
+                }
+                .map { pkg ->
+                    val label = defaultLabels[pkg] ?: InstalledAppsRepository.getAppLabel(context, pkg)
+                    FrogShortcut(
+                        packageName = pkg,
+                        label = label,
+                        icon = InstalledAppsRepository.getAppIconBitmap(context, pkg),
+                    )
+                }
         }
     }
     LaunchedEffect(state?.phase, state?.locked) {

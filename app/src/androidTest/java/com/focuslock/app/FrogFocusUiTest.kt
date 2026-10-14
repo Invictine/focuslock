@@ -28,6 +28,7 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -61,6 +62,15 @@ class FrogFocusUiTest {
 
     @Test
     fun showsBlackLauncherDefaultIconsExtraToolsAndOpenFocusLock() = runBlocking {
+        val defaults = com.focuslock.app.service.FrogAppPolicy.defaultLaunchPackages(appContext)
+        val launchableDefaultLabels = defaults.zip(DEFAULT_ICON_DESCRIPTIONS)
+            .filter { (packageName, _) ->
+                runCatching { appContext.packageManager.getLaunchIntentForPackage(packageName) != null }
+                    .getOrDefault(false)
+            }
+            .map { it.second }
+        val missingDefaultLabels = DEFAULT_ICON_DESCRIPTIONS - launchableDefaultLabels.toSet()
+
         repository.setWakeHour(0)
         assertTrue(repository.armIfDue())
         repository.selectFrog(FrogTask(id = "chemistry", title = "Finish chemistry questions"))
@@ -78,11 +88,17 @@ class FrogFocusUiTest {
         compose.onNodeWithText("Finish your frog to unlock your phone.").assertExists()
         compose.onNodeWithText("Open FocusLock").assertExists()
         try { compose.waitUntil(10_000) {
-            DEFAULT_ICON_DESCRIPTIONS.all { label ->
+            launchableDefaultLabels.all { label ->
                 compose.onAllNodesWithContentDescription(label).fetchSemanticsNodes().isNotEmpty()
             }
         } } catch (error: Throwable) {
             throw AssertionError("Defaults: ${com.focuslock.app.service.FrogAppPolicy.defaultLaunchPackages(appContext)}\n${compose.onRoot().printToString()}", error)
+        }
+        missingDefaultLabels.forEach { label ->
+            assertFalse(
+                "Unavailable default shortcut $label should be hidden",
+                compose.onAllNodesWithContentDescription(label).fetchSemanticsNodes().isNotEmpty(),
+            )
         }
 
         val preview = compose.onRoot().captureToImage().asAndroidBitmap()
@@ -92,10 +108,18 @@ class FrogFocusUiTest {
             assertTrue(preview.compress(Bitmap.CompressFormat.PNG, 100, stream))
         }
 
-        assertTrue(repository.confirmTools(setOf("com.android.settings")))
+        assertFalse(
+            "Regression fixture must not resolve to an installed launcher activity",
+            appContext.packageManager.getLaunchIntentForPackage(NONEXISTENT_EXTRA_PACKAGE) != null,
+        )
+        assertTrue(repository.confirmTools(setOf("com.android.settings", NONEXISTENT_EXTRA_PACKAGE)))
         compose.waitUntil(10_000) {
             compose.onAllNodesWithContentDescription("Settings").fetchSemanticsNodes().isNotEmpty()
         }
+        assertFalse(
+            "An unavailable saved tool should not produce a dead shortcut",
+            compose.onAllNodesWithContentDescription(NONEXISTENT_EXTRA_PACKAGE).fetchSemanticsNodes().isNotEmpty(),
+        )
 
         compose.onNodeWithText("Open FocusLock").performClick()
         compose.runOnIdle { assertEquals(1, openFocusLockCalls) }
@@ -129,5 +153,6 @@ class FrogFocusUiTest {
 
     companion object {
         private val DEFAULT_ICON_DESCRIPTIONS = listOf("TickTick", "Phone", "Clock", "Messages", "WhatsApp", "ChatGPT", "Spotify", "Google Pay")
+        private const val NONEXISTENT_EXTRA_PACKAGE = "com.focuslock.test.missing.launcher.target"
     }
 }
