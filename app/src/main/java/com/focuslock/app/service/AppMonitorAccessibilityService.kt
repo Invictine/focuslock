@@ -610,6 +610,9 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             refreshForegroundWindow(appWindows)
             enforceStrictSplitScreenIfNeeded()
             requestWindowReconciliation()
+            InteractiveWindowPolicy.foreground(appWindows)?.packageName
+                ?.takeIf { it in RemovalAttemptPolicy.promptPackages }
+                ?.let { inspectRemovalWindow(it) }
             return
         }
 
@@ -697,19 +700,8 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         // Settings can host its own confirmation. Dialogs often populate after the
         // window event, so retry briefly even if no content-change event follows.
         if (isRemovalPromptEvent) {
-            if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-                removalScanJob?.cancel()
-                lastRemovalScanMs = -1L
-            }
-            if (checkRemovalReminder(eventPackage)) return
-            if (removalScanJob?.isActive != true) {
-                removalScanJob = serviceScope.launch(Dispatchers.Main) {
-                    repeat(3) {
-                        delay(550)
-                        if (checkRemovalReminder(eventPackage)) return@launch
-                    }
-                }
-            }
+            if (inspectRemovalWindow(eventPackage,
+                    restart = eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED)) return
         }
 
         if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
@@ -958,6 +950,24 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun inspectRemovalWindow(packageName: String, restart: Boolean = false): Boolean {
+        if (restart) {
+            removalScanJob?.cancel()
+            lastRemovalScanMs = -1L
+        }
+        val requested = checkRemovalReminder(packageName)
+        if (!RemovalReminderController.isShowing && removalScanJob?.isActive != true) {
+            removalScanJob = serviceScope.launch(Dispatchers.Main) {
+                repeat(4) {
+                    delay(550)
+                    if (RemovalReminderController.isShowing || RemovalReminderController.isSuppressed(this@AppMonitorAccessibilityService)) return@launch
+                    checkRemovalReminder(packageName)
+                }
+            }
+        }
+        return requested
+    }
+
     private fun checkRemovalReminder(packageName: String): Boolean {
         val now = SystemClock.elapsedRealtime()
         if (lastRemovalScanMs >= 0 && now - lastRemovalScanMs < 500L) return false
@@ -969,11 +979,13 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             val texts = mutableListOf<String>()
             var visited = 0
             fun collect(node: AccessibilityNodeInfo, depth: Int) {
-                if (++visited > 60 || depth > 8) return
+                // Android's collapsing Settings layout nests the admin name and
+                // Deactivate & uninstall action more than eight levels deep.
+                if (++visited > 160 || depth > 18) return
                 node.text?.toString()?.take(500)?.let(texts::add)
                 node.contentDescription?.toString()?.take(500)?.let(texts::add)
                 for (index in 0 until minOf(node.childCount, 20)) {
-                    if (visited >= 60) break
+                    if (visited >= 160) break
                     val child = node.getChild(index) ?: continue
                     try { collect(child, depth + 1) } finally {
                         if (canRecycleNodes) child.recycle()
@@ -985,12 +997,23 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             // installer dialog (which may belong to another package/window).
             val windowClass = windowClasses[root.windowId]
                 ?.takeIf { it.first == packageName }?.second ?: root.className?.toString()
-            if (RemovalAttemptPolicy.matches(packageName, windowClass, texts)) {
-                handleTargetedRemovalPrompt(packageName, windowClass, texts, "uninstall")
+            val reason = RemovalAttemptPolicy.reason(packageName, windowClass, texts,
+                deviceAdminActive = packageName == "com.android.settings" &&
+                    com.focuslock.app.ui.permissions.PermissionHelper.isDeviceAdminActive(this))
+            if (com.focuslock.app.BuildConfig.DEBUG) {
+                val hasDeactivationAction = texts.any { it.startsWith("Deactivate", true) }
+                Log.d(TAG, "Removal scan class=$windowClass nodes=$visited " +
+                    "target=${texts.any { it.equals(RemovalAttemptPolicy.TARGET_TITLE, true) }} " +
+                    "deactivate=$hasDeactivationAction reason=$reason")
+            }
+            if (reason != null) {
+                // Show on the admin detail/removal screen, before its final action
+                // can disable accessibility or Android freezes app switches.
+                handleTargetedRemovalPrompt(packageName, windowClass, texts, reason)
                 return true
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Could not inspect uninstall dialog", e)
+            Log.w(TAG, "Could not inspect removal settings", e)
         } finally {
             if (canRecycleNodes) root.recycle()
         }
@@ -1110,6 +1133,8 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                     app.strictModeAutomationRepository.isActivationActiveNow()
                 active && StrictProtectionPolicy.targetedRemovalReason(
                     packageName, windowClass, texts, app.strictAccessRepository.getConfig(),
+                    deviceAdminActive = packageName == "com.android.settings" &&
+                        com.focuslock.app.ui.permissions.PermissionHelper.isDeviceAdminActive(this@AppMonitorAccessibilityService),
                 ) != null
             } catch (error: kotlinx.coroutines.CancellationException) { throw error }
             catch (_: Exception) { false }

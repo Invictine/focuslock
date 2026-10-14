@@ -79,9 +79,10 @@ internal object StrictProtectionPolicy {
         windowClass: String?,
         visibleTexts: List<String>,
         config: StrictAccessConfig,
+        deviceAdminActive: Boolean = false,
     ): String? {
         if (!config.preventUninstall) return null
-        return if (RemovalAttemptPolicy.matches(packageName, windowClass, visibleTexts)) {
+        return if (RemovalAttemptPolicy.matches(packageName, windowClass, visibleTexts, deviceAdminActive)) {
             PREVENT_REMOVAL
         } else null
     }

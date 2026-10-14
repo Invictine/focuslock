@@ -23,6 +23,9 @@ object RemovalAttemptPolicy {
     /** Settings-hosted prompts need stricter confirmation checks than installer dialogs. */
     val promptPackages: Set<String> = installerPackages + "com.android.settings"
 
+    const val REASON_ADMIN_REQUESTED = "admin_requested"
+    const val REASON_UNINSTALL = "uninstall"
+
     private val uninstallConfirmation = Regex(
         """^(?:(?:do you want to uninstall|are you sure you want to uninstall)(?: the app| this app)?(?: [\"']?focuslock[\"']?)?[?.]?|uninstall(?: this app| app)?[?.]?)$""",
         RegexOption.IGNORE_CASE,
@@ -32,20 +35,92 @@ object RemovalAttemptPolicy {
         RegexOption.IGNORE_CASE,
     )
 
-    fun matches(packageName: String, windowClassName: String?, texts: List<String>): Boolean {
+    private val explicitAdminQuestion = Regex(
+        """^(?:(?:do you want to|are you sure you want to) )?(?:deactivate|disable|turn off)(?: this)? (?:device )?admin(?: app)?(?: for| of)?(?: [\"']?focuslock[\"']?)?[?.]?$""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val adminDeactivationAction = Regex(
+        """^(?:deactivate|disable|turn off)(?: this)? (?:device )?admin(?: app)?[?.]?$""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val bareDeactivationAction = Regex(
+        """^(?:deactivate|disable)[?.]?$""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val activationAction = Regex(
+        """^(?:activate|activate this (?:device )?admin(?: app)?)[?.]?$""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val deactivateAndUninstallAction = Regex(
+        """^deactivate (?:&|and) uninstall[?.]?$""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val targetAdminLabel = Regex(
+        """^FocusLock uninstall protection$""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val deviceAdminScreen = Regex(
+        """(?:^|[.$])DeviceAdminAdd$""",
+        RegexOption.IGNORE_CASE,
+    )
+
+    fun matches(
+        packageName: String,
+        windowClassName: String?,
+        texts: List<String>,
+        deviceAdminActive: Boolean = false,
+    ): Boolean = reason(packageName, windowClassName, texts, deviceAdminActive) != null
+
+    /** Returns the reminder reason only when a FocusLock-specific system action is visible. */
+    fun reason(
+        packageName: String,
+        windowClassName: String?,
+        texts: List<String>,
+        deviceAdminActive: Boolean = false,
+    ): String? {
         val sourcePackage = packageName.trim()
-        if (sourcePackage !in promptPackages) return false
+        if (sourcePackage !in promptPackages) return null
 
         val normalizedTexts = texts.map(String::trim).filter(String::isNotEmpty)
         val exactTargetIdentity = normalizedTexts.any { text ->
-            text.equals(TARGET_TITLE, ignoreCase = true) || text == TARGET_PACKAGE
+            text.equals(TARGET_TITLE, ignoreCase = true) || text == TARGET_PACKAGE ||
+                targetAdminLabel.matches(text)
         }
         val targetNamedInQuestion = normalizedTexts.any { text ->
-            explicitUninstallQuestion.matches(text) &&
+            (explicitUninstallQuestion.matches(text) || explicitAdminQuestion.matches(text)) &&
                 text.contains(TARGET_TITLE, ignoreCase = true)
         }
         val targetsFocusLock = exactTargetIdentity || targetNamedInQuestion
-        if (!targetsFocusLock) return false
+        if (!targetsFocusLock) return null
+
+        if (sourcePackage == "com.android.settings") {
+            val windowClass = windowClassName.orEmpty()
+            val isDeviceAdminDetail = deviceAdminScreen.containsMatchIn(windowClass)
+            val activationScreen = normalizedTexts.any(activationAction::matches)
+            val deactivationAction = normalizedTexts.any(adminDeactivationAction::matches)
+            val deviceAdminButton = isDeviceAdminDetail &&
+                normalizedTexts.any { text ->
+                    bareDeactivationAction.matches(text) || deactivateAndUninstallAction.matches(text)
+                }
+            val explicitAdminQuestionVisible = normalizedTexts.any(explicitAdminQuestion::matches)
+            val namesAdmin = normalizedTexts.any { text ->
+                text.contains("device admin", ignoreCase = true) ||
+                    text.contains("admin app", ignoreCase = true) ||
+                    text.contains("administrator", ignoreCase = true)
+            }
+
+            if (isDeviceAdminDetail && activationScreen) return null
+            if (deactivationAction || deviceAdminButton ||
+                (isDeviceAdminDetail && deviceAdminActive)
+            ) {
+                return REASON_ADMIN_REQUESTED
+            }
+            val confirmationDialog = windowClass.contains("dialog", ignoreCase = true) ||
+                windowClass.contains("alert", ignoreCase = true)
+            if (confirmationDialog && namesAdmin && explicitAdminQuestionVisible) {
+                return REASON_ADMIN_REQUESTED
+            }
+        }
 
         val exactUninstallAction = normalizedTexts.any { it.equals("uninstall", ignoreCase = true) }
         val explicitQuestion = normalizedTexts.any(explicitUninstallQuestion::matches)
@@ -55,12 +130,12 @@ object RemovalAttemptPolicy {
             // confirmation question or a dialog window with the exact action.
             val confirmationDialog = windowClassName
                 ?.contains("dialog", ignoreCase = true) == true && exactUninstallAction
-            return explicitQuestion || confirmationDialog
+            return if (explicitQuestion || confirmationDialog) REASON_UNINSTALL else null
         }
 
         val uninstallActivity = windowClassName
             ?.contains("uninstall", ignoreCase = true) == true
         val clearUninstallText = exactUninstallAction || normalizedTexts.any(uninstallConfirmation::matches)
-        return uninstallActivity || clearUninstallText
+        return if (uninstallActivity || clearUninstallText) REASON_UNINSTALL else null
     }
 }
