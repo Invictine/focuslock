@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -83,29 +84,12 @@ class RemovalReminderActivity : ComponentActivity() {
 
         setContent {
             FocusLockTheme {
+                BackHandler { keepFocusLock() }
                 ReminderPopup(
                     reason = reason,
                     media = media,
-                    onDismiss = { finish() },
-                    onKeepFocusLock = {
-                        when (reason) {
-                            REASON_PREVIEW -> finish()
-                            REASON_ADMIN_DISABLED -> {
-                                RemovalReminderController.allowTemporarily(this)
-                                PermissionHelper.openDeviceAdminSettings(this)
-                                finish()
-                            }
-                            REASON_DEACTIVATE -> finish()
-                            else -> {
-                                val home = Intent(Intent.ACTION_MAIN).apply {
-                                    addCategory(Intent.CATEGORY_HOME)
-                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                }
-                                runCatching { startActivity(home) }
-                                finish()
-                            }
-                        }
-                    },
+                    onDismiss = { keepFocusLock() },
+                    onKeepFocusLock = { keepFocusLock() },
                     onContinue = {
                         RemovalReminderController.allowTemporarily(this)
                         if (reason == REASON_DEACTIVATE) PermissionHelper.disableDeviceAdmin(this)
@@ -114,6 +98,24 @@ class RemovalReminderActivity : ComponentActivity() {
                 )
             }
         }
+    }
+
+    private fun keepFocusLock() {
+        when (reason) {
+            REASON_PREVIEW, REASON_DEACTIVATE -> Unit
+            REASON_ADMIN_DISABLED -> {
+                RemovalReminderController.allowTemporarily(this)
+                PermissionHelper.openDeviceAdminSettings(this)
+            }
+            else -> {
+                val home = Intent(Intent.ACTION_MAIN).apply {
+                    addCategory(Intent.CATEGORY_HOME)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                runCatching { startActivity(home) }
+            }
+        }
+        finish()
     }
 
     override fun onResume() {
@@ -130,7 +132,7 @@ class RemovalReminderActivity : ComponentActivity() {
 
     override fun onDestroy() {
         if (::media.isInitialized) media.release()
-        if (!isChangingConfigurations) RemovalReminderController.onActivityDismissed(this, reason)
+        if (!isChangingConfigurations) RemovalReminderController.onActivityDismissed()
         super.onDestroy()
     }
 

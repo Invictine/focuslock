@@ -73,6 +73,140 @@ class RemovalAttemptPolicyTest {
     }
 
     @Test
+    fun matchesDeviceAdminAddDeactivateActionForFocusLock() {
+        assertTrue(
+            RemovalAttemptPolicy.matches(
+                packageName = "com.android.settings",
+                windowClassName = "com.android.settings.DeviceAdminAdd",
+                texts = listOf("FocusLock", "Deactivate", "This app may perform actions"),
+            )
+        )
+        assertTrue(
+            RemovalAttemptPolicy.reason(
+                packageName = "com.android.settings",
+                windowClassName = "com.android.settings.DeviceAdminAdd",
+                texts = listOf("FocusLock", "Deactivate"),
+            ) == RemovalAttemptPolicy.REASON_ADMIN_REQUESTED
+        )
+        for (action in listOf("Deactivate & uninstall", "Deactivate and uninstall")) {
+            assertTrue(
+                RemovalAttemptPolicy.reason(
+                    packageName = "com.android.settings",
+                    windowClassName = "com.android.settings\$DeviceAdminAdd",
+                    texts = listOf("FocusLock", action),
+                ) == RemovalAttemptPolicy.REASON_ADMIN_REQUESTED
+            )
+        }
+        assertTrue(
+            RemovalAttemptPolicy.reason(
+                packageName = "com.android.settings",
+                windowClassName = "com.android.settings.DeviceAdminAdd",
+                texts = listOf("FocusLock uninstall protection", "Deactivate & uninstall"),
+            ) == RemovalAttemptPolicy.REASON_ADMIN_REQUESTED
+        )
+    }
+
+    @Test
+    fun matchesDeviceAdminAddWithHiddenDeactivateActionOnlyWhenFocusLockAdminIsActive() {
+        val packageName = "com.android.settings"
+        val windowClass = "com.android.settings.DeviceAdminAdd"
+        val texts = listOf("FocusLock", "This app is an administrator")
+
+        assertTrue(
+            RemovalAttemptPolicy.reason(packageName, windowClass, texts, deviceAdminActive = true) ==
+                RemovalAttemptPolicy.REASON_ADMIN_REQUESTED
+        )
+        assertFalse(RemovalAttemptPolicy.matches(packageName, windowClass, texts))
+        assertFalse(
+            RemovalAttemptPolicy.matches(
+                packageName,
+                windowClass,
+                listOf("FocusLock Helper", "This app is an administrator"),
+                deviceAdminActive = true,
+            )
+        )
+        assertFalse(
+            RemovalAttemptPolicy.matches(
+                packageName,
+                windowClass,
+                listOf("FocusLock", "Activate this device admin app"),
+                deviceAdminActive = true,
+            )
+        )
+    }
+
+    @Test
+    fun matchesExplicitFocusLockAdminDeactivationFromAppInfoOrSettingsDialog() {
+        assertTrue(
+            RemovalAttemptPolicy.reason(
+                packageName = "com.android.settings",
+                windowClassName = "com.android.settings.applications.InstalledAppDetailsTop",
+                texts = listOf("FocusLock", "Deactivate this device admin app"),
+            ) == RemovalAttemptPolicy.REASON_ADMIN_REQUESTED
+        )
+        assertTrue(
+            RemovalAttemptPolicy.reason(
+                packageName = "com.android.settings",
+                windowClassName = "android.widget.FrameLayout",
+                texts = listOf("FocusLock", "Deactivate this device admin app"),
+            ) == RemovalAttemptPolicy.REASON_ADMIN_REQUESTED
+        )
+        assertTrue(
+            RemovalAttemptPolicy.reason(
+                packageName = "com.android.settings",
+                windowClassName = "android.app.AlertDialog",
+                texts = listOf("FocusLock", "Do you want to deactivate this device admin app?", "Cancel", "Deactivate"),
+            ) == RemovalAttemptPolicy.REASON_ADMIN_REQUESTED
+        )
+        assertTrue(
+            RemovalAttemptPolicy.reason(
+                packageName = "com.android.settings",
+                windowClassName = "android.app.AlertDialog",
+                texts = listOf("Do you want to deactivate device admin for FocusLock?", "Cancel", "OK"),
+            ) == RemovalAttemptPolicy.REASON_ADMIN_REQUESTED
+        )
+    }
+
+    @Test
+    fun ignoresActivationAdminListsAndOtherAppsAdminDetails() {
+        assertFalse(
+            RemovalAttemptPolicy.matches(
+                packageName = "com.android.settings",
+                windowClassName = "com.android.settings.DeviceAdminAdd",
+                texts = listOf("FocusLock", "Activate this device admin app", "Activate"),
+            )
+        )
+        assertFalse(
+            RemovalAttemptPolicy.matches(
+                packageName = "com.android.settings",
+                windowClassName = "com.android.settings.DeviceAdminSettings",
+                texts = listOf("Device admin apps", "FocusLock", "Other App"),
+            )
+        )
+        assertFalse(
+            RemovalAttemptPolicy.matches(
+                packageName = "com.android.settings",
+                windowClassName = "com.android.settings.DeviceAdminAdd",
+                texts = listOf("Other App", "Deactivate"),
+            )
+        )
+        assertFalse(
+            RemovalAttemptPolicy.matches(
+                packageName = "com.android.settings",
+                windowClassName = "com.android.settings.DeviceAdminAdd",
+                texts = listOf("FocusLock Helper", "Deactivate and uninstall"),
+            )
+        )
+        assertFalse(
+            RemovalAttemptPolicy.matches(
+                packageName = "com.android.settings",
+                windowClassName = "com.android.settings.applications.InstalledAppDetailsTop",
+                texts = listOf("FocusLock", "Disable", "Force stop", "Uninstall"),
+            )
+        )
+    }
+
+    @Test
     fun matchesLocalizedSettingsDialogWithTargetAndExactAction() {
         assertTrue(
             RemovalAttemptPolicy.matches(

@@ -10,17 +10,29 @@ is offered instead. Preview does not change device-admin status.
 - Deactivating admin from FocusLock opens the reminder before removing admin.
 - Android's admin-disable request and disabled callbacks attempt to show the reminder.
   The system's text warning remains available even if Android suppresses the activity.
+- With accessibility enabled, opening FocusLock's active device-admin detail or
+  deactivate-and-uninstall screen shows the reminder before the final system action.
+  This covers the Device admin apps list and the App info > Uninstall route, while
+  ignoring activation screens and other apps' administrators. Continue returns to
+  the same Android screen without deactivating admin or pressing Uninstall.
+  The detector also uses Android's record of FocusLock's active admin state, since
+  modern Settings can hide the final action's text from accessibility observers.
 - With FocusLock accessibility enabled, recognized system uninstall dialogs targeting
   FocusLock trigger the reminder even after device admin has been disabled. This
   includes explicit confirmation dialogs hosted by Android Settings; the ordinary
   FocusLock App info screen and its Uninstall button alone do not trigger it.
-- Continuing or dismissing the reminder briefly suppresses repeated triggers so the
-  system removal flow remains usable. The app never presses the system's uninstall button.
+- Continue suppresses repeated triggers for one minute so the system removal flow
+  remains usable. Back, outside taps, and Keep return away from the removal screen
+  without authorizing another attempt. The app never presses the system's uninstall button.
 
 External callbacks are best effort. Android background activity restrictions, OEM
 dialog differences, missing accessibility access, and notification permissions can
 prevent the custom reminder from appearing. A tappable notification is the fallback
 where possible. The app cannot play anything after it has been uninstalled.
+Android deliberately restricts app switches and overlays during the final admin
+warning, so the custom popup is shown earlier. If accessibility is already off,
+the receiver's Android-owned text warning remains the fallback for admin deactivation;
+the custom media popup cannot be guaranteed on every OEM screen.
 
 ## Media
 
@@ -33,7 +45,9 @@ remain in that recorder's own storage.
 ## Verification
 
 Automated coverage lives in `RemovalAttemptPolicyTest`, `RemovalReminderStoreTest`,
-and `RemovalReminderUiTest`. Physical-device verification should include:
+`RemovalReminderUiTest`, and `RemovalReminderSystemTest`. The system test exercises
+real emulator Settings, keeps accessibility services running during instrumentation,
+and cancels before removal. Physical-device verification should include:
 
 1. Import and preview audio, then video; test pause, replay, rotation, Home, and Back.
 2. Try recording with and without a compatible recorder installed.

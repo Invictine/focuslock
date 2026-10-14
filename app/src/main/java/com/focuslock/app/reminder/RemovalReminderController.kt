@@ -22,14 +22,14 @@ object RemovalReminderController {
     private const val PREFS = "removal_reminder_launch_policy"
     private const val KEY_UNTIL = "suppressed_until_elapsed"
     private const val KEY_BOOT = "suppressed_boot_count"
-    private const val KEY_DISMISS_UNTIL = "dismiss_suppressed_until_elapsed"
-    private const val KEY_DISMISS_BOOT = "dismiss_suppressed_boot_count"
     private const val SUPPRESSION_MS = 60_000L
     private const val REPEAT_THROTTLE_MS = 1_500L
 
     private val lock = Any()
     @Volatile private var activityVisible = false
     @Volatile private var lastLaunchElapsed = 0L
+
+    internal val isShowing: Boolean get() = activityVisible
 
     /**
      * Opens the popup for an explicit preview or an enabled reminder. Background triggers
@@ -42,7 +42,11 @@ object RemovalReminderController {
         if (!preview && !RemovalReminderStore(app).enabled) return false
         val explicitAction = reason == RemovalReminderActivity.REASON_DEACTIVATE
         val isAdminDisabled = reason == RemovalReminderActivity.REASON_ADMIN_DISABLED
-        if (!preview && !explicitAction && isSuppressed(app, includeDismiss = !isAdminDisabled)) return false
+        if (com.focuslock.app.BuildConfig.DEBUG) {
+            android.util.Log.d("RemovalReminder", "Request reason=$reason visible=$activityVisible " +
+                "suppressed=${isSuppressed(app)} sinceLastMs=${SystemClock.elapsedRealtime() - lastLaunchElapsed}")
+        }
+        if (!preview && !explicitAction && isSuppressed(app)) return false
 
         val now = SystemClock.elapsedRealtime()
         synchronized(lock) {
@@ -80,16 +84,11 @@ object RemovalReminderController {
             .apply()
     }
 
-    fun isSuppressed(context: Context): Boolean = isSuppressed(context, includeDismiss = true)
-
-    private fun isSuppressed(context: Context, includeDismiss: Boolean): Boolean {
+    fun isSuppressed(context: Context): Boolean {
         val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val boot = bootCount(context)
         val now = SystemClock.elapsedRealtime()
-        val explicit = prefs.getInt(KEY_BOOT, -1) == boot && now < prefs.getLong(KEY_UNTIL, 0L)
-        val dismissed = includeDismiss && prefs.getInt(KEY_DISMISS_BOOT, -1) == boot &&
-            now < prefs.getLong(KEY_DISMISS_UNTIL, 0L)
-        return explicit || dismissed
+        return prefs.getInt(KEY_BOOT, -1) == boot && now < prefs.getLong(KEY_UNTIL, 0L)
     }
 
     /** Activity lifecycle hooks keep duplicate callbacks from stacking popup windows. */
@@ -102,14 +101,9 @@ object RemovalReminderController {
         synchronized(lock) { activityVisible = false }
     }
 
-    internal fun onActivityDismissed(context: Context, reason: String) {
-        if (reason != RemovalReminderActivity.REASON_PREVIEW && !isSuppressed(context)) {
-            val prefs = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            prefs.edit()
-                .putLong(KEY_DISMISS_UNTIL, SystemClock.elapsedRealtime() + SUPPRESSION_MS)
-                .putInt(KEY_DISMISS_BOOT, bootCount(context))
-                .apply()
-        }
+    internal fun onActivityDismissed() {
+        // Back, Keep, and outside taps never authorize a later removal attempt.
+        // Only allowTemporarily(), called by an explicit Continue, grants a window.
         synchronized(lock) {
             activityVisible = false
             lastLaunchElapsed = SystemClock.elapsedRealtime()
