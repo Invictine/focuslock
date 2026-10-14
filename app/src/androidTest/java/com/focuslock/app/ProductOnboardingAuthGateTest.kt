@@ -47,7 +47,7 @@ class ProductOnboardingAuthGateTest {
 
         auth.value = FocusAuthState.SignedIn
         compose.onNodeWithText("FocusLock guide").assertIsDisplayed()
-        compose.onNodeWithText("Continue").performClick()
+        compose.onNodeWithText("Next").performClick()
         assertEquals(1, page.intValue)
         auth.value = FocusAuthState.SignedOut
         compose.onNodeWithText("Stay focused everywhere").assertIsDisplayed()
@@ -81,7 +81,7 @@ class ProductOnboardingAuthGateTest {
         compose.onNodeWithText("Continue offline").performClick()
         compose.onNodeWithText("FocusLock guide").assertIsDisplayed()
 
-        compose.onNodeWithText("Continue").performClick()
+        compose.onNodeWithText("Next").performClick()
         assertEquals(1, page.intValue)
         auth.value = FocusAuthState.Loading
         compose.onNodeWithText("FocusLock guide").assertIsDisplayed()
@@ -106,7 +106,7 @@ class ProductOnboardingAuthGateTest {
         }
 
         compose.onNodeWithText("FocusLock guide").assertIsDisplayed()
-        compose.onNodeWithText("Continue").performClick()
+        compose.onNodeWithText("Next").performClick()
         assertEquals(1, page.intValue)
 
         auth.value = FocusAuthState.SignedOut

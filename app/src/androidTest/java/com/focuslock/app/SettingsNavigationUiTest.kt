@@ -62,7 +62,7 @@ class SettingsNavigationUiTest {
 
             compose.onNodeWithText("Permissions & protection").performClick()
             compose.onNodeWithText("Boundaries Lock").performScrollTo().assertIsDisplayed()
-            compose.onNodeWithText("System Protection Status").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("System access").performScrollTo().assertIsDisplayed()
             compose.onNodeWithContentDescription("Back to Settings").performClick()
 
             compose.onNodeWithText("Account & devices").performClick()

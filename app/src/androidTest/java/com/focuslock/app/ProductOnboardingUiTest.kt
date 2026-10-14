@@ -51,23 +51,21 @@ class ProductOnboardingUiTest {
         }
 
         compose.onNodeWithText("FocusLock guide").assertIsDisplayed()
-        compose.onNodeWithText("Continue").performClick()
+        compose.onNodeWithText("Next").performClick()
         assertEquals(1, page.intValue)
         compose.onNodeWithText("Back").performClick()
         assertEquals(0, page.intValue)
 
-        compose.onNodeWithText("Topics").performClick()
+        compose.onNodeWithText("All topics").performClick()
         val targetIndex = productTourPages.lastIndex
-        compose.onNodeWithText(
-            "${targetIndex + 1}. ${productTourPages[targetIndex].title}", substring = true
-        ).performScrollTo().performClick()
+        compose.onNodeWithText(productTourPages[targetIndex].title).performScrollTo().performClick()
         assertEquals(targetIndex, page.intValue)
         assertTrue(!paused && !finished)
         assertEquals(null, destination)
     }
 
     @Test
-    fun everyGuidePageCanBeReachedWithContinue() {
+    fun everyGuidePageCanBeReachedWithNext() {
         val page = mutableIntStateOf(0)
         compose.setContent {
             FocusLockTheme(dynamicColor = false) {
@@ -85,8 +83,9 @@ class ProductOnboardingUiTest {
             assertEquals(index, page.intValue)
             compose.onNodeWithText(tourPage.title).assertIsDisplayed()
                 .assert(SemanticsMatcher.keyIsDefined(SemanticsProperties.Heading))
+            compose.onNodeWithText(tourPage.exampleTitle).assertIsDisplayed()
             if (index < productTourPages.lastIndex) {
-                compose.onNodeWithText("Continue").performClick()
+                compose.onNodeWithText("Next").performClick()
             }
         }
         assertEquals(productTourPages.lastIndex, page.intValue)
@@ -121,7 +120,8 @@ class ProductOnboardingUiTest {
 
     @Test
     fun destinationActionRoutesWithoutCompletingTheGuide() {
-        val page = mutableIntStateOf(productTourPages.lastIndex)
+        val permissionsIndex = productTourPages.indexOfFirst { it.id == "permissions" }
+        val page = mutableIntStateOf(permissionsIndex)
         var finished = false
         var destination: ProductTourDestination? = null
         compose.setContent {
@@ -136,8 +136,31 @@ class ProductOnboardingUiTest {
             }
         }
 
-        compose.onNodeWithText("Set up permissions").performScrollTo().performClick()
-        assertEquals(ProductTourDestination.SETTINGS, destination)
+        compose.onNodeWithText(productTourPages[permissionsIndex].title).assertIsDisplayed()
+        compose.onNodeWithText("Review permissions").performScrollTo().performClick()
+        assertEquals(ProductTourDestination.PROTECTION, destination)
+        assertTrue(!finished)
+    }
+
+    @Test
+    fun featureActionOpensItsDestinationWithoutFinishingTheGuide() {
+        val page = mutableIntStateOf(1)
+        var finished = false
+        var destination: ProductTourDestination? = null
+        compose.setContent {
+            FocusLockTheme(dynamicColor = false) {
+                ProductOnboardingDialog(
+                    pageIndex = page.intValue,
+                    onPageChange = { page.intValue = it },
+                    onPause = {},
+                    onFinish = { finished = true },
+                    onOpenDestination = { destination = it }
+                )
+            }
+        }
+
+        compose.onNodeWithText("Choose boundaries").performScrollTo().performClick()
+        assertEquals(ProductTourDestination.BOUNDARIES, destination)
         assertTrue(!finished)
     }
 

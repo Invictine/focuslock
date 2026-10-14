@@ -53,8 +53,8 @@ class ProductOnboardingIntegrationTest {
             compose.onNodeWithText("FocusLock guide").assertIsDisplayed()
             assertCurrentPage(0)
 
-            compose.onNodeWithText("Continue").performClick()
-            compose.onNodeWithText("Continue").performClick()
+            compose.onNodeWithText("Next").performClick()
+            compose.onNodeWithText("Next").performClick()
             assertCurrentPage(2)
 
             // A sign-in activity may still cover MainActivity when the session activates.
@@ -82,10 +82,8 @@ class ProductOnboardingIntegrationTest {
             assertCurrentPage(2)
 
             val lastIndex = productTourPages.lastIndex
-            compose.onNodeWithText("Topics").performClick()
-            compose.onNodeWithText(
-                "${lastIndex + 1}. ${productTourPages[lastIndex].title}", substring = true
-            ).performScrollTo().performClick()
+            compose.onNodeWithText("All topics").performClick()
+            compose.onNodeWithText(productTourPages[lastIndex].title).performScrollTo().performClick()
             assertCurrentPage(lastIndex)
             compose.onNodeWithText("Finish guide").performClick()
             compose.onNodeWithText("FocusLock guide").assertDoesNotExist()

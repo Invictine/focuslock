@@ -87,206 +87,40 @@ import kotlinx.coroutines.launch
 import java.util.Calendar
 import java.util.UUID
 
-/**
- * Strict Mode tab. Owns the timed boundary-lock commitment UI that used to live
- * inside SettingsScreen: the enable/disable confirmation dialogs, the error-container
- * status hero with a live cooldown countdown, and the consequences list.
- *
- * Persistence is unchanged — everything goes through [SettingsRepository.setLockdownMode],
- * and the cooldown is enforced by [SettingsRepository.canDisableLockdownMode].
- */
+/** Shared duration and automation editors for the Strict Mode and location screens. */
 @Composable
-fun StrictModeScreen() {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val settings = FocusLockApplication.instance.settingsRepository
-    val strictMode by settings.lockdownModeFlow.collectAsStateWithLifecycle(initialValue = false)
-    val boundariesLock by settings.boundariesLockFlow.collectAsStateWithLifecycle(initialValue = false)
-    val blockedApps by settings.blockedAppsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
-    val blockedWebsites by settings.blockedWebsitesFlow.collectAsStateWithLifecycle(initialValue = emptyList())
-    val endsAt by settings.lockdownEndsAtFlow.collectAsStateWithLifecycle(initialValue = 0L)
-    val preset by settings.lockdownPresetFlow.collectAsStateWithLifecycle(initialValue = "deep_work")
-    val automation = FocusLockApplication.instance.strictModeAutomationRepository
-    val places by automation.placesFlow.collectAsStateWithLifecycle(initialValue = emptyList())
-    val windows by automation.recurringWindowsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
-    var showEnableDialog by remember { mutableStateOf(false) }
-    var showDisableDialog by remember { mutableStateOf(false) }
-    var activationMode by rememberSaveable { mutableStateOf("manual") }
-    var durationHours by rememberSaveable { mutableStateOf(24) }
-    var enableUntilTime by rememberSaveable { mutableStateOf(false) }
-    var untilHour by rememberSaveable { mutableStateOf(22) }
-    var untilMinute by rememberSaveable { mutableStateOf(30) }
-    var untilYear by rememberSaveable { mutableStateOf(Calendar.getInstance().get(Calendar.YEAR)) }
-    var untilMonth by rememberSaveable { mutableStateOf(Calendar.getInstance().get(Calendar.MONTH)) }
-    var untilDay by rememberSaveable { mutableStateOf(Calendar.getInstance().get(Calendar.DAY_OF_MONTH)) }
-    // One-shot entrance cascade (header -> intro -> hero -> rules); remembered so it
-    // runs on first composition only and never replays on scroll or state flips.
-    var entered by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) { entered = true }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = UiTokens.ScreenPadding)
-            .padding(bottom = 32.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
-    ) {
-        StaggeredFadeSlide(visible = entered, index = 0, screenKey = "strict") {
-            ScreenHeader(title = "Strict Mode", subtitle = "Protect your existing boundaries with a timed commitment.")
-        }
-        if (strictMode) {
-            StaggeredFadeSlide(visible = entered, index = 1, modifier = Modifier.fillMaxWidth(), screenKey = "strict") {
-                StrictActiveCard(
-                    settings = settings,
-                    endsAt = endsAt,
-                    onExtend = { scope.launch { settings.extendLockdown(maxOf(endsAt, System.currentTimeMillis()) + 60 * 60 * 1000L) } },
-                    onDisableClick = {
-                        scope.launch {
-                            val canDisable = try { settings.canDisableLockdownMode() } catch (_: Exception) { true }
-                            if (!canDisable) {
-                                val remaining = try { settings.lockdownCooldownRemainingMs() } catch (_: Exception) { 0L }
-                                Toast.makeText(context, "Strict Mode locked: ${formatLockdownRemaining(remaining)} remaining", Toast.LENGTH_LONG).show()
-                            } else showDisableDialog = true
-                        }
-                    }
-                )
-            }
-        }
-
-        StaggeredFadeSlide(visible = entered, index = 2, modifier = Modifier.fillMaxWidth(), screenKey = "strict") {
-            StrictActivationSwitcher(selected = activationMode, onSelect = { activationMode = it })
-        }
-
-        StaggeredFadeSlide(visible = entered, index = 3, modifier = Modifier.fillMaxWidth(), screenKey = "strict") {
-            when (activationMode) {
-                "schedule" -> StrictAutomationCard(
-                    mode = StrictAutomationMode.SCHEDULE,
-                    places = places,
-                    windows = windows,
-                    onSavePlace = { scope.launch { automation.upsertPlace(it) } },
-                    onDeletePlace = { scope.launch { automation.deletePlace(it) } },
-                    onSaveWindow = { scope.launch { automation.upsertRecurringWindow(it) } },
-                    onDeleteWindow = { scope.launch { automation.deleteRecurringWindow(it) } }
-                )
-                "location" -> StrictAutomationCard(
-                    mode = StrictAutomationMode.LOCATION,
-                    places = places,
-                    windows = windows,
-                    onSavePlace = { scope.launch { automation.upsertPlace(it) } },
-                    onDeletePlace = { scope.launch { automation.deletePlace(it) } },
-                    onSaveWindow = { scope.launch { automation.upsertRecurringWindow(it) } },
-                    onDeleteWindow = { scope.launch { automation.deleteRecurringWindow(it) } }
-                )
-                else -> StrictManualActivation(
-                    strictMode = strictMode,
-                    preset = preset,
-                    onPresetChange = { selected ->
-                        durationHours = when (selected) { "deep_work" -> 2; "exam" -> 4; "sleep" -> 8; else -> 24 }
-                        enableUntilTime = false
-                        scope.launch {
-                            settings.setLockdownPreset(selected)
-                        }
-                    },
-                    onEnableClick = { showEnableDialog = true }
-                )
-            }
-        }
-
-        StaggeredFadeSlide(visible = entered, index = 4, modifier = Modifier.fillMaxWidth(), screenKey = "strict") {
-            MoreProtectionOptions {
-              StrictProtectionCard(
-                appCount = blockedApps.count { it.isBlocked },
-                websiteCount = blockedWebsites.count { it.isBlocked },
-                boundariesLock = boundariesLock,
-                strictMode = strictMode,
-                onBoundariesLockChange = { enabled ->
-                    scope.launch { settings.setBoundariesLock(enabled) }
-                }
-            )
-              StrictRulesCard()
-              ApprovalUnlockCard(settings)
-            }
-        }
-
-        if (showEnableDialog) {
-            AlertDialog(
-                onDismissRequest = { showEnableDialog = false },
-                title = { Text("Enable Strict Mode?") },
-                text = {
-                    StrictEnableOptions(
-                        durationHours = durationHours,
-                        onDurationChange = { durationHours = it },
-                        untilTime = enableUntilTime,
-                        onUntilChange = { enableUntilTime = it },
-                        hour = untilHour,
-                        minute = untilMinute,
-                        onPickTime = {
-                            val picker = TimePickerDialog(
-                                context,
-                                { _, h, m -> untilHour = h; untilMinute = m },
-                                untilHour,
-                                untilMinute,
-                                android.text.format.DateFormat.is24HourFormat(context)
-                            )
-                            picker.show()
-                        },
-                        year = untilYear,
-                        month = untilMonth,
-                        day = untilDay,
-                        onPickDate = {
-                            val picker = DatePickerDialog(context, { _, y, m, d -> untilYear = y; untilMonth = m; untilDay = d }, untilYear, untilMonth, untilDay)
-                            picker.datePicker.minDate = System.currentTimeMillis()
-                            picker.datePicker.maxDate = System.currentTimeMillis() + SettingsRepository.MAX_LOCKDOWN_DURATION_HOURS * 60 * 60 * 1000L
-                            picker.show()
-                        },
-                    )
-                },
-                confirmButton = {
-                    TextButton(onClick = {
-                        val endAt = if (enableUntilTime) {
-                            Calendar.getInstance().apply { set(untilYear, untilMonth, untilDay, untilHour, untilMinute, 0); set(Calendar.MILLISECOND, 0) }.timeInMillis
-                        } else {
-                            System.currentTimeMillis() + durationHours * 60 * 60 * 1000L
-                        }
-                        val now = System.currentTimeMillis()
-                        if (endAt <= now || endAt > now + SettingsRepository.MAX_LOCKDOWN_DURATION_HOURS * 60 * 60 * 1000L) {
-                            Toast.makeText(context, "Choose an end within the next 30 days", Toast.LENGTH_LONG).show()
-                        } else {
-                            showEnableDialog = false
-                            scope.launch { settings.setLockdownMode(true, endAt) }
-                        }
-                    }) { Text("Enable") }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showEnableDialog = false }) { Text("Cancel") }
-                },
-                shape = MaterialTheme.shapes.large
-            )
-        }
-        if (showDisableDialog) {
-            AlertDialog(
-                onDismissRequest = { showDisableDialog = false },
-                title = { Text("Disable Strict Mode?") },
-                text = { Text("This re-enables unlock options.") },
-                confirmButton = {
-                    TextButton(onClick = {
-                        showDisableDialog = false
-                        scope.launch { settings.setLockdownMode(false) }
-                    }) { Text("Disable") }
-                },
-                dismissButton = {
-                    TextButton(onClick = { showDisableDialog = false }) { Text("Cancel") }
-                },
-                shape = MaterialTheme.shapes.large
-            )
-        }
-    }
+fun StrictModeScreen(onOpenPermissions: () -> Unit = {}) {
+    StrictAccessScreen(onOpenPermissions)
 }
 
 @Composable
-private fun StrictEnableOptions(
+internal fun StrictScheduleEditor() {
+    val automation = FocusLockApplication.instance.strictModeAutomationRepository
+    val windows by automation.recurringWindowsFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    val scope = rememberCoroutineScope()
+    StrictAutomationCard(
+        mode = StrictAutomationMode.SCHEDULE, places = emptyList(), windows = windows,
+        onSavePlace = {}, onDeletePlace = {},
+        onSaveWindow = { scope.launch { automation.upsertRecurringWindow(it) } },
+        onDeleteWindow = { scope.launch { automation.deleteRecurringWindow(it) } },
+    )
+}
+
+@Composable
+internal fun StrictLocationAutomationEditor() {
+    val automation = FocusLockApplication.instance.strictModeAutomationRepository
+    val places by automation.placesFlow.collectAsStateWithLifecycle(initialValue = emptyList())
+    val scope = rememberCoroutineScope()
+    StrictAutomationCard(
+        mode = StrictAutomationMode.LOCATION, places = places, windows = emptyList(),
+        onSavePlace = { scope.launch { automation.upsertPlace(it) } },
+        onDeletePlace = { scope.launch { automation.deletePlace(it) } },
+        onSaveWindow = {}, onDeleteWindow = {},
+    )
+}
+
+@Composable
+internal fun StrictEnableOptions(
     durationHours: Int,
     onDurationChange: (Int) -> Unit,
     untilTime: Boolean,
@@ -299,7 +133,7 @@ private fun StrictEnableOptions(
     day: Int,
     onPickDate: () -> Unit,
 ) {
-    Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Choose how long", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(if (untilTime) "Until a date and time" else formatDurationHours(durationHours), modifier = Modifier.weight(1f))
@@ -333,57 +167,6 @@ private fun StrictEnableOptions(
 }
 
 private enum class StrictAutomationMode { SCHEDULE, LOCATION }
-
-@Composable
-private fun StrictActivationSwitcher(selected: String, onSelect: (String) -> Unit) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-        shape = MaterialTheme.shapes.large,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text("Activation", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text("Choose how you want to set up Strict Mode.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            StrictChoiceSelector(
-                options = listOf("manual" to "Manual", "schedule" to "Schedule", "location" to "Location"),
-                selected = selected,
-                onSelect = onSelect
-            )
-        }
-    }
-}
-
-@Composable
-private fun StrictManualActivation(
-    strictMode: Boolean,
-    preset: String,
-    onPresetChange: (String) -> Unit,
-    onEnableClick: () -> Unit
-) {
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        if (!strictMode) {
-            StrictOffCard(onEnableClick = onEnableClick)
-        }
-        StrictPreferencesCard(preset = preset, onPresetChange = onPresetChange)
-    }
-}
-
-@Composable
-private fun StrictPreferencesCard(preset: String, onPresetChange: (String) -> Unit) {
-    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer), shape = MaterialTheme.shapes.large, modifier = Modifier.fillMaxWidth()) {
-        Column(modifier = Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Commitment style", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text("Choose the kind of focus session. This preset is saved with your commitment.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            StrictChoiceSelector(
-                options = listOf("deep_work" to "Deep work", "exam" to "Exam", "sleep" to "Sleep"),
-                selected = preset,
-                onSelect = onPresetChange
-            )
-        }
-    }
-}
 
 @Composable
 private fun StrictChoiceSelector(
@@ -542,348 +325,10 @@ private fun StrictAutomationCard(
     }
 }
 
-private fun nextOccurrenceMillis(hour: Int, minute: Int): Long {
-    val now = Calendar.getInstance()
-    val target = Calendar.getInstance().apply {
-        set(Calendar.HOUR_OF_DAY, hour)
-        set(Calendar.MINUTE, minute)
-        set(Calendar.SECOND, 0)
-        set(Calendar.MILLISECOND, 0)
-    }
-    if (target.timeInMillis <= now.timeInMillis) target.add(Calendar.DAY_OF_YEAR, 1)
-    return target.timeInMillis
-}
-
 private fun formatDurationHours(hours: Int): String = when {
     hours >= 24 && hours % 24 == 0 -> "${hours / 24} ${if (hours == 24) "day" else "days"}"
     hours == 1 -> "1 hour"
     else -> "$hours hours"
-}
-
-@Composable
-private fun StrictProtectionCard(
-    appCount: Int,
-    websiteCount: Int,
-    boundariesLock: Boolean,
-    strictMode: Boolean,
-    onBoundariesLockChange: (Boolean) -> Unit
-) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-        shape = MaterialTheme.shapes.large,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(
-            modifier = Modifier.padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            Text(
-                "Your protection",
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
-            )
-            Text(
-                "$appCount blocked ${if (appCount == 1) "app" else "apps"} · " +
-                    "$websiteCount blocked ${if (websiteCount == 1) "website" else "websites"}",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .toggleable(value = boundariesLock, role = Role.Switch, onValueChange = onBoundariesLockChange),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        "Boundaries Lock",
-                        style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold)
-                    )
-                    Text(
-                        if (strictMode) {
-                            "Keep removals locked after Strict Mode ends. You can still add blocks."
-                        } else {
-                            "Prevent removing blocked apps and websites. You can still add blocks."
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Switch(
-                    checked = boundariesLock,
-                    onCheckedChange = null,
-                    modifier = Modifier.semantics { contentDescription = "Boundaries Lock" }
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun MoreProtectionOptions(content: @Composable () -> Unit) {
-    var expanded by rememberSaveable { mutableStateOf(false) }
-    Card(
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-        shape = MaterialTheme.shapes.large,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).clickable(role = Role.Button) { expanded = !expanded },
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("More protection options", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold))
-                Icon(
-                    imageVector = if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
-                    contentDescription = if (expanded) "Collapse protection options" else "Expand protection options"
-                )
-            }
-            if (expanded) content()
-        }
-    }
-}
-
-/** Neutral tonal hero shown while Strict Mode is off, with the primary enable action. */
-@Composable
-private fun StrictOffCard(onEnableClick: () -> Unit) {
-    Card(
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainer
-        ),
-        shape = MaterialTheme.shapes.large,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(
-            modifier = Modifier.padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                IconBadge(
-                    icon = Icons.Rounded.Shield,
-                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
-                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
-                )
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Strict Mode is off",
-                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                        color = MaterialTheme.colorScheme.onSurface
-                    )
-                    Text(
-                        text = "Ready to lock your boundary settings",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-            Text(
-                text = "Choose 1 hour to 30 days or a date and time. Existing rules stay locked, but you can add new app and website blocks.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Button(
-                onClick = onEnableClick,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(52.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.error,
-                    contentColor = MaterialTheme.colorScheme.onError
-                ),
-                shape = MaterialTheme.shapes.large
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.Lock,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("Enable Strict Mode", fontWeight = FontWeight.SemiBold)
-            }
-        }
-    }
-}
-
-/** Prominent secondary-container hero with a live countdown while Strict Mode is active. */
-@Composable
-private fun StrictActiveCard(
-    settings: SettingsRepository,
-    endsAt: Long,
-    onExtend: () -> Unit,
-    onDisableClick: () -> Unit
-) {
-    Card(
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.secondaryContainer
-        ),
-        shape = MaterialTheme.shapes.large,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(
-            modifier = Modifier.padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                IconBadge(
-                    icon = Icons.Rounded.Lock,
-                    containerColor = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.12f),
-                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
-                )
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "Strict Mode is active",
-                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
-                        color = MaterialTheme.colorScheme.onSecondaryContainer
-                    )
-                    StrictCooldownText(settings, endsAt)
-                }
-            }
-            TextButton(onClick = onExtend, modifier = Modifier.fillMaxWidth()) {
-                Text("Extend by 1 hour")
-            }
-            Button(
-                onClick = onDisableClick,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(52.dp),
-                colors = ButtonDefaults.buttonColors(
-                containerColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                    contentColor = MaterialTheme.colorScheme.secondaryContainer
-                ),
-                shape = MaterialTheme.shapes.large
-            ) {
-                    Text("Disable Strict Mode", fontWeight = FontWeight.SemiBold)
-            }
-        }
-    }
-}
-
-/** Short list of consequences, each stated from actual enforcement code paths. */
-@Composable
-private fun StrictRulesCard() {
-    var expanded by rememberSaveable { mutableStateOf(false) }
-    Card(
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceContainer
-        ),
-        shape = MaterialTheme.shapes.large,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Column(
-            modifier = Modifier.padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
-        ) {
-            Text(
-                text = "How Strict Mode works",
-                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Text(
-                text = "For the time you choose, existing rules stay locked. You can still add app and website blocks, including permanent blocks.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            TextButton(
-                onClick = { expanded = !expanded },
-                modifier = Modifier.fillMaxWidth().height(48.dp)
-            ) { Text(if (expanded) "Hide rules" else "Read all rules") }
-            // Show detail on request so the active state and primary action stay visible.
-            val rules = listOf(
-                Triple(
-                    Icons.Rounded.Lock,
-                    "A commitment with accountability",
-                    "The Disable button stays locked until your selected end time. " +
-                        "A trusted person configured before the commitment can approve an early exit by email."
-                ),
-                Triple(
-                    Icons.Rounded.Shield,
-                    "Existing boundary settings stay locked",
-                    "Existing apps and websites can't be unblocked or weakened. Groups, limits, and block schedules stay locked, and you can add new app or website blocks."
-                ),
-                Triple(
-                    Icons.Rounded.Sync,
-                    "Carries across devices",
-                    "When you're signed in, the commitment syncs so switching devices " +
-                        "won't dodge the lock."
-                )
-            )
-            if (expanded) {
-                // This section is revealed by a deliberate tap. Render its content
-                // immediately instead of stacking entrance animations inside a card.
-                rules.forEach { (icon, title, body) ->
-                    StrictRuleRow(icon = icon, title = title, body = body)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun StrictRuleRow(icon: ImageVector, title: String, body: String) {
-    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        IconBadge(
-            icon = icon,
-            size = 36.dp,
-            containerColor = MaterialTheme.colorScheme.secondaryContainer,
-            contentColor = MaterialTheme.colorScheme.onSecondaryContainer
-        )
-        Column(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(2.dp)
-        ) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
-                color = MaterialTheme.colorScheme.onSurface
-            )
-            Text(
-                text = body,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-    }
-}
-
-@Composable
-private fun StrictCooldownText(settings: SettingsRepository, endsAt: Long) {
-    var cooldownText by remember { mutableStateOf("") }
-    val lifecycleOwner = LocalLifecycleOwner.current
-    // Repeat only while RESUMED so a backgrounded screen stops refreshing its state.
-    LaunchedEffect(endsAt) {
-        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.RESUMED) {
-            while (true) {
-                val remaining = if (endsAt > 0L) {
-                    (endsAt - System.currentTimeMillis()).coerceAtLeast(0L)
-                } else try { settings.lockdownCooldownRemainingMs() } catch (_: Exception) { 0L }
-                cooldownText = if (remaining > 0L) {
-                    "Ends in ${formatLockdownRemaining(remaining)}"
-                } else {
-                    "Disable available now"
-                }
-                if (remaining == 0L) {
-                    if (endsAt > 0L) settings.expireLockdownIfNeeded()
-                    break
-                }
-                // The label displays whole minutes. Wake at the next displayed
-                // minute boundary or expiry, rather than recomposing every second.
-                delay(if (remaining < 60_000L) remaining else (remaining % 60_000L + 1L).coerceAtMost(60_000L))
-            }
-        }
-    }
-    if (cooldownText.isNotBlank()) {
-        Text(
-            text = cooldownText,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSecondaryContainer
-        )
-    }
 }
 
 /**

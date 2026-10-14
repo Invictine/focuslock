@@ -3,6 +3,7 @@ package com.focuslock.app.sync
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.focuslock.app.data.model.TickTickConnection
+import com.focuslock.app.location.HomePlace
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import okhttp3.ConnectionPool
@@ -165,6 +166,9 @@ data class GroupsState(val groups: List<TargetGroup>, val updatedAt: Long)
  */
 data class SaveGroupsResult(val applied: Boolean, val updatedAt: Long = 0L)
 
+/** Account-wide saved place; home-only consent remains local to each device. */
+data class RemoteHomeLocation(val revision: Long, val place: HomePlace?, val updatedAt: Long)
+
 /** Cross-device usage totals for the requested date window (see [ConvexSyncClient.getUsageSummary]). */
 data class UsageSummary(
     val totalTrackedSeconds: Long,
@@ -257,6 +261,42 @@ class ConvexSyncClient(
         return raw.getBoolean("applied") to raw.getLong("revision")
     }
 
+    suspend fun getSavedHomeLocation(): RemoteHomeLocation? {
+        val raw = post("/api/query", "homeLocation:getSaved", JSONObject()) ?: return null
+        val place = raw.optJSONObject("place")?.let {
+            HomePlace(
+                label = it.optString("label", ""),
+                latitude = it.optDouble("latitude", Double.NaN),
+                longitude = it.optDouble("longitude", Double.NaN),
+                radiusMeters = it.optDouble("radiusMeters", Double.NaN).toFloat(),
+            )
+        }
+        return RemoteHomeLocation(raw.optLong("revision", -1L), place, raw.optLong("updatedAt", -1L))
+            .takeIf { it.revision >= 0L && it.updatedAt >= 0L && (it.place == null || validHomePlace(it.place)) }
+    }
+
+    suspend fun saveHomeLocation(
+        expectedRevision: Long,
+        place: HomePlace?,
+        updatedAt: Long,
+    ): Pair<Boolean, Long>? {
+        val encodedPlace = place?.let {
+            JSONObject().put("label", it.label).put("latitude", it.latitude)
+                .put("longitude", it.longitude).put("radiusMeters", it.radiusMeters.toDouble())
+        } ?: JSONObject.NULL
+        val raw = post("/api/mutation", "homeLocation:saveSaved", JSONObject()
+            .put("expectedRevision", expectedRevision)
+            .put("place", encodedPlace)
+            .put("updatedAt", updatedAt)) ?: return null
+        val revision = raw.optLong("revision", -1L).takeIf { it >= 0L } ?: return null
+        return raw.optBoolean("applied", false) to revision
+    }
+
+    private fun validHomePlace(place: HomePlace): Boolean = place.label.isNotBlank() &&
+        place.label.length <= 120 && place.latitude.isFinite() && place.latitude in -90.0..90.0 &&
+        place.longitude.isFinite() && place.longitude in -180.0..180.0 &&
+        place.radiusMeters.isFinite() && place.radiusMeters in 25f..5_000f
+
     suspend fun getSnapshot(
         cached: Snapshot? = null,
         usageDate: String? = null,
@@ -291,6 +331,18 @@ class ConvexSyncClient(
 
     suspend fun getStrictGuardian(): JSONObject? =
         post("/api/query", "strictApproval:getGuardian", JSONObject())
+
+    suspend fun getStrictAccessConfig(): JSONObject? =
+        post("/api/query", "strictAccess:getConfig", JSONObject())
+
+    suspend fun configureStrictAccess(config: JSONObject): JSONObject? =
+        post("/api/action", "strictAccess:configure", config)
+
+    suspend fun unlockStrictAccess(sessionId: String, endsAt: Long, pin: String? = null, charging: Boolean = false): JSONObject? {
+        val args = JSONObject().put("strictSessionId", sessionId).put("strictEndsAt", endsAt).put("charging", charging)
+        if (pin != null) args.put("pin", pin)
+        return post("/api/action", "strictAccess:unlock", args)
+    }
 
     suspend fun configureStrictGuardian(email: String): Boolean =
         post("/api/mutation", "strictApproval:configureGuardian", JSONObject().put("email", email)) != null

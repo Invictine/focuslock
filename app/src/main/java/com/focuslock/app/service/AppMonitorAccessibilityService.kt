@@ -18,6 +18,7 @@ import android.view.accessibility.AccessibilityWindowInfo
 import android.graphics.Rect
 import android.hardware.display.DisplayManager
 import android.os.SystemClock
+import android.widget.Toast
 import com.focuslock.app.reminder.RemovalReminderController
 import com.focuslock.app.reminder.RemovalReminderStore
 import androidx.core.content.ContextCompat
@@ -118,6 +119,9 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     private var lastAccessibilityEventPackage: String? = null
 
     @Volatile
+    private var lastAccessibilityEventWindowClass: String? = null
+
+    @Volatile
     private var lastAccessibilityEventType: Int = 0
 
     @Volatile
@@ -151,6 +155,11 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     private val removalReminderStore by lazy { RemovalReminderStore(applicationContext) }
     private var lastRemovalScanMs = -1L
     private var removalScanJob: Job? = null
+    private var lastStrictNoticeAtMs = 0L
+    private val strictEnforcementTimes = mutableMapOf<String, Long>()
+    private var strictWindowProtectionJob: Job? = null
+    private var lastStrictOverviewScanMs = -1L
+    private var strictSplitProtectionJob: Job? = null
 
     // Block-log dedupe: at most one event per (package, reason) per app entry.
     private val blockLogLock = Any()
@@ -260,6 +269,8 @@ class AppMonitorAccessibilityService : AccessibilityService() {
 
         private const val SCHEDULE_REFRESH_INTERVAL_MS = 30_000L
         private const val POLICY_ACTIVITY_REFRESH_INTERVAL_MS = 60_000L
+        private const val STRICT_ENFORCEMENT_THROTTLE_MS = 1_250L
+        private const val STRICT_NOTICE_THROTTLE_MS = 2_500L
 
         /** TickTick foreground is where the frog gets done — never frog-blocked. */
         private const val TICKTICK_PACKAGE = "com.ticktick.task"
@@ -588,13 +599,16 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         if (event == null) return
 
         lastAccessibilityEventPackage = event.packageName?.toString()
+        lastAccessibilityEventWindowClass = event.className?.toString()
         lastAccessibilityEventType = event.eventType
         lastAccessibilityEventTimeMs = System.currentTimeMillis()
 
         // Window layout/focus events can have no package (Samsung pop-up view/DeX).
         // Resolve actual application windows before reading an event package.
         if (event.eventType == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
-            refreshForegroundWindow(readInteractiveAppWindows())
+            val appWindows = readInteractiveAppWindows()
+            refreshForegroundWindow(appWindows)
+            enforceStrictSplitScreenIfNeeded()
             requestWindowReconciliation()
             return
         }
@@ -621,9 +635,11 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         if (eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             val observedClass = billingWindowTracker.observe(eventPackage, event.windowId, event.className?.toString())
             if (event.windowId >= 0) windowClasses[event.windowId] = eventPackage to observedClass
+            enforceStrictWindowIfNeeded(eventPackage, observedClass)
             val appWindows = readInteractiveAppWindows()
             val foreground = InteractiveWindowPolicy.foreground(appWindows)
             refreshForegroundWindow(appWindows)
+            enforceStrictSplitScreenIfNeeded()
             requestWindowReconciliation()
             // A background popup or Samsung caption event is not a foreground switch.
             if (foreground != null && foreground.packageName != eventPackage) return
@@ -637,6 +653,14 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             // Back can finish before queued events from the closed destination arrive.
             // Ignore only a demonstrably stale event; a real redirect is still checked.
             if (activePackage != null && activePackage != eventPackage) return
+        }
+        if (eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED &&
+            StrictProtectionPolicy.isKnownLauncherPackage(eventPackage)) {
+            val scanAt = SystemClock.elapsedRealtime()
+            if (lastStrictOverviewScanMs < 0L || scanAt - lastStrictOverviewScanMs >= 250L) {
+                lastStrictOverviewScanMs = scanAt
+                enforceStrictWindowIfNeeded(eventPackage, null)
+            }
         }
         val isRemovalPromptEvent = eventPackage in RemovalAttemptPolicy.promptPackages
         val isForegroundBrowserEvent = eventPackage in BROWSER_PACKAGES &&
@@ -678,7 +702,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 lastRemovalScanMs = -1L
             }
             if (checkRemovalReminder(eventPackage)) return
-            if (removalReminderStore.enabled && removalScanJob?.isActive != true) {
+            if (removalScanJob?.isActive != true) {
                 removalScanJob = serviceScope.launch(Dispatchers.Main) {
                     repeat(3) {
                         delay(550)
@@ -935,7 +959,6 @@ class AppMonitorAccessibilityService : AccessibilityService() {
     }
 
     private fun checkRemovalReminder(packageName: String): Boolean {
-        if (!removalReminderStore.enabled || RemovalReminderController.isSuppressed(this)) return false
         val now = SystemClock.elapsedRealtime()
         if (lastRemovalScanMs >= 0 && now - lastRemovalScanMs < 500L) return false
         lastRemovalScanMs = now
@@ -963,8 +986,8 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             val windowClass = windowClasses[root.windowId]
                 ?.takeIf { it.first == packageName }?.second ?: root.className?.toString()
             if (RemovalAttemptPolicy.matches(packageName, windowClass, texts)) {
-                // A voluntary reminder: Continue returns to the untouched system dialog.
-                return RemovalReminderController.show(this, "uninstall", fromForeground = true)
+                handleTargetedRemovalPrompt(packageName, windowClass, texts, "uninstall")
+                return true
             }
         } catch (e: Exception) {
             Log.w(TAG, "Could not inspect uninstall dialog", e)
@@ -972,6 +995,165 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             if (canRecycleNodes) root.recycle()
         }
         return false
+    }
+
+    private fun enforceStrictWindowIfNeeded(packageName: String, windowClass: String?) {
+        strictWindowProtectionJob?.cancel()
+        strictWindowProtectionJob = serviceScope.launch(Dispatchers.Main.immediate) {
+            val reason = try { strictWindowBlockReason(packageName, windowClass) }
+            catch (error: kotlinx.coroutines.CancellationException) { throw error }
+            catch (_: Exception) { null } ?: return@launch
+            // Settings remains in the normal foreground path, whose app-window
+            // decision launches the FocusLock blocker with this strict reason.
+            if (reason == StrictProtectionPolicy.BLOCK_SETTINGS) return@launch
+            if (!isCurrentWindow(packageName, windowClass)) return@launch
+            if (strictWindowBlockReason(packageName, windowClass) != reason) return@launch
+            if (!allowStrictEnforcementNow(reason)) return@launch
+            when (reason) {
+                StrictProtectionPolicy.BLOCK_RECENTS -> {
+                    if (!performGlobalAction(GLOBAL_ACTION_BACK)) performGlobalAction(GLOBAL_ACTION_HOME)
+                }
+            }
+            showStrictProtectionNotice(reason)
+        }
+    }
+
+    private fun enforceStrictSplitScreenIfNeeded() {
+        strictSplitProtectionJob?.cancel()
+        strictSplitProtectionJob = serviceScope.launch(Dispatchers.Main.immediate) {
+            val app = FocusLockApplication.instance
+            val config = try { app.strictAccessRepository.getConfig() }
+            catch (error: kotlinx.coroutines.CancellationException) { throw error }
+            catch (_: Exception) { return@launch }
+            if (!config.blockSplitScreen) return@launch
+            val active = try {
+                app.settingsRepository.isLockdownModeEnabled() ||
+                    app.strictModeAutomationRepository.isActivationActiveNow()
+            } catch (error: kotlinx.coroutines.CancellationException) { throw error }
+            catch (_: Exception) { false }
+            if (!active) return@launch
+
+            val appWindows = readInteractiveAppWindows()
+            val strictWindows = appWindows.map { window ->
+                StrictWindow(
+                    packageName = window.packageName,
+                    kind = if (window.isAppWindow) StrictWindow.Kind.APPLICATION else StrictWindow.Kind.SYSTEM,
+                    displayId = window.displayId,
+                    left = window.bounds.left,
+                    top = window.bounds.top,
+                    right = window.bounds.right,
+                    bottom = window.bounds.bottom,
+                )
+            }
+            val isSplit = StrictProtectionPolicy.isSplitScreen(
+                strictWindows,
+                displayBounds = { displayId ->
+                    val bounds = displayBounds(displayId)
+                    StrictDisplayBounds(bounds.right, bounds.bottom)
+                },
+                ownPackage = applicationContext.packageName,
+                registeredImePackages = DeviceAccessPolicy.keyboardPackages(this@AppMonitorAccessibilityService),
+            )
+            if (!isSplit || !allowStrictEnforcementNow(StrictProtectionPolicy.BLOCK_SPLIT_SCREEN)) return@launch
+            performGlobalAction(GLOBAL_ACTION_HOME)
+            showStrictProtectionNotice(StrictProtectionPolicy.BLOCK_SPLIT_SCREEN)
+        }
+    }
+
+    private suspend fun strictWindowBlockReason(packageName: String, windowClass: String?): String? {
+        // Only optional Settings/overview protections need this lookup. Ordinary app
+        // transitions must not wait for a saved-place provider request.
+        val overviewPackage = packageName == "com.android.systemui" || StrictProtectionPolicy.isKnownLauncherPackage(packageName)
+        if (packageName != "com.android.settings" && !overviewPackage) return null
+        val app = FocusLockApplication.instance
+        val config = app.strictAccessRepository.getConfig()
+        if (packageName == "com.android.settings" && !config.blockDeviceSettings) return null
+        if (overviewPackage && !config.blockRecents) return null
+        val active = app.settingsRepository.isLockdownModeEnabled() ||
+            app.strictModeAutomationRepository.isActivationActiveNow()
+        if (!active) return null
+        val visibleIds = if (overviewPackage) {
+            val root = runCatching { rootInActiveWindow }.getOrNull()
+            try {
+                if (root?.packageName?.toString() == packageName) StrictOverviewDetector.visibleOverviewViewIds(root)
+                else emptySet()
+            } finally { if (canRecycleNodes) root?.recycle() }
+        } else emptySet()
+        return StrictProtectionPolicy.windowBlockReason(
+            packageName = packageName,
+            windowClass = windowClass,
+            config = config,
+            ownPackage = applicationContext.packageName,
+            registeredImePackages = DeviceAccessPolicy.keyboardPackages(this),
+            visibleOverviewViewIds = visibleIds,
+        )
+    }
+
+    private fun allowStrictEnforcementNow(reason: String): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        val lastTime = strictEnforcementTimes[reason] ?: 0L
+        if (now - lastTime < STRICT_ENFORCEMENT_THROTTLE_MS) return false
+        strictEnforcementTimes[reason] = now
+        return true
+    }
+
+    private fun handleTargetedRemovalPrompt(
+        packageName: String,
+        windowClass: String?,
+        texts: List<String>,
+        reminderReason: String,
+    ) {
+        serviceScope.launch(Dispatchers.Main.immediate) {
+            val app = FocusLockApplication.instance
+            val strictGuard = try {
+                val active = app.settingsRepository.isLockdownModeEnabled() ||
+                    app.strictModeAutomationRepository.isActivationActiveNow()
+                active && StrictProtectionPolicy.targetedRemovalReason(
+                    packageName, windowClass, texts, app.strictAccessRepository.getConfig(),
+                ) != null
+            } catch (error: kotlinx.coroutines.CancellationException) { throw error }
+            catch (_: Exception) { false }
+            if (strictGuard) {
+                if (isCurrentWindow(packageName, windowClass)) {
+                    if (allowStrictEnforcementNow(StrictProtectionPolicy.PREVENT_REMOVAL)) performGlobalAction(GLOBAL_ACTION_BACK)
+                    showStrictProtectionNotice(StrictProtectionPolicy.PREVENT_REMOVAL)
+                }
+            } else if (removalReminderStore.enabled && !RemovalReminderController.isSuppressed(this@AppMonitorAccessibilityService)) {
+                // Outside the opt-in Strict guard, retain the existing reminder flow.
+                RemovalReminderController.show(this@AppMonitorAccessibilityService, reminderReason, fromForeground = true)
+            }
+        }
+    }
+
+    private fun isCurrentWindow(packageName: String, expectedClass: String?): Boolean {
+        val root = runCatching { rootInActiveWindow }.getOrNull()
+        if (root != null) {
+            try {
+                if (root.packageName?.toString() == packageName) {
+                    val actualClass = windowClasses[root.windowId]
+                        ?.takeIf { it.first == packageName }?.second ?: root.className?.toString()
+                    if (expectedClass == null || actualClass == expectedClass) return true
+                }
+            } finally { if (canRecycleNodes) root.recycle() }
+        }
+        return lastAccessibilityEventPackage == packageName &&
+            lastAccessibilityEventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            System.currentTimeMillis() - lastAccessibilityEventTimeMs in 0L..1_000L &&
+            (expectedClass == null || lastAccessibilityEventWindowClass == expectedClass)
+    }
+
+    private fun showStrictProtectionNotice(reason: String) {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastStrictNoticeAtMs < STRICT_NOTICE_THROTTLE_MS) return
+        lastStrictNoticeAtMs = now
+        val message = when (reason) {
+            StrictProtectionPolicy.BLOCK_SETTINGS -> "Device settings are locked by Strict Mode."
+            StrictProtectionPolicy.BLOCK_RECENTS -> "Recent apps are disabled by Strict Mode."
+            StrictProtectionPolicy.BLOCK_SPLIT_SCREEN -> "Split screen is disabled by Strict Mode."
+            StrictProtectionPolicy.PREVENT_REMOVAL -> "FocusLock protection cannot be removed during Strict Mode."
+            else -> "This action is blocked by Strict Mode."
+        }
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     }
 
     /**
@@ -1077,6 +1259,10 @@ class AppMonitorAccessibilityService : AccessibilityService() {
 
     /** Shared access decision for foreground enforcement and every visible popup. */
     private suspend fun appWindowDecision(packageName: String, windowClass: String?): String {
+        val strictReason = try { strictWindowBlockReason(packageName, windowClass) }
+        catch (error: kotlinx.coroutines.CancellationException) { throw error }
+        catch (_: Exception) { null }
+        if (strictReason != null) return strictReason
         if (DeviceAccessPolicy.isExempt(this, packageName)) return "device_access_exempt"
         if (AppUpdateAccessPolicy.isUpdateApp(packageName)) return "update_access_exempt"
         val app = FocusLockApplication.instance
@@ -1112,7 +1298,8 @@ class AppMonitorAccessibilityService : AccessibilityService() {
 
     private fun blockReasonForDecision(decision: String): String? = when (decision) {
         "app_limit", "group_limit" -> "limit"
-        "permanent", "nuke", "frog", "schedule", "manual" -> decision
+        "permanent", "nuke", "frog", "schedule", "manual",
+        StrictProtectionPolicy.BLOCK_SETTINGS -> decision
         else -> null
     }
 
@@ -1823,9 +2010,13 @@ class AppMonitorAccessibilityService : AccessibilityService() {
 
     private suspend fun triggerBlocker(blockedPackage: String, website: String? = null, reason: String? = null) {
         val entry = foregroundEntry
-        if (DeviceAccessPolicy.isExempt(this, blockedPackage)) return
+        val strictSettingsOverride = reason == StrictProtectionPolicy.BLOCK_SETTINGS
+        if (strictSettingsOverride &&
+            strictWindowBlockReason(blockedPackage, foregroundWindowClass) != StrictProtectionPolicy.BLOCK_SETTINGS
+        ) return
+        if (!strictSettingsOverride && DeviceAccessPolicy.isExempt(this, blockedPackage)) return
         if (AppUpdateAccessPolicy.isUpdateApp(blockedPackage)) return
-        if (!FocusLockApplication.instance.homeLocationRepository.shouldEnforceOnAppSwitch(permanent = reason == "permanent")) return
+        if (!strictSettingsOverride && !FocusLockApplication.instance.homeLocationRepository.shouldEnforceOnAppSwitch(permanent = reason == "permanent")) return
         if (currentForegroundPackage != blockedPackage || !isScreenInteractive()) return
         val candidate = redirectCandidate?.takeIf {
             website == null && reason == FrogCoordinator.REASON_FROG && it.targetPackage == blockedPackage
@@ -1848,11 +2039,12 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         // the best chance of succeeding when called from serviceScope (Default).
         withContext(Dispatchers.Main) {
             if (foregroundEntry != entry || currentForegroundPackage != blockedPackage || !isScreenInteractive()) return@withContext
-            if (DeviceAccessPolicy.isExempt(this@AppMonitorAccessibilityService, blockedPackage)) return@withContext
+            if (!strictSettingsOverride && DeviceAccessPolicy.isExempt(this@AppMonitorAccessibilityService, blockedPackage)) return@withContext
             if (activeWindowPackage() != blockedPackage) return@withContext
             // A check begun before Frog armed may resume after a settings/store read.
             // Apply the current policy at the actual launch boundary as well.
-            val enforceFrog = reason != "permanent" && (reason == FrogCoordinator.REASON_FROG || isFrogLockActive())
+            val enforceFrog = !strictSettingsOverride && reason != "permanent" &&
+                (reason == FrogCoordinator.REASON_FROG || isFrogLockActive())
             if (enforceFrog) {
                 // TickTick's pending purchase resumes inside the Play Store package.
                 // Permit only its billing activity; permanent/Nuke rules still win.
@@ -1934,11 +2126,15 @@ class AppMonitorAccessibilityService : AccessibilityService() {
                 }
             }
             if (foregroundEntry != entry || currentForegroundPackage != blockedPackage) return@withContext
+            if (strictSettingsOverride &&
+                strictWindowBlockReason(blockedPackage, foregroundWindowClass) != StrictProtectionPolicy.BLOCK_SETTINGS
+            ) return@withContext
             val launch = entry to Triple(blockedPackage, website, intent.getStringExtra(EXTRA_BLOCK_REASON))
             // A denied background launch can return normally. Coalesce only the
             // pending launch window so later enforcement can retry if necessary.
             val launchAt = SystemClock.elapsedRealtime()
             if (lastBlockerLaunch == launch && launchAt - lastBlockerLaunchAtMs in 0L..750L) return@withContext
+            if (strictSettingsOverride) showStrictProtectionNotice(StrictProtectionPolicy.BLOCK_SETTINGS)
             startActivity(intent, ActivityOptions.makeCustomAnimation(this@AppMonitorAccessibilityService, 0, 0).toBundle())
             lastBlockerObservedAtMs = foregroundObservedAtMs
             lastBlockerLaunch = launch

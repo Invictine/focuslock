@@ -63,6 +63,7 @@ import com.focuslock.app.data.repository.BlockSchedule
 import com.focuslock.app.data.repository.FrogRepository
 import com.focuslock.app.data.repository.SettingsRepository
 import com.focuslock.app.ui.dashboard.home.FocusHomeStyle
+import com.focuslock.app.ui.components.UiTokens
 import com.focuslock.app.service.TickTickApiClient
 import com.focuslock.app.service.TickTickAuthConfig
 import com.focuslock.app.service.TickTickOAuthLoopbackServer
@@ -94,6 +95,7 @@ fun SettingsScreen(
     onPageTitleChanged: (String) -> Unit = {},
     highlightKind: PermissionKind? = null,
     onOpenDebug: () -> Unit = {},
+    onSetupPermissions: () -> Unit = {},
     onReplayOnboarding: () -> Unit = {},
     onboardingComplete: Boolean = false,
 ) {
@@ -493,24 +495,24 @@ fun SettingsScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
             .verticalScroll(scrollState)
-            .padding(horizontal = 16.dp)
-            .padding(top = 16.dp, bottom = 32.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+            .padding(horizontal = UiTokens.ScreenPadding)
+            .padding(top = UiTokens.ItemGap, bottom = 32.dp),
+        verticalArrangement = Arrangement.spacedBy(UiTokens.ItemGap)
     ) {
         if (selectedSection == SettingsSection.OVERVIEW) {
             SettingsDestinationRow(
                 title = "Account & devices",
-                subtitle = "Manage your account and signed-in devices",
+                subtitle = "Account details and signed-in devices",
                 onClick = { onOpenAccount() }
             )
             SettingsDestinationRow(
                 title = "Connections",
-                subtitle = if (isTickTickConnected) "TickTick connected · $lastSyncText" else "Connect TickTick and manage sync",
+                subtitle = if (isTickTickConnected) "TickTick · $lastSyncText" else "Connect TickTick and sync focus sessions",
                 onClick = { selectedSection = SettingsSection.CONNECTIONS }
             )
             SettingsDestinationRow(
                 title = "Daily priority routine",
-                subtitle = "Eat the Frog settings and essential apps",
+                subtitle = "Set your Frog plan and essential apps",
                 onClick = { selectedSection = SettingsSection.ROUTINE }
             )
             val permissionStates = listOf(isAccessibilityOn, isUsageOn, isOverlayOn, isNotifOn, isBatteryIgnored, isDeviceAdminOn)
@@ -524,7 +526,7 @@ fun SettingsScreen(
             )
             SettingsDestinationRow(
                 title = "Preferences",
-                subtitle = "Goals, conversion, reminders, and backups",
+                subtitle = "Goals, reminders, appearance, and backups",
                 onClick = { selectedSection = SettingsSection.PREFERENCES }
             )
         }
@@ -535,16 +537,19 @@ fun SettingsScreen(
             shape = MaterialTheme.shapes.large,
             modifier = Modifier.fillMaxWidth()
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Explore FocusLock", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold))
-                    Text(if (onboardingComplete) "Replay the guide to every feature and setup." else "Continue the guide from where you left off.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Explore FocusLock", style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold))
+                Text(
+                    if (onboardingComplete) "Review the setup guide and key features." else "Continue the setup guide where you left off.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                TextButton(onClick = onReplayOnboarding, contentPadding = PaddingValues(horizontal = 0.dp, vertical = 4.dp)) {
+                    Text(if (onboardingComplete) "Replay guide" else "Resume guide")
                 }
-                TextButton(onClick = onReplayOnboarding) { Text(if (onboardingComplete) "Replay guide" else "Resume guide") }
             }
         }
 
@@ -558,7 +563,7 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(
-                modifier = Modifier.padding(16.dp),
+                modifier = Modifier.padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
                 RatioSliderCard(authViewModel)
@@ -579,7 +584,7 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(
-                modifier = Modifier.padding(16.dp),
+                modifier = Modifier.padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -664,7 +669,7 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(
-                modifier = Modifier.padding(16.dp),
+                modifier = Modifier.padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -709,7 +714,7 @@ fun SettingsScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Row(
-                            modifier = Modifier.padding(16.dp),
+                            modifier = Modifier.padding(20.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Box(
@@ -869,7 +874,7 @@ fun SettingsScreen(
             shape = MaterialTheme.shapes.large,
             modifier = Modifier.fillMaxWidth()
         ) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 // Boundaries Lock
                 if (boundariesLock) {
                     Card(
@@ -933,7 +938,7 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(
-                modifier = Modifier.padding(16.dp),
+                modifier = Modifier.padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -952,10 +957,25 @@ fun SettingsScreen(
                     }
                     Spacer(modifier = Modifier.width(12.dp))
                     Text(
-                        text = "System Protection Status",
+                        text = "System access",
                         style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
                         color = MaterialTheme.colorScheme.onSurface
                     )
+                }
+
+                Text(
+                    "Follow the guide to grant the access FocusLock needs.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                FilledTonalButton(
+                    onClick = onSetupPermissions,
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                    shape = MaterialTheme.shapes.medium
+                ) {
+                    Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Set up permissions", maxLines = 2)
                 }
 
                 PixelPermissionItem(
@@ -1065,7 +1085,8 @@ fun SettingsScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable(onClick = onOpenDebug)
-                    .padding(16.dp),
+                    .heightIn(min = 72.dp)
+                    .padding(20.dp),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -2561,7 +2582,10 @@ private fun SettingsDestinationRow(
         shape = MaterialTheme.shapes.large
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 72.dp)
+                .padding(horizontal = 20.dp, vertical = 16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Column(

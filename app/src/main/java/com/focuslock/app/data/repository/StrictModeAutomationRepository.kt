@@ -42,7 +42,10 @@ data class StrictRecurringWindow(
 )
 
 /** Persisted activation rules for Strict Mode. UI owns presentation; enforcement owns lookup. */
-class StrictModeAutomationRepository(private val context: Context) {
+class StrictModeAutomationRepository(
+    private val context: Context,
+    private val timedCommitmentActive: suspend () -> Boolean = { false },
+) {
     private val locationSource = DeviceLocationSource(context)
     private val json = Json { ignoreUnknownKeys = true }
     object Keys {
@@ -69,6 +72,7 @@ class StrictModeAutomationRepository(private val context: Context) {
     }
 
     suspend fun upsertPlace(rule: StrictPlaceRule) {
+        if (timedCommitmentActive() || isActivationActiveNow()) return
         if (rule.id.isBlank()) return
         require(rule.label.isNotBlank() && rule.latitude.isFinite() && rule.latitude in -90.0..90.0 &&
             rule.longitude.isFinite() && rule.longitude in -180.0..180.0 &&
@@ -80,12 +84,16 @@ class StrictModeAutomationRepository(private val context: Context) {
         _places.value = next; loaded = true
     }
     suspend fun deletePlace(id: String) {
+        if (timedCommitmentActive() || isActivationActiveNow()) return
         val next = currentPlaces().filterNot { it.id == id }
         context.strictAutomationStore.edit { it[Keys.PLACES] = json.encodeToString(next) }
         _places.value = next
     }
     suspend fun upsertRecurringWindow(rule: StrictRecurringWindow) {
+        if (timedCommitmentActive() || isActivationActiveNow()) return
         if (rule.id.isBlank()) return
+        require(rule.label.isNotBlank() && rule.daysOfWeek.isNotEmpty() && rule.daysOfWeek.all { it in 1..7 } &&
+            rule.startMinuteOfDay in 0..1439 && rule.endMinuteOfDay in 0..1439 && rule.startMinuteOfDay != rule.endMinuteOfDay)
         val next = currentWindows().toMutableList()
         val index = next.indexOfFirst { it.id == rule.id }
         if (index >= 0) next[index] = rule else next += rule
@@ -93,6 +101,7 @@ class StrictModeAutomationRepository(private val context: Context) {
         _windows.value = next; loaded = true
     }
     suspend fun deleteRecurringWindow(id: String) {
+        if (timedCommitmentActive() || isActivationActiveNow()) return
         val next = currentWindows().filterNot { it.id == id }
         context.strictAutomationStore.edit { it[Keys.WINDOWS] = json.encodeToString(next) }
         _windows.value = next
@@ -105,6 +114,9 @@ class StrictModeAutomationRepository(private val context: Context) {
         currentPlaces()
         return isInsideConfiguredPlace()
     }
+
+    suspend fun activeScheduleEnd(now: ZonedDateTime = ZonedDateTime.now()): Long =
+        activeWindowEndAt(currentWindows(), now)
 
     private suspend fun currentPlaces(): List<StrictPlaceRule> = placesFlow.first()
     private suspend fun currentWindows(): List<StrictRecurringWindow> = recurringWindowsFlow.first()
@@ -128,6 +140,14 @@ class StrictModeAutomationRepository(private val context: Context) {
     }
 
     companion object {
+        /** End of the longest currently active window, including midnight crossings. */
+        fun activeWindowEndAt(windows: List<StrictRecurringWindow>, now: ZonedDateTime): Long =
+            windows.filter { activeWindowAt(listOf(it), now) }.maxOfOrNull { window ->
+                var end = now.toLocalDate().atStartOfDay(now.zone).plusMinutes(window.endMinuteOfDay.toLong())
+                if (!end.isAfter(now)) end = end.plusDays(1)
+                end.toInstant().toEpochMilli()
+            } ?: 0L
+
         fun activeWindowAt(windows: List<StrictRecurringWindow>, now: ZonedDateTime): Boolean {
             val minute = now.hour * 60 + now.minute
             val today = now.dayOfWeek.value

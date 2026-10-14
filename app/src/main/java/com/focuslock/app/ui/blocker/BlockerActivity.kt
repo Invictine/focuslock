@@ -49,6 +49,7 @@ class BlockerActivity : ComponentActivity() {
 
     private var creditReceiver: BroadcastReceiver? = null
     private var homeEnforcementAllowed by mutableStateOf(false)
+    private val strictSettingsAllowed = mutableStateOf(false)
 
     /**
      * Frog hard-lock focus session, owned by the activity so it survives every
@@ -128,6 +129,17 @@ class BlockerActivity : ComponentActivity() {
                     }
                 }
                 while (true) {
+                    if (isStrictSettingsTarget()) {
+                        homeEnforcementAllowed = false
+                        strictSettingsAllowed.value = isStrictSettingsProtectionActiveNow()
+                        if (!strictSettingsAllowed.value) {
+                            finish()
+                            return@repeatOnLifecycle
+                        }
+                        delay(1_000L)
+                        continue
+                    }
+                    strictSettingsAllowed.value = false
                     if (!FocusLockApplication.instance.homeLocationRepository.shouldEnforceOnAppSwitch(permanent = isPermanentBlockNow())) {
                         homeEnforcementAllowed = false
                         discardFrogFocusSession()
@@ -167,9 +179,9 @@ class BlockerActivity : ComponentActivity() {
         // balance-at-block baseline) unlocks — banked time that already existed when the
         // block started cannot dismiss the screen.
         // FROG HARD LOCK: skipped entirely — credits never lift the frog lock.
-        if (!isPermanentBlock() && !isFrogBlocked()) {
+        if (!isPermanentBlock() && !isFrogBlocked() && !isStrictSettingsTarget()) {
             lifecycleScope.launch {
-                if (isPermanentBlockNow()) return@launch
+                if (isPermanentBlockNow() || isStrictSettingsTarget()) return@launch
                 val bank = FocusLockApplication.instance.creditBankRepository
                 val balanceNow = try { bank.getBalanceSeconds() } catch (_: Exception) { 0L }
                 val prefs = blockSessionPrefs()
@@ -179,7 +191,7 @@ class BlockerActivity : ComponentActivity() {
                     .putLong(KEY_BALANCE_AT_BLOCK, balanceNow)
                     .putLong(KEY_BLOCK_STARTED_AT, System.currentTimeMillis())
                     .apply()
-                if (balanceAtPreviousBlock != Long.MIN_VALUE && balanceNow > balanceAtPreviousBlock) {
+                if (balanceAtPreviousBlock != Long.MIN_VALUE && balanceNow > balanceAtPreviousBlock && !isStrictSettingsTarget()) {
                     val earnedMinutes = ((balanceNow - balanceAtPreviousBlock) + 59) / 60
                     Toast.makeText(
                         this@BlockerActivity,
@@ -198,6 +210,7 @@ class BlockerActivity : ComponentActivity() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 val earned = intent?.getIntExtra("earnedMinutes", 0) ?: 0
                 if (earned <= 0) return
+                if (isStrictSettingsTarget()) return
                 // FROG HARD LOCK: credits are banked but never dismiss the frog lock.
                 // Read dynamically: a singleTask instance may have been re-targeted by
                 // onNewIntent since this receiver was registered.
@@ -212,7 +225,8 @@ class BlockerActivity : ComponentActivity() {
                 lifecycleScope.launch {
                     // Re-read the dedicated store here: the activity may have been
                     // created before the DataStore collector warmed its mirror.
-                    if (isPermanentBlockNow()) {
+                    if (isPermanentBlockNow() || isStrictSettingsTarget()) {
+                        if (isStrictSettingsTarget()) return@launch
                         Toast.makeText(
                             this@BlockerActivity,
                             "Permanently blocked: credits saved, this app stays locked.",
@@ -247,7 +261,14 @@ class BlockerActivity : ComponentActivity() {
             .show(androidx.core.view.WindowInsetsCompat.Type.statusBars())
         setContent {
             FocusLockTheme {
-                if (homeEnforcementAllowed) {
+                if (StrictSettingsBlockerPolicy.isTarget(currentReason, currentPackage, currentWebsite)) {
+                    if (strictSettingsAllowed.value) {
+                        StrictSettingsBlockerScreen(
+                            onOpenFocusLock = { openFocusLock() },
+                            onGoHome = { goHome() },
+                        )
+                    }
+                } else if (homeEnforcementAllowed) {
                     if (currentReason == FrogCoordinator.REASON_FROG) {
                         FrogFocusScreen(
                             onOpenFocusLock = { openFocusLock() },
@@ -306,6 +327,7 @@ class BlockerActivity : ComponentActivity() {
         val previousTarget = Triple(blockedPackage, blockedWebsite, blockReason)
         setIntent(intent)
         readBlockTargetFromIntent()
+        strictSettingsAllowed.value = false
         loadReturnAppFromIntent()
         // First-frame name from binder-free sources; the async label lookup follows.
         resolvedAppName.value = blockedWebsite ?: fastAppNameFromPackage(blockedPackage)
@@ -337,7 +359,7 @@ class BlockerActivity : ComponentActivity() {
         val permanentStore = FocusLockApplication.instance.permanentBlocksRepository
         val permanentTarget = blockedWebsite?.let { permanentStore.isPermanentlyBlockedDomain(it) }
             ?: permanentStore.isPermanentlyBlocked(blockedPackage)
-        if (blockReason != "permanent" && permanentTarget) {
+        if (blockReason != "permanent" && blockReason != "strict_settings" && permanentTarget) {
             blockReason = "permanent"
         }
         if (isFrogBlocked()) com.focuslock.app.service.FrogHomeLauncher.captureFallback(this)
@@ -524,6 +546,30 @@ class BlockerActivity : ComponentActivity() {
 
     /** True when the current block reason is the eat-the-frog hard lock. */
     private fun isFrogBlocked(): Boolean = blockReason == FrogCoordinator.REASON_FROG
+
+    private fun isStrictSettingsTarget(): Boolean = StrictSettingsBlockerPolicy.isTarget(
+        reason = blockReason,
+        packageName = blockedPackage,
+        website = blockedWebsite,
+    )
+
+    /** Strict Settings protection has no dependency on the optional home boundary. */
+    private suspend fun isStrictSettingsProtectionActiveNow(): Boolean {
+        return try {
+            val app = FocusLockApplication.instance
+            val strictActive = app.settingsRepository.isLockdownModeEnabled() ||
+                app.strictModeAutomationRepository.isActivationActiveNow()
+            StrictSettingsBlockerPolicy.shouldRemainVisible(
+                strictActive = strictActive,
+                config = app.strictAccessRepository.getConfig(),
+            )
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            Log.w(TAG, "Could not revalidate Strict Settings protection", error)
+            false
+        }
+    }
 
     /**
      * Starts the blocker-side frog focus session. Open-ended stopwatch bounded by the

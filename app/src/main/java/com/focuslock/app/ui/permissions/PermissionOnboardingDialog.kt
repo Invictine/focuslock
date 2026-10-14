@@ -71,9 +71,9 @@ fun permissionCopy(kind: PermissionKind): PermissionCopy = when (kind) {
         title = "Accessibility access",
         why = "Detects when a blocked app opens so FocusLock can show the lockout instantly.",
         steps = listOf(
-            "1. Tap Open settings to go to Accessibility",
-            "2. Find FocusLock and turn it ON",
-            "3. Confirm with Allow when asked"
+            "Open Accessibility settings",
+            "Select FocusLock and turn on its service",
+            "Approve the Android prompt, then return here"
         ),
         icon = Icons.Rounded.Accessibility
     )
@@ -81,9 +81,9 @@ fun permissionCopy(kind: PermissionKind): PermissionCopy = when (kind) {
         title = "Usage access",
         why = "Powers the screen-time dashboard so you can see exactly where your time goes.",
         steps = listOf(
-            "1. Tap Open settings to open app info",
-            "2. Open Usage access / Screen time permission",
-            "3. Allow access for FocusLock"
+            "Open Usage access in Android Settings",
+            "Select FocusLock in the app list",
+            "Allow usage access, then return here"
         ),
         icon = Icons.Rounded.Analytics
     )
@@ -91,19 +91,19 @@ fun permissionCopy(kind: PermissionKind): PermissionCopy = when (kind) {
         title = "Display over other apps",
         why = "Shows the fullscreen lockout on top of blocked apps — without it, blocking can't appear.",
         steps = listOf(
-            "1. Tap Open settings to open the overlay page for FocusLock",
-            "2. Turn ON Allow display over other apps",
-            "3. Go back to FocusLock"
+            "Open FocusLock's display-over-apps setting",
+            "Allow display over other apps",
+            "Return here to continue setup"
         ),
         icon = Icons.Rounded.Layers
     )
     PermissionKind.NOTIFICATION_LISTENER -> PermissionCopy(
         title = "Notification access",
-        why = "Optional. TickTick notifications do not verify logged focus time and do not earn credits.",
+        why = "Optional. This can help FocusLock read TickTick alerts. Notifications never verify focus time or earn credits.",
         steps = listOf(
-            "1. Tap Open settings to go to Notification access",
-            "2. Find FocusLock and turn it ON",
-            "3. Confirm with Allow when asked"
+            "Open Notification access from Android Settings",
+            "Select FocusLock and allow notification access",
+            "Return here to continue setup"
         ),
         icon = Icons.Rounded.Notifications
     )
@@ -111,29 +111,29 @@ fun permissionCopy(kind: PermissionKind): PermissionCopy = when (kind) {
         title = "Ignore battery optimizations",
         why = "Keeps protection alive in the background so Android doesn't kill FocusLock mid-day.",
         steps = listOf(
-            "1. Tap Open settings to open the battery prompt",
-            "2. Choose Allow / Don't optimize",
-            "3. Go back to FocusLock"
+            "Open the battery optimization prompt",
+            "Choose Allow or Don't optimize",
+            "Return here to continue setup"
         ),
         icon = Icons.Rounded.BatteryChargingFull
     )
     PermissionKind.DEVICE_ADMIN -> PermissionCopy(
-        title = "Prevent uninstall",
-        why = "Prevents accidental/sneaky uninstalls during a binge — you can still remove via Settings > Disable admin.",
+        title = "Uninstall protection",
+        why = "Adds a confirmation step before uninstalling. You can turn it off in Android's device admin settings.",
         steps = listOf(
-            "1. Tap Open settings to open the device-admin prompt",
-            "2. Tap Activate this device admin app",
-            "3. To remove later: Settings > Disable admin, then uninstall"
+            "Review the device admin prompt",
+            "Activate this device admin app if you want this protection",
+            "To uninstall later, disable FocusLock under device admin settings"
         ),
         icon = Icons.Rounded.Security
     )
     PermissionKind.POST_NOTIFICATIONS -> PermissionCopy(
         title = "App notifications",
-        why = "Lets FocusLock confirm earned time, sync results, and protection status.",
+        why = "Shows FocusLock reminders, sync updates, and protection status. This permission does not verify focus time.",
         steps = listOf(
-            "1. Tap Open settings to open notification settings",
-            "2. Turn ON notifications for FocusLock",
-            "3. Go back to FocusLock"
+            "Open FocusLock notification settings",
+            "Allow notifications if you want protection updates",
+            "Return here to continue setup"
         ),
         icon = Icons.Rounded.Warning
     )
@@ -164,7 +164,7 @@ fun RestrictedSettingsHelp(kind: PermissionKind, granted: Boolean) {
 
 /**
  * One permission step. The call site (DashboardScreen) passes the current missing list and
- * callbacks; all state here is internal, so the signature stays backwards-compatible.
+ * callbacks; the owning screen persists the current step and visibility.
  *
  * The dialog re-checks the live grant state on every ON_RESUME, so returning from Android
  * Settings flips the status pill and turns the primary action into Next/Done. Returning is
@@ -182,7 +182,9 @@ fun PermissionOnboardingDialog(
     missing: List<PermissionKind>,
     currentIndex: Int,
     onGrant: (PermissionKind) -> Unit,
-    onDismiss: () -> Unit,
+    onClose: () -> Unit,
+    onSkipStep: () -> Unit,
+    onNext: () -> Unit,
     onSkipAll: () -> Unit
 ) {
     if (missing.isEmpty()) return
@@ -221,7 +223,7 @@ fun PermissionOnboardingDialog(
     LaunchedEffect(Unit) { entered = true }
 
     Dialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = onClose,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Box(
@@ -231,7 +233,7 @@ fun PermissionOnboardingDialog(
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
                     indication = null,
-                    onClick = onDismiss
+                    onClick = onClose
                 ),
             contentAlignment = Alignment.Center
         ) {
@@ -243,7 +245,6 @@ fun PermissionOnboardingDialog(
                     .fillMaxWidth(0.92f)
                     .widthIn(max = 440.dp)
                     .heightIn(max = 760.dp)
-                    .verticalScroll(rememberScrollState())
                     // Consume taps on the card so they don't fall through to the dismiss overlay.
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
@@ -252,10 +253,15 @@ fun PermissionOnboardingDialog(
                     )
             ) {
                 StaggeredFadeSlide(visible = entered, index = 0, screenKey = "perm_dialog") {
-                    Column(
-                        modifier = Modifier.padding(horizontal = 24.dp, vertical = 24.dp),
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                      Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 24.dp)
+                            .padding(top = 24.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
-                    ) {
+                      ) {
                     // ---- Centered header: icon badge, title, progress, status pill ----
 
                     Row(
@@ -283,7 +289,20 @@ fun PermissionOnboardingDialog(
                         }
                     }
                     Spacer(modifier = Modifier.height(12.dp))
+                    LinearProgressIndicator(
+                        progress = { (safeIndex + 1f) / missing.size },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
                     StatusPill(granted = granted)
+                    if (kind in OPTIONAL_PERMISSION_KINDS) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            "Optional",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
 
                     // ---- Left-aligned body: explanation, numbered steps, fine print ----
 
@@ -303,22 +322,28 @@ fun PermissionOnboardingDialog(
                         copy.steps.forEachIndexed { index, step ->
                             StepRow(
                                 number = index + 1,
-                                text = step.replace(STEP_NUMBER_PREFIX, "")
+                                text = step
                             )
                         }
                     }
                     RestrictedSettingsHelp(kind = kind, granted = granted)
-                    // ---- Actions ----
-
-                    Spacer(modifier = Modifier.height(16.dp))
+                    Spacer(modifier = Modifier.height(20.dp))
+                      }
+                      // Actions remain visible while longer instructions scroll.
+                      Column(
+                          modifier = Modifier
+                              .fillMaxWidth()
+                              .padding(horizontal = 24.dp)
+                              .padding(top = 8.dp, bottom = 16.dp)
+                      ) {
                     Button(
-                        onClick = { if (granted) onDismiss() else onGrant(kind) },
+                        onClick = { if (granted) onNext() else onGrant(kind) },
                         shape = RoundedCornerShape(16.dp),
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(min = 56.dp)
                     ) {
-                        Text(if (granted) { if (isLast) "Done" else "Next step" } else "Open Settings")
+                        Text(if (granted) { if (isLast) "Finish setup" else "Continue" } else "Open Android settings")
                     }
                     Spacer(modifier = Modifier.height(8.dp))
                     Row(
@@ -326,13 +351,14 @@ fun PermissionOnboardingDialog(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         TextButton(
-                            onClick = onDismiss,
+                            onClick = onSkipStep,
                             modifier = Modifier.weight(1f).heightIn(min = 48.dp)
-                        ) { Text("Skip step") }
+                        ) { Text("Skip this step") }
                         TextButton(
                             onClick = onSkipAll,
                             modifier = Modifier.weight(1f).heightIn(min = 48.dp)
                         ) { Text("Skip setup") }
+                    }
                     }
                     }
                 }
@@ -341,8 +367,12 @@ fun PermissionOnboardingDialog(
     }
 }
 
-/** Matches a leading "1. " / "1) " enumerator so the step row can show the number in a badge. */
-private val STEP_NUMBER_PREFIX = Regex("^\\s*\\d+[.)]\\s*")
+private val OPTIONAL_PERMISSION_KINDS = setOf(
+    PermissionKind.NOTIFICATION_LISTENER,
+    PermissionKind.BATTERY,
+    PermissionKind.DEVICE_ADMIN,
+    PermissionKind.POST_NOTIFICATIONS,
+)
 
 /** One numbered how-to step: tonal squircle number badge + short left-aligned instruction. */
 @Composable
@@ -382,7 +412,7 @@ private fun StatusPill(granted: Boolean) {
         color = if (granted) {
             MaterialTheme.colorScheme.tertiaryContainer
         } else {
-            MaterialTheme.colorScheme.errorContainer
+            MaterialTheme.colorScheme.secondaryContainer
         },
         shape = CircleShape
     ) {
@@ -396,7 +426,7 @@ private fun StatusPill(granted: Boolean) {
                 tint = if (granted) {
                     MaterialTheme.colorScheme.onTertiaryContainer
                 } else {
-                    MaterialTheme.colorScheme.onErrorContainer
+                    MaterialTheme.colorScheme.onSecondaryContainer
                 },
                 modifier = Modifier.size(16.dp)
             )
@@ -407,7 +437,7 @@ private fun StatusPill(granted: Boolean) {
                 color = if (granted) {
                     MaterialTheme.colorScheme.onTertiaryContainer
                 } else {
-                    MaterialTheme.colorScheme.onErrorContainer
+                    MaterialTheme.colorScheme.onSecondaryContainer
                 }
             )
         }

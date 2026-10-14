@@ -261,6 +261,7 @@ class MainActivity : ComponentActivity() {
                     },
                 ) {
                     var currentTab by rememberSaveable { mutableStateOf(NavigationItem.DASHBOARD) }
+                    var permissionSetupRequest by rememberSaveable { mutableIntStateOf(0) }
                     var settingsReturnTab by rememberSaveable { mutableStateOf(NavigationItem.DASHBOARD) }
                     var accountReturnTab by rememberSaveable { mutableStateOf(NavigationItem.DASHBOARD) }
                     var settingsHasDetail by remember { mutableStateOf(false) }
@@ -459,6 +460,7 @@ class MainActivity : ComponentActivity() {
                             NavigationItem.DASHBOARD -> DashboardScreen(
                                 onOpenTickTick = { openTickTick() },
                                 onNavigatePermissions = { openSettings(SettingsSection.PROTECTION) },
+                                permissionSetupRequest = permissionSetupRequest,
                                 onOpenSettings = { openSettings(SettingsSection.OVERVIEW) },
                                 onOpenAccount = { accountReturnTab = currentTab; currentTab = NavigationItem.ACCOUNT }
                             )
@@ -466,7 +468,7 @@ class MainActivity : ComponentActivity() {
                                 pendingMergeTarget = pendingMergeTarget,
                                 onPendingMergeConsumed = { pendingMergeTarget = null },
                             )
-                            NavigationItem.STRICT -> StrictModeScreen()
+                            NavigationItem.STRICT -> StrictModeScreen(onOpenPermissions = { openSettings(SettingsSection.PROTECTION) })
                             NavigationItem.SETTINGS -> SettingsScreen(
                                 initialSection = settingsSection,
                                 onNavigationStateChanged = { settingsHasDetail = it },
@@ -475,6 +477,10 @@ class MainActivity : ComponentActivity() {
                                 // highlightKind omitted (defaults null): the screen derives
                                 // the next missing permission from its own checks.
                                 onOpenDebug = { showDebug = true },
+                                onSetupPermissions = {
+                                    permissionSetupRequest++
+                                    currentTab = NavigationItem.DASHBOARD
+                                },
                                 onReplayOnboarding = {
                                     if (onboardingStore.isComplete) onboardingStore.replay()
                                     else onboardingStore.resume()
@@ -528,7 +534,21 @@ class MainActivity : ComponentActivity() {
                                     ProductTourDestination.FOCUS -> NavigationItem.DASHBOARD
                                     ProductTourDestination.BOUNDARIES -> NavigationItem.APPS
                                     ProductTourDestination.STRICT -> NavigationItem.STRICT
-                                    ProductTourDestination.SETTINGS -> NavigationItem.SETTINGS
+                                    ProductTourDestination.SETTINGS,
+                                    ProductTourDestination.ROUTINE,
+                                    ProductTourDestination.CONNECTIONS,
+                                    ProductTourDestination.PROTECTION,
+                                    ProductTourDestination.PREFERENCES -> {
+                                        settingsReturnTab = NavigationItem.DASHBOARD
+                                        settingsSection = when (destination) {
+                                            ProductTourDestination.ROUTINE -> SettingsSection.ROUTINE
+                                            ProductTourDestination.CONNECTIONS -> SettingsSection.CONNECTIONS
+                                            ProductTourDestination.PROTECTION -> SettingsSection.PROTECTION
+                                            ProductTourDestination.PREFERENCES -> SettingsSection.PREFERENCES
+                                            else -> SettingsSection.OVERVIEW
+                                        }
+                                        NavigationItem.SETTINGS
+                                    }
                                     ProductTourDestination.ACCOUNT -> {
                                         accountReturnTab = NavigationItem.DASHBOARD
                                         NavigationItem.ACCOUNT

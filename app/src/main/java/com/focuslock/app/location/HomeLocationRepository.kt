@@ -6,6 +6,7 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.CancellationException
@@ -32,6 +33,10 @@ class HomeLocationRepository(
     private val json = Json { ignoreUnknownKeys = true }
     private val placeKey = stringPreferencesKey("home_place")
     private val enabledKey = booleanPreferencesKey("home_only_enabled")
+    private val syncOwnerKey = stringPreferencesKey("home_sync_owner")
+    private val syncRevisionKey = longPreferencesKey("home_sync_revision")
+    private val syncDirtyKey = booleanPreferencesKey("home_sync_dirty")
+    private val syncUpdatedAtKey = longPreferencesKey("home_sync_updated_at")
     private val enforcementMutex = Mutex()
 
     // Foreground enforcement can ask the same location question several times while
@@ -82,9 +87,143 @@ class HomeLocationRepository(
         appContext.homeLocationStore.edit { prefs ->
             prefs[placeKey] = json.encodeToString(place)
             prefs[enabledKey] = true
+            if (!prefs[syncOwnerKey].isNullOrBlank()) {
+                prefs[syncDirtyKey] = true
+                prefs[syncUpdatedAtKey] = maxOf(System.currentTimeMillis(), (prefs[syncUpdatedAtKey] ?: 0L) + 1L)
+            }
         }
         cachedEnforcement = null
     }
+
+    /** Account-owned saved place data; home-only consent and permissions stay device-local. */
+    @kotlinx.serialization.Serializable
+    data class HomeLocationSyncState(
+        val accountId: String,
+        val place: HomePlace?,
+        val revision: Long,
+        val dirty: Boolean,
+        val updatedAt: Long,
+    )
+
+    /** Emits local pending edits even when the user saves the currently selected place again. */
+    val syncChanges: Flow<HomeLocationSyncState?> = appContext.homeLocationStore.data
+        .map { prefs ->
+            val owner = prefs[syncOwnerKey]?.takeIf { it.isNotBlank() } ?: return@map null
+            if (prefs[syncDirtyKey] != true) return@map null
+            HomeLocationSyncState(
+                accountId = owner,
+                place = decodePlace(prefs[placeKey]),
+                revision = (prefs[syncRevisionKey] ?: 0L).coerceAtLeast(0L),
+                dirty = true,
+                updatedAt = (prefs[syncUpdatedAtKey] ?: 0L).coerceAtLeast(0L),
+            )
+        }
+        .catch { error -> if (error is CancellationException) throw error else { Log.w("HomeLocation", "Could not read home sync state", error); emit(null) } }
+
+    /**
+     * Bind the active place to a signed-in account. The first account claims a legacy
+     * device-local place once; subsequent account switches restore only that account's
+     * archived place and pending revision.
+     */
+    suspend fun bindSyncAccount(accountId: String) {
+        require(accountId.isNotBlank())
+        appContext.homeLocationStore.edit { prefs ->
+            val previousOwner = prefs[syncOwnerKey].orEmpty()
+            if (previousOwner == accountId) return@edit
+
+            val currentPlace = decodePlace(prefs[placeKey])
+            val currentRevision = prefs[syncRevisionKey] ?: 0L
+            val currentDirty = prefs[syncDirtyKey] ?: false
+            val currentUpdatedAt = prefs[syncUpdatedAtKey] ?: 0L
+            if (previousOwner.isNotBlank()) {
+                prefs[archiveKey(previousOwner)] = json.encodeToString(
+                    HomeLocationSyncState(previousOwner, currentPlace, currentRevision, currentDirty, currentUpdatedAt),
+                )
+            }
+
+            val archived = if (previousOwner.isBlank()) null else decodeSyncState(prefs[archiveKey(accountId)], accountId)
+            val next = archived ?: if (previousOwner.isBlank() && currentPlace != null) {
+                HomeLocationSyncState(accountId, currentPlace, 0L, dirty = true, updatedAt = System.currentTimeMillis())
+            } else {
+                HomeLocationSyncState(accountId, null, 0L, dirty = false, updatedAt = 0L)
+            }
+            prefs[syncOwnerKey] = accountId
+            if (next.place == null) prefs.remove(placeKey) else prefs[placeKey] = json.encodeToString(next.place)
+            prefs[syncRevisionKey] = next.revision
+            prefs[syncDirtyKey] = next.dirty
+            prefs[syncUpdatedAtKey] = next.updatedAt
+        }
+        cachedEnforcement = null
+    }
+
+    suspend fun syncState(accountId: String): HomeLocationSyncState? {
+        val prefs = appContext.homeLocationStore.data.first()
+        if (prefs[syncOwnerKey] != accountId) return null
+        return HomeLocationSyncState(
+            accountId = accountId,
+            place = decodePlace(prefs[placeKey]),
+            revision = (prefs[syncRevisionKey] ?: 0L).coerceAtLeast(0L),
+            dirty = prefs[syncDirtyKey] == true,
+            updatedAt = (prefs[syncUpdatedAtKey] ?: 0L).coerceAtLeast(0L),
+        )
+    }
+
+    /** Apply a server value only while the exact local version used for the decision remains current. */
+    suspend fun applyRemoteSyncState(
+        expectedLocal: HomeLocationSyncState,
+        revision: Long,
+        place: HomePlace?,
+        updatedAt: Long,
+    ): Boolean {
+        if (revision < 0L || updatedAt < 0L || (place != null && !validPlace(place))) return false
+        if (expectedLocal.place != place && com.focuslock.app.data.repository.isStrictAutomationActive(strictActivationActive)) return false
+        var applied = false
+        appContext.homeLocationStore.edit { prefs ->
+            val current = HomeLocationSyncState(
+                accountId = prefs[syncOwnerKey].orEmpty(),
+                place = decodePlace(prefs[placeKey]),
+                revision = (prefs[syncRevisionKey] ?: 0L).coerceAtLeast(0L),
+                dirty = prefs[syncDirtyKey] == true,
+                updatedAt = (prefs[syncUpdatedAtKey] ?: 0L).coerceAtLeast(0L),
+            )
+            if (current != expectedLocal) return@edit
+            if (place == null) prefs.remove(placeKey) else prefs[placeKey] = json.encodeToString(place)
+            prefs[syncRevisionKey] = revision
+            prefs[syncUpdatedAtKey] = updatedAt
+            prefs[syncDirtyKey] = false
+            applied = true
+        }
+        if (applied) cachedEnforcement = null
+        return applied
+    }
+
+    /** Acknowledge exactly the local version uploaded; concurrent edits remain pending. */
+    suspend fun acknowledgeSyncUpload(expected: HomeLocationSyncState, revision: Long): Boolean {
+        if (revision < 0L) return false
+        var acknowledged = false
+        appContext.homeLocationStore.edit { prefs ->
+            if (prefs[syncOwnerKey] != expected.accountId || prefs[syncDirtyKey] != true ||
+                prefs[syncRevisionKey] != expected.revision || prefs[syncUpdatedAtKey] != expected.updatedAt ||
+                decodePlace(prefs[placeKey]) != expected.place) return@edit
+            prefs[syncRevisionKey] = revision
+            prefs[syncDirtyKey] = false
+            acknowledged = true
+        }
+        return acknowledged
+    }
+
+    private fun archiveKey(accountId: String): androidx.datastore.preferences.core.Preferences.Key<String> {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+            .digest(accountId.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+        return stringPreferencesKey("home_sync_account_$digest")
+    }
+
+    private fun decodeSyncState(raw: String?, accountId: String): HomeLocationSyncState? = try {
+        raw?.let { json.decodeFromString<HomeLocationSyncState>(it) }
+            ?.takeIf { it.accountId == accountId && it.revision >= 0L && it.updatedAt >= 0L &&
+                (it.place == null || validPlace(it.place)) }
+    } catch (_: Exception) { null }
 
     suspend fun setHomeOnly(enabled: Boolean) {
         if (com.focuslock.app.data.repository.isStrictAutomationActive(strictActivationActive)) return
@@ -306,8 +445,17 @@ class HomeLocationRepository(
         raw?.let { json.decodeFromString<HomePlace>(it) }?.takeIf(::validPlace)
     } catch (_: Exception) { null }
 
-    private fun validPlace(place: HomePlace): Boolean = place.label.isNotBlank() &&
+    private fun validPlace(place: HomePlace): Boolean = place.label.isNotBlank() && place.label.length <= 120 &&
         place.latitude.isFinite() && place.latitude in -90.0..90.0 &&
         place.longitude.isFinite() && place.longitude in -180.0..180.0 &&
         place.radiusMeters.isFinite() && place.radiusMeters in 25f..5_000f
 }
+
+/** Offline edits win only when they differ and their local edit clock is newer. */
+internal fun shouldUploadHomeLocation(
+    isDirty: Boolean,
+    localPlace: HomePlace?,
+    localUpdatedAt: Long,
+    remotePlace: HomePlace?,
+    remoteUpdatedAt: Long,
+): Boolean = isDirty && localPlace != remotePlace && localUpdatedAt > remoteUpdatedAt

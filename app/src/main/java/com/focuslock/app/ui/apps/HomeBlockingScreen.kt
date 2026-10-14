@@ -80,6 +80,7 @@ fun HomeBlockingScreen(onBack: () -> Unit) {
                 showHomePicker = true
             }
         )
+        com.focuslock.app.ui.strict.StrictLocationAutomationEditor()
     }
     if (showHomePicker) {
         StrictLocationPickerDialog(

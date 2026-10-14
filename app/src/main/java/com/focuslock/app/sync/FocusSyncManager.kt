@@ -17,6 +17,8 @@ import com.focuslock.app.data.repository.PermanentBlocksRepository
 import com.focuslock.app.data.repository.TargetGroup as LocalTargetGroup
 import com.focuslock.app.data.repository.TargetGroupMember as LocalTargetGroupMember
 import com.focuslock.app.data.repository.TargetGroupsRepository
+import com.focuslock.app.location.HomeLocationRepository
+import com.focuslock.app.location.shouldUploadHomeLocation
 import com.focuslock.app.service.UsageStatsRepository
 import com.focuslock.app.service.UsageTrackerHelper
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -76,6 +78,7 @@ class FocusSyncManager(
     private val bank: CreditBankRepository,
     private val settings: SettingsRepository,
     private val targetGroups: TargetGroupsRepository,
+    private val homeLocation: HomeLocationRepository,
 ) {
     private val appContext = context.applicationContext
     private val permanentBlocks = PermanentBlocksRepository(appContext)
@@ -215,6 +218,11 @@ class FocusSyncManager(
             launch {
                 settings.tickTickConnectionChanges.distinctUntilChanged().collect {
                     if (it.dirty) strictDirty.tryEmit(Unit)
+                }
+            }
+            launch {
+                homeLocation.syncChanges.drop(1).distinctUntilChanged().collect {
+                    if (it?.dirty == true) strictDirty.tryEmit(Unit)
                 }
             }
             launch {
@@ -456,6 +464,14 @@ class FocusSyncManager(
                 return true
             }
             _accountPermanentTargets.value = AccountPermanentTargetsSnapshot(accountId, snapshot.permanentBlocks)
+            // Load access conditions before applying a remote commitment on a new device.
+            convex.getStrictAccessConfig()?.let { raw ->
+                if (currentAccountId == accountId && auth.getAccountId() == accountId) {
+                    com.focuslock.app.FocusLockApplication.instance.strictAccessRepository.applyRemote(
+                        com.focuslock.app.strict.StrictAccessConfig.fromJson(raw), accountId,
+                    )
+                }
+            }
             cachedSnapshot = snapshot.copy(
                 usageSummary = null,
                 usageSummaryIncluded = false,
@@ -503,6 +519,14 @@ class FocusSyncManager(
             var expiredUsageSkipped = 0
             val stepErrors = mutableListOf<String>()
             var focusStateCommitted = false
+
+            try {
+                syncHomeLocation(convex, auth, accountId)
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                android.util.Log.w("FocusSyncManager", "home location sync failed", e)
+                stepErrors += "home location: ${e.message?.take(120) ?: "network"}"
+            }
 
             try {
             val remoteCounters = snapshot.state?.let { state ->
@@ -845,7 +869,17 @@ class FocusSyncManager(
      * can read or push it. The cloud snapshot then becomes the source of truth.
      */
     private suspend fun prepareAccount(accountId: String) {
+        val previousAccount = identityPrefs.getString(KEY_SYNC_ACCOUNT_ID, null)?.trim().orEmpty()
+        // Keep the current policy and its access owner intact instead of clearing it
+        // to a different account's defaults during a live commitment.
+        if (previousAccount.isNotEmpty() && previousAccount != accountId) {
+            val app = com.focuslock.app.FocusLockApplication.instance
+            check(!settings.isLockdownModeEnabled() && !app.strictModeAutomationRepository.isActivationActiveNow()) {
+                "An active Strict Mode commitment belongs to another account. Return to that account or wait until it ends."
+            }
+        }
         settings.bindTickTickAccount(accountId)
+        homeLocation.bindSyncAccount(accountId)
         val stored = identityPrefs.getString(KEY_SYNC_ACCOUNT_ID, null)?.trim().orEmpty()
         permanentBlocks.warm()
         // On upgrade, device commitments predate the ownership ledger. Claim
@@ -927,6 +961,53 @@ class FocusSyncManager(
         if (local.dirty || local.revision != remote.first || local.connection != remote.second) {
             settings.applyTickTickRemote(local, remote.first, remote.second)
         }
+    }
+
+    /**
+     * Sync only the saved place. Device home-only consent and location access never
+     * leave this installation. Newer offline edits retry against the fetched revision;
+     * an account switch discards every in-flight response.
+     */
+    private suspend fun syncHomeLocation(convex: ConvexSyncClient, auth: AuthViewModel, accountId: String) {
+        repeat(2) {
+            val local = homeLocation.syncState(accountId) ?: return
+            var remote = convex.getSavedHomeLocation()
+                ?: throw IllegalStateException("Could not load the account's saved home location")
+            if (currentAccountId != accountId || auth.getAccountId() != accountId) return
+
+            if (local.dirty && local.place == remote.place) {
+                homeLocation.acknowledgeSyncUpload(local, remote.revision)
+                return
+            }
+            if (shouldUploadHomeLocation(
+                    isDirty = local.dirty,
+                    localPlace = local.place,
+                    localUpdatedAt = local.updatedAt,
+                    remotePlace = remote.place,
+                    remoteUpdatedAt = remote.updatedAt,
+                )) {
+                val saved = convex.saveHomeLocation(remote.revision, local.place, local.updatedAt)
+                    ?: throw IllegalStateException("Could not save the account's home location")
+                if (currentAccountId != accountId || auth.getAccountId() != accountId) return
+                if (saved.first) {
+                    homeLocation.acknowledgeSyncUpload(local, saved.second)
+                    return
+                }
+                remote = convex.getSavedHomeLocation()
+                    ?: throw IllegalStateException("Could not reload the account's saved home location")
+                if (currentAccountId != accountId || auth.getAccountId() != accountId) return
+                // A concurrent remote save may now be newer; the next pass resolves by
+                // timestamp and otherwise retries the pending local edit at its revision.
+                if (local.updatedAt <= remote.updatedAt) {
+                    homeLocation.applyRemoteSyncState(local, remote.revision, remote.place, remote.updatedAt)
+                    return
+                }
+                return@repeat
+            }
+            homeLocation.applyRemoteSyncState(local, remote.revision, remote.place, remote.updatedAt)
+            return
+        }
+        throw IllegalStateException("Home location changed repeatedly during sync")
     }
 
     private suspend fun exportAccount(accountId: String): String {

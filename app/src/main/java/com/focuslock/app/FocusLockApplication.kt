@@ -52,6 +52,9 @@ class FocusLockApplication : Application() {
     lateinit var strictModeAutomationRepository: StrictModeAutomationRepository
         private set
 
+    lateinit var strictAccessRepository: com.focuslock.app.strict.StrictAccessRepository
+        private set
+
     lateinit var homeLocationRepository: HomeLocationRepository
         private set
 
@@ -71,11 +74,14 @@ class FocusLockApplication : Application() {
         super.onCreate()
         instance = this
         creditBankRepository = CreditBankRepository(applicationContext)
-        strictModeAutomationRepository = StrictModeAutomationRepository(applicationContext)
+        strictModeAutomationRepository = StrictModeAutomationRepository(applicationContext) {
+            settingsRepository.isLockdownModeEnabled()
+        }
         val strictActivationActive: suspend () -> Boolean = {
             settingsRepository.isLockdownModeEnabled() || strictModeAutomationRepository.isActivationActiveNow()
         }
         settingsRepository = SettingsRepository(applicationContext, strictActivationActive)
+        strictAccessRepository = com.focuslock.app.strict.StrictAccessRepository(applicationContext, active = strictActivationActive)
         appLimitsRepository = AppLimitsRepository(applicationContext, strictActivationActive)
         blockSchedulesRepository = BlockSchedulesRepository(applicationContext, strictActivationActive)
         blockLogRepository = BlockLogRepository(applicationContext)
@@ -92,9 +98,18 @@ class FocusLockApplication : Application() {
             creditBankRepository,
             settingsRepository,
             targetGroupsRepository,
+            homeLocationRepository,
         )
         tickTickFocusSync = TickTickFocusSync(settingsRepository, creditBankRepository) {
             syncManager.requestPolicyRefresh()
+        }
+
+        // Project a scheduled lock into the same timed cloud commitment used by other devices.
+        appScope.launch {
+            strictModeAutomationRepository.activationActiveFlow.collect {
+                val end = strictModeAutomationRepository.activeScheduleEnd()
+                if (end > System.currentTimeMillis()) settingsRepository.setLockdownMode(true, end)
+            }
         }
 
         // Clerk auth (optional until configured). Key comes from BuildConfig via

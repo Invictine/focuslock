@@ -311,4 +311,39 @@ export default defineSchema({
     expiresAt: v.optional(v.number()),
     userName: v.optional(v.string()),
   }).index("by_user", ["userId"]),
+
+  // Saved home coordinates are shared by the account. Home-only consent and
+  // location permissions remain local to each installation.
+  homeLocations: defineTable({
+    userId: v.string(),
+    revision: v.number(),
+    place: v.optional(v.object({
+      label: v.string(),
+      latitude: v.number(),
+      longitude: v.number(),
+      radiusMeters: v.number(),
+    })),
+    updatedAt: v.number(),
+  }).index("by_user", ["userId"]),
+
+  // Account-owned Strict access configuration, versioned independently from
+  // the shared policy snapshot so device-local configuration cannot erase it.
+  strictAccess: defineTable({
+    userId: v.string(),
+    method: v.union(v.literal("timer"), v.literal("schedules"), v.literal("pin"), v.literal("charger"), v.literal("cooldown"), v.literal("approval")),
+    cooldownMinutes: v.number(),
+    preventUninstall: v.boolean(),
+    blockDeviceSettings: v.boolean(),
+    blockRecents: v.boolean(),
+    blockSplitScreen: v.boolean(),
+    blockReinstalledApps: v.boolean(),
+    pinHash: v.optional(v.string()),
+    pinSalt: v.optional(v.string()),
+    revision: v.number(),
+    unlockRequestedAt: v.optional(v.number()),
+    unlockEndsAt: v.optional(v.number()),
+    unlockSessionId: v.optional(v.string()),
+    pinFailures: v.optional(v.number()),
+    pinBlockedUntil: v.optional(v.number()),
+  }).index("by_user", ["userId"]),
 });

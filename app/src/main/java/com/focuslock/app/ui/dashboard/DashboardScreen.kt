@@ -68,6 +68,8 @@ import com.focuslock.app.ui.nuke.NukeActivity
 import com.focuslock.app.ui.permissions.PermissionHelper
 import com.focuslock.app.ui.permissions.PermissionKind
 import com.focuslock.app.ui.permissions.PermissionOnboardingDialog
+import com.focuslock.app.ui.permissions.PermissionSetupState
+import com.focuslock.app.ui.permissions.PermissionSetupStore
 import com.focuslock.app.ui.permissions.PermissionReturnWatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -79,22 +81,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
-
-/**
- * Process-lifetime latch for the permission onboarding dialog. DashboardScreen leaves
- * composition on every tab switch, so a rememberSaveable "shown" flag alone re-arms the
- * dialog on each Focus return. Every user advance (skip step, skip all, completing the
- * flow — and advancing past a step via Grant) writes through to this flag, so mid-flow
- * tab switches never resurrect the dialog until process restart.
- */
-private var permissionOnboardingDismissedForProcess = false
-
-/**
- * Process-lifetime resume index for the onboarding flow: survives tab switches (which
- * tear down composition and may not restore saveable state), so if the dialog is ever
- * re-shown it resumes at the step the user actually reached.
- */
-private var permissionOnboardingLastIndex = 0
 
 /**
  * One off-main binder pass over every permission kind (each probed exactly once per
@@ -115,7 +101,8 @@ fun DashboardScreen(
     onOpenTickTick: () -> Unit,
     onNavigatePermissions: () -> Unit,
     onOpenSettings: (() -> Unit)? = null,
-    onOpenAccount: (() -> Unit)? = null
+    onOpenAccount: (() -> Unit)? = null,
+    permissionSetupRequest: Int = 0,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -260,36 +247,26 @@ fun DashboardScreen(
     val hasAllPermissions = permissionsChecked &&
         isAccessibilityOn == true && isUsageAccessOn == true && isNotificationOn == true
 
-    // Respect an explicit skip across launches. The compact setup card remains available.
-    val onboardingPrefs = remember(context) {
-        context.getSharedPreferences("focuslock_onboarding", android.content.Context.MODE_PRIVATE)
-    }
-    var onboardingSkipped by rememberSaveable {
-        mutableStateOf(onboardingPrefs.getBoolean("permissions_skipped", false))
-    }
-    // Step-through onboarding: auto-show only until the user explicitly skips it.
-    // Derived from the same single off-main permission pass above — zero extra binder sweeps.
     val missing: List<PermissionKind> = permSnapshot?.missing ?: emptyList()
-    // Seeded from the process latch so a dismissal survives tab switches (which tear
-    // down this composition); every set-to-true below writes the latch back through.
-    var shownThisSession by rememberSaveable { mutableStateOf(permissionOnboardingDismissedForProcess) }
-    // Index persists across tab switches via rememberSaveable, and is additionally
-    // mirrored into the process-level [permissionOnboardingLastIndex] on every advance
-    // so a torn-down composition resumes at the right step.
-    var dialogIndex by rememberSaveable { mutableIntStateOf(permissionOnboardingLastIndex) }
-    var showOnboarding by remember { mutableStateOf(false) }
-    // Keep the original steps for this onboarding run. The live `missing` list shrinks
-    // after each grant; using it as the dialog's sequence resets the counter to 1/N.
-    var onboardingSteps by remember { mutableStateOf<List<PermissionKind>>(emptyList()) }
-    LaunchedEffect(missing, onboardingSkipped) {
-        if (missing.isEmpty()) {
-            showOnboarding = false
-        } else if (!onboardingSkipped && !shownThisSession && !permissionOnboardingDismissedForProcess) {
-            if (onboardingSteps.isEmpty()) {
-                onboardingSteps = missing
-                dialogIndex = 0
-            }
-            showOnboarding = true
+    val setupStore = remember(context) { PermissionSetupStore(context) }
+    var setupState by remember(setupStore) { mutableStateOf(setupStore.load()) }
+    var handledSetupRequest by rememberSaveable { mutableIntStateOf(0) }
+    fun saveSetupState(next: PermissionSetupState) {
+        setupState = next
+        setupStore.save(next)
+    }
+    LaunchedEffect(permSnapshot, setupState.steps, setupState.skipped) {
+        if (permSnapshot != null && missing.isNotEmpty() && setupState.steps.isEmpty() &&
+            !setupState.skipped && !setupStore.wasPreviouslySkipped()) {
+            saveSetupState(PermissionSetupState().begin(missing))
+        } else if (permSnapshot != null && missing.isEmpty() && setupState.active) {
+            saveSetupState(setupState.copy(active = false, visible = false))
+        }
+    }
+    LaunchedEffect(permissionSetupRequest, permSnapshot) {
+        if (permissionSetupRequest > handledSetupRequest && permSnapshot != null) {
+            handledSetupRequest = permissionSetupRequest
+            saveSetupState(setupState.begin(missing))
         }
     }
 
@@ -785,50 +762,19 @@ fun DashboardScreen(
         )
     }
 
-    // Step-through permission onboarding dialogs (one per missing permission)
-    if (showOnboarding && onboardingSteps.isNotEmpty()) {
+    // The Settings action and first-run prompt both drive this persisted wizard state.
+    if (setupState.visible && setupState.steps.isNotEmpty() && setupState.currentStep != null) {
         PermissionOnboardingDialog(
-            missing = onboardingSteps,
-            currentIndex = dialogIndex.coerceIn(0, onboardingSteps.size - 1),
+            missing = setupState.steps,
+            currentIndex = setupState.currentIndex,
             onGrant = { kind ->
                 PermissionHelper.openPermissionWithHighlight(context, kind)
-                // Do not advance just for opening Settings: PermissionReturnWatcher pulls the
-                // app back automatically once the grant lands, and the resume re-check then
-                // re-derives `missing` and flips the dialog action to Next/Done.
-                // Only skip ahead if it was already granted when tapped.
-                if (PermissionHelper.isGranted(context, kind)) {
-                    if (dialogIndex < onboardingSteps.size - 1) dialogIndex++ else showOnboarding = false
-                    // Persist progress on every advance so a mid-flow tab switch never
-                    // re-arms the dialog from step 0 (and never re-shows after the user
-                    // has already moved past a step).
-                    permissionOnboardingLastIndex = dialogIndex
-                    shownThisSession = true
-                    permissionOnboardingDismissedForProcess = true
-                }
+                // The pending permission and visible wizard state both persist before Android Settings opens.
             },
-            onDismiss = {
-                if (dialogIndex < onboardingSteps.size - 1) {
-                    dialogIndex++
-                    permissionOnboardingLastIndex = dialogIndex
-                    // Mid-flow skip: latch the dialog off for this process too, so
-                    // tab-switching away and back doesn't resurrect the flow.
-                    shownThisSession = true
-                    permissionOnboardingDismissedForProcess = true
-                } else {
-                    showOnboarding = false
-                    shownThisSession = true
-                    permissionOnboardingDismissedForProcess = true
-                    onboardingSkipped = true
-                    onboardingPrefs.edit().putBoolean("permissions_skipped", true).apply()
-                }
-            },
-            onSkipAll = {
-                showOnboarding = false
-                shownThisSession = true
-                permissionOnboardingDismissedForProcess = true
-                onboardingSkipped = true
-                onboardingPrefs.edit().putBoolean("permissions_skipped", true).apply()
-            }
+            onClose = { saveSetupState(setupState.close()) },
+            onSkipStep = { saveSetupState(setupState.advance()) },
+            onNext = { saveSetupState(setupState.advance()) },
+            onSkipAll = { saveSetupState(setupState.skipAll()) },
         )
     }
 }

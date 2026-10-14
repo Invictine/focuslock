@@ -128,6 +128,11 @@ fun HomeLocationCard(
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            Text(
+                "Your saved home location syncs with your FocusLock account. Home-only mode and location permissions are set separately on each device.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             if (homePlace == null) {
                 Text("Home location is not set", style = MaterialTheme.typography.titleSmall)
                 Button(onClick = { onChooseLocation(null, homeLabel.ifBlank { "Home" }) }, enabled = !strictLocked, modifier = Modifier.fillMaxWidth()) { Text("Choose home location") }

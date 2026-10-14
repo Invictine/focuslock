@@ -78,6 +78,8 @@ export const createRequest = internalMutation({
   handler: async (ctx, args) => {
     const guardian = await ctx.db.query("strictGuardians").withIndex("by_user", (q) => q.eq("userId", args.userId)).first();
     if (!guardian) throw new Error("Configure a guardian before requesting approval");
+    const access = await ctx.db.query("strictAccess").withIndex("by_user", (q) => q.eq("userId", args.userId)).first();
+    if (access && access.method !== "approval") throw new Error("This commitment does not use approval access");
     const prefs = await ctx.db.query("userPrefs").withIndex("by_user", (q) => q.eq("userId", args.userId)).first();
     if (!prefs?.strictMode || (prefs.strictEndsAt ?? 0) <= args.now) throw new Error("Strict Mode is not active");
     if (!prefs.strictSessionId || prefs.strictSessionId !== args.strictSessionId || prefs.strictEndsAt !== args.strictEndsAt) {
