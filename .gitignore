@@ -44,6 +44,8 @@ desktop/tracking-store.json
 
 # Bundled Void source builds and generated Windows helper
 windows/void/bin/
+windows/frog/bin/
+windows/frog/obj/
 windows/void/obj/
 windows/void/tests/bin/
 windows/void/tests/obj/

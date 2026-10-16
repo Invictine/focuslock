@@ -1,9 +1,9 @@
 param([switch]$Force, [string]$DotNetPath = $env:FOCUSLOCK_DOTNET)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$voidSource = Join-Path $projectRoot 'windows\void'
+$voidSource = Join-Path $projectRoot 'windows\frog'
 $voidOutput = Join-Path $projectRoot 'desktop\src-tauri\resources\void'
-$voidProject = Join-Path $voidSource 'Void.csproj'
+$voidProject = Join-Path $voidSource 'FocusLock.Frog.csproj'
 $voidBinary = Join-Path $voidOutput 'FocusLock.Void.exe'
 $sourceFiles = Get-ChildItem -LiteralPath $voidSource -File -Recurse | Where-Object {
     $_.FullName -notmatch '[\\/](bin|obj|work|outputs|portable)[\\/]' -and $_.Extension -in '.cs', '.xaml', '.csproj', '.json'
