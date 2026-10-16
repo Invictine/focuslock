@@ -91,6 +91,40 @@ class RemovalReminderStoreTest {
         }
     }
 
+    @Test
+    fun accountSwitchAndStoreRestartKeepReminderStateAndMediaIsolated() = runBlocking<Unit> {
+        val namespace = "isolation-${java.util.UUID.randomUUID()}"
+        val scoped = RemovalReminderStore(context, namespace)
+        val source = File(context.cacheDir, "${namespace}.wav")
+        writeSilentWav(source)
+        try {
+            scoped.bindAccount("account-A")
+            scoped.enabled = true
+            scoped.importMedia(Uri.fromFile(source))
+            val accountA = scoped.mediaFile()!!.readBytes()
+            assertTrue(scoped.syncState("account-A")!!.dirtyMedia)
+
+            scoped.bindAccount("account-B")
+            assertFalse(scoped.enabled)
+            assertEquals(null, scoped.mediaFile())
+            scoped.setRemoteEnabled("account-B", true, 200L, 4L, 0L)
+            assertTrue(scoped.enabled)
+
+            val afterRestart = RemovalReminderStore(context, namespace)
+            assertEquals("account-B", afterRestart.syncState("account-B")!!.accountId)
+            assertEquals(null, afterRestart.mediaFile())
+            afterRestart.bindAccount("account-A")
+            assertTrue(afterRestart.enabled)
+            assertEquals(accountA.toList(), afterRestart.mediaFile()!!.readBytes().toList())
+            assertTrue(afterRestart.syncState("account-A")!!.dirtyMedia)
+        } finally {
+            source.delete()
+            File(context.noBackupFilesDir, "removal_reminder-$namespace").deleteRecursively()
+            context.getSharedPreferences("removal_reminder_media_$namespace", android.content.Context.MODE_PRIVATE)
+                .edit().clear().commit()
+        }
+    }
+
     private suspend fun assertImportRejected(uri: Uri) {
         var rejected = false
         try {
@@ -104,7 +138,12 @@ class RemovalReminderStoreTest {
     private fun assertValidImportedWav(wav: File) {
         val saved = store.mediaFile()
         assertNotNull(saved)
-        assertEquals(wav.length(), saved!!.length())
+        assertTrue("Import keeps the smaller playable copy", saved!!.length() in 1..wav.length())
+        val metadata = android.media.MediaMetadataRetriever()
+        try {
+            metadata.setDataSource(saved.absolutePath)
+            assertEquals("yes", metadata.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO))
+        } finally { metadata.release() }
         assertEquals("removal-reminder-test.wav", store.mediaName())
         assertTrue(store.mediaMimeType().orEmpty().startsWith("audio/"))
         assertFalse(store.enabled)

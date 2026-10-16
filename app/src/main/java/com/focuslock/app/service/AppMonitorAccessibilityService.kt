@@ -1006,13 +1006,15 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         val now = SystemClock.elapsedRealtime()
         if (lastRemovalScanMs >= 0 && now - lastRemovalScanMs < 500L) return false
         lastRemovalScanMs = now
-        val root = rootInActiveWindow ?: return false
+        val root = removalScanRoot(expectedWindowId) ?: return false
         try {
             // Do not inspect a stale window from another app.
             if (root.packageName?.toString() != packageName) return false
-            if (expectedWindowId != null && expectedWindowId >= 0 && root.windowId >= 0 &&
-                expectedWindowId != root.windowId
-            ) return false
+            // TYPE_VIEW_CLICKED is delivered after Settings has already opened its
+            // confirmation window on some OEMs. In that case rootInActiveWindow is
+            // the new modal (with a different ID), while the click source still
+            // identifies the App info window that contained FocusLock and Uninstall.
+            // removalScanRoot prefers that clicked window when it remains exposed.
             val texts = mutableListOf<String>()
             var visited = 0
             fun collect(node: AccessibilityNodeInfo, depth: Int) {
@@ -1057,6 +1059,32 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             if (canRecycleNodes) root.recycle()
         }
         return false
+    }
+
+    /** Prefer the window that generated a removal click; fall back to the active root. */
+    @Suppress("DEPRECATION")
+    private fun removalScanRoot(expectedWindowId: Int?): AccessibilityNodeInfo? {
+        if (expectedWindowId != null && expectedWindowId >= 0) {
+            val candidates = runCatching { windows }.getOrDefault(emptyList())
+            val clickedWindowId = RemovalWindowSelection.clickedWindow(
+                candidates, expectedWindowId,
+            ) { it.id }?.id
+            var clickedRoot: AccessibilityNodeInfo? = null
+            for (window in candidates) {
+                try {
+                    if (window.id == clickedWindowId) clickedRoot = window.root
+                } catch (_: Exception) {
+                    // The clicked window may disappear while Settings transitions.
+                } finally {
+                    if (canRecycleNodes) runCatching { window.recycle() }
+                }
+            }
+            if (clickedRoot != null) return clickedRoot
+            // Some Android versions expose only the new modal after the click. The
+            // delayed scan can still recognize explicit confirmation copy there.
+            return runCatching { rootInActiveWindow }.getOrNull()
+        }
+        return runCatching { rootInActiveWindow }.getOrNull()
     }
 
     private fun enforceStrictWindowIfNeeded(packageName: String, windowClass: String?) {

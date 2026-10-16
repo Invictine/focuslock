@@ -326,6 +326,24 @@ export default defineSchema({
     updatedAt: v.number(),
   }).index("by_user", ["userId"]),
 
+  // One account-shared removal reminder configuration. Media metadata and its
+  // private storage object are replaced together; undefined storageId is a
+  // deletion tombstone when mediaUpdatedAt advances.
+  removalReminders: defineTable({
+    userId: v.string(),
+    revision: v.number(),
+    enabled: v.boolean(),
+    enabledUpdatedAt: v.number(),
+    mediaUpdatedAt: v.number(),
+    media: v.optional(v.object({
+      storageId: v.id("_storage"),
+      sha256: v.string(),
+      mimeType: v.string(),
+      name: v.string(),
+      bytes: v.number(),
+    })),
+  }).index("by_user", ["userId"]),
+
   // Account-owned Strict access configuration, versioned independently from
   // the shared policy snapshot so device-local configuration cannot erase it.
   strictAccess: defineTable({

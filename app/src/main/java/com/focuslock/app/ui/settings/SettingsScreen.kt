@@ -1076,7 +1076,7 @@ fun SettingsScreen(
             }
         }
 
-        RemovalReminderSettings()
+        RemovalReminderSettings(authViewModel)
 
         }
 

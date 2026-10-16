@@ -8,6 +8,8 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.provider.Settings
 import androidx.core.app.NotificationCompat
@@ -28,13 +30,16 @@ object RemovalReminderController {
     private val lock = Any()
     @Volatile private var activityVisible = false
     @Volatile private var lastLaunchElapsed = 0L
+    @Volatile private var launchGeneration = 0L
+    @Volatile private var acknowledgedGeneration = 0L
 
     internal val isShowing: Boolean get() = activityVisible
 
     /**
-     * Opens the popup for an explicit preview or an enabled reminder. Background triggers
-     * retain a notification fallback if Android suppresses the popup. A true result
-     * means a direct launch was requested, not that Android confirmed it was displayed.
+     * Opens the popup for an explicit preview or an enabled reminder. A true result
+     * means a direct launch was requested. Android can silently deny a background
+     * activity launch, so background requests also get a delayed fallback unless the
+     * Activity confirms that it reached onResume().
      */
     fun show(context: Context, reason: String, fromForeground: Boolean = false): Boolean {
         val app = context.applicationContext
@@ -49,10 +54,12 @@ object RemovalReminderController {
         if (!preview && !explicitAction && isSuppressed(app)) return false
 
         val now = SystemClock.elapsedRealtime()
-        synchronized(lock) {
+        val requestedGeneration = synchronized(lock) {
             if (activityVisible) return false
             if (!preview && !explicitAction && !isAdminDisabled && now - lastLaunchElapsed < REPEAT_THROTTLE_MS) return false
             lastLaunchElapsed = now
+            launchGeneration++
+            launchGeneration
         }
 
         // Post first when the caller is a background component. Overlay permission can
@@ -67,6 +74,7 @@ object RemovalReminderController {
                 addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP)
             }
             context.startActivity(intent)
+            if (context !is Activity) scheduleLaunchAcknowledgmentFallback(app, reason, requestedGeneration)
             true
         } catch (_: Exception) {
             if (!notifyFirst) postFallbackNotification(app, reason)
@@ -93,7 +101,10 @@ object RemovalReminderController {
 
     /** Activity lifecycle hooks keep duplicate callbacks from stacking popup windows. */
     internal fun onActivityVisible(context: Context) {
-        synchronized(lock) { activityVisible = true }
+        synchronized(lock) {
+            activityVisible = true
+            acknowledgedGeneration = launchGeneration
+        }
         runCatching { NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID) }
     }
 
@@ -146,7 +157,27 @@ object RemovalReminderController {
         }
     }
 
+    private fun scheduleLaunchAcknowledgmentFallback(context: Context, reason: String, generation: Long) {
+        Handler(Looper.getMainLooper()).postDelayed({
+            val shouldPostFallback = synchronized(lock) {
+                RemovalLaunchAcknowledgment.shouldPostFallback(
+                    generation, acknowledgedGeneration, launchGeneration,
+                )
+            }
+            if (shouldPostFallback) postFallbackNotification(context, reason)
+        }, 1_500L)
+    }
+
     private fun bootCount(context: Context): Int = try {
         Settings.Global.getInt(context.contentResolver, Settings.Global.BOOT_COUNT, 0)
     } catch (_: Exception) { 0 }
+}
+
+/** A launch only counts as displayed after the Activity reaches onResume(). */
+internal object RemovalLaunchAcknowledgment {
+    fun shouldPostFallback(
+        requestedGeneration: Long,
+        acknowledgedGeneration: Long,
+        currentGeneration: Long,
+    ): Boolean = acknowledgedGeneration < requestedGeneration && currentGeneration == requestedGeneration
 }

@@ -17,6 +17,7 @@ import com.focuslock.app.data.repository.PermanentBlocksRepository
 import com.focuslock.app.data.repository.TargetGroup as LocalTargetGroup
 import com.focuslock.app.data.repository.TargetGroupMember as LocalTargetGroupMember
 import com.focuslock.app.data.repository.TargetGroupsRepository
+import com.focuslock.app.reminder.RemovalReminderStore
 import com.focuslock.app.location.HomeLocationRepository
 import com.focuslock.app.location.shouldUploadHomeLocation
 import com.focuslock.app.service.UsageStatsRepository
@@ -81,6 +82,11 @@ class FocusSyncManager(
     private val homeLocation: HomeLocationRepository,
 ) {
     private val appContext = context.applicationContext
+    private val removalReminderStore = RemovalReminderStore(appContext)
+    private val _removalReminderSyncRevision = MutableStateFlow(0L)
+    val removalReminderSyncRevision: StateFlow<Long> = _removalReminderSyncRevision.asStateFlow()
+    private val _removalReminderSyncedAccount = MutableStateFlow<String?>(null)
+    val removalReminderSyncedAccount: StateFlow<String?> = _removalReminderSyncedAccount.asStateFlow()
     private val permanentBlocks = PermanentBlocksRepository(appContext)
     // Default CoroutineExceptionHandler: a bug in a launched cycle must log, not kill the process.
     private val exceptionHandler = CoroutineExceptionHandler { _, e ->
@@ -365,6 +371,12 @@ class FocusSyncManager(
     fun syncNowAsync(auth: AuthViewModel, forceUsageRefresh: Boolean = true) =
         scope.launch { syncNow(auth, forceUsageRefresh) }
 
+    /** Promptly sync a locally edited removal reminder through the existing serialized sync cycle. */
+    fun requestRemovalReminderSync() {
+        val auth = retainedAuth ?: return
+        scope.launch { syncMutex.withLock { if (retainedAuth === auth) performSync(auth) } }
+    }
+
     /** UI entry point. Never runs concurrently with the auto-sync loop (audit item 8). */
     suspend fun syncNow(auth: AuthViewModel, forceUsageRefresh: Boolean = true) {
         if (forceUsageRefresh) {
@@ -394,6 +406,7 @@ class FocusSyncManager(
         }
         currentToken = null
         currentAccountId = null
+        _removalReminderSyncedAccount.value = null
         cachedRemotePrefs = null
         lastPrefsFetchAt = 0L
         lastKnownTargetsFetchAt = 0L
@@ -424,6 +437,7 @@ class FocusSyncManager(
             return true
         }
         prepareAccount(accountId)
+        removalReminderStore.bindAccount(accountId)
         val token = try { auth.getConvexToken() } catch (_: Exception) { null }
         if (token.isNullOrBlank()) {
             currentToken = null
@@ -519,6 +533,14 @@ class FocusSyncManager(
             var expiredUsageSkipped = 0
             val stepErrors = mutableListOf<String>()
             var focusStateCommitted = false
+
+            try {
+                syncRemovalReminder(convex, auth, accountId)
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                android.util.Log.w("FocusSyncManager", "removal reminder sync failed", e)
+                stepErrors += "removal reminder: ${e.message?.take(120) ?: "network"}"
+            }
 
             try {
                 syncHomeLocation(convex, auth, accountId)
@@ -890,6 +912,7 @@ class FocusSyncManager(
             currentAccountId = accountId
             return
         }
+        _removalReminderSyncedAccount.value = null
         if (stored.isNotEmpty()) {
             val transition = identityPrefs.getString(KEY_ACCOUNT_TRANSITION, null)
             // A marker makes the handoff recoverable if the process dies between
@@ -963,6 +986,15 @@ class FocusSyncManager(
         }
     }
 
+    /** Synchronizes switch and media clocks independently; media bytes move only on hash changes. */
+    private suspend fun syncRemovalReminder(convex: ConvexSyncClient, auth: AuthViewModel, accountId: String) {
+        RemovalReminderSyncCoordinator(removalReminderStore).sync(
+            transport = convex,
+            accountId = accountId,
+            stillCurrent = { currentAccountId == accountId && auth.getAccountId() == accountId },
+            onApplied = { _removalReminderSyncedAccount.value = accountId; _removalReminderSyncRevision.value++ },
+        )
+    }
     /**
      * Sync only the saved place. Device home-only consent and location access never
      * leave this installation. Newer offline edits retry against the fetched revision;

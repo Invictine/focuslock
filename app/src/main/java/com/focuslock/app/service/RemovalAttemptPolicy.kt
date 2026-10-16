@@ -65,7 +65,7 @@ object RemovalAttemptPolicy {
         RegexOption.IGNORE_CASE,
     )
     private val deviceAdminScreen = Regex(
-        """(?:^|[.$])DeviceAdminAdd$""",
+        """(?:^|[.$])(?:Sec)?DeviceAdminAdd$""",
         RegexOption.IGNORE_CASE,
     )
 
@@ -147,6 +147,15 @@ object RemovalAttemptPolicy {
                     text.contains("admin app", ignoreCase = true) ||
                     text.contains("administrator", ignoreCase = true)
             }
+            val deviceAdminTitleVisible = normalizedTexts.any {
+                it.equals("Device admin app", ignoreCase = true)
+            }
+            val activeAdminSummaryVisible = normalizedTexts.any { text ->
+                text.contains("this admin app is active", ignoreCase = true) &&
+                    text.contains("allows", ignoreCase = true) &&
+                    text.contains("following actions", ignoreCase = true) &&
+                    text.contains(TARGET_TITLE, ignoreCase = true)
+            }
 
             if (isDeviceAdminDetail && activationScreen) return null
             if (deactivationAction || deviceAdminButton ||
@@ -156,6 +165,15 @@ object RemovalAttemptPolicy {
             }
             val confirmationDialog = windowClass.contains("dialog", ignoreCase = true) ||
                 windowClass.contains("alert", ignoreCase = true)
+            // Samsung's Device Admin list opens SecDeviceAdminAdd, but its
+            // accessibility root is an AlertDialog that omits the Deactivate
+            // button. Match only the observed active-admin detail copy, exact
+            // FocusLock identity, and live admin state.
+            if (deviceAdminActive && deviceAdminTitleVisible && activeAdminSummaryVisible &&
+                (isDeviceAdminDetail || confirmationDialog)
+            ) {
+                return REASON_ADMIN_REQUESTED
+            }
             if (confirmationDialog && namesAdmin && explicitAdminQuestionVisible) {
                 return REASON_ADMIN_REQUESTED
             }
@@ -186,5 +204,17 @@ object RemovalAttemptPolicy {
             ?.contains("uninstall", ignoreCase = true) == true
         val clearUninstallText = exactUninstallAction || normalizedTexts.any(uninstallConfirmation::matches)
         return if (uninstallActivity || clearUninstallText) REASON_UNINSTALL else null
+    }
+}
+
+/** Selects the original event window when it is still exposed by the service. */
+internal object RemovalWindowSelection {
+    fun <T> clickedWindow(
+        windows: List<T>,
+        expectedWindowId: Int?,
+        idOf: (T) -> Int,
+    ): T? {
+        if (expectedWindowId == null || expectedWindowId < 0) return null
+        return windows.firstOrNull { idOf(it) == expectedWindowId }
     }
 }

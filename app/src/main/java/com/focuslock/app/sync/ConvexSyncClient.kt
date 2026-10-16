@@ -11,6 +11,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.RequestBody.Companion.asRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
@@ -169,6 +170,17 @@ data class SaveGroupsResult(val applied: Boolean, val updatedAt: Long = 0L)
 /** Account-wide saved place; home-only consent remains local to each device. */
 data class RemoteHomeLocation(val revision: Long, val place: HomePlace?, val updatedAt: Long)
 
+data class RemovalReminderRemoteState(
+    val revision: Long,
+    val enabled: Boolean,
+    val enabledUpdatedAt: Long,
+    val mediaUpdatedAt: Long,
+    val mediaSha256: String?,
+    val mediaMimeType: String?,
+    val mediaName: String?,
+    val mediaBytes: Long,
+)
+
 /** Cross-device usage totals for the requested date window (see [ConvexSyncClient.getUsageSummary]). */
 data class UsageSummary(
     val totalTrackedSeconds: Long,
@@ -201,10 +213,96 @@ class ConvexSyncClient(
     private val convexUrl: String,
     private val tokenProvider: suspend () -> String?,
     http: OkHttpClient? = null,
-) {
+) : RemovalReminderSyncTransport {
     private val client = http ?: sharedHttpClient
     private val jsonMedia = "application/json; charset=utf-8".toMediaType()
     val json = Json { ignoreUnknownKeys = true }
+
+    private fun removalState(raw: JSONObject): RemovalReminderRemoteState {
+        val media = raw.optJSONObject("media")
+        return RemovalReminderRemoteState(
+            revision = raw.getLong("revision"), enabled = raw.optBoolean("enabled", false),
+            enabledUpdatedAt = raw.optLong("enabledUpdatedAt", 0L), mediaUpdatedAt = raw.optLong("mediaUpdatedAt", 0L),
+            mediaSha256 = media?.optString("sha256")?.takeIf { it.isNotBlank() && it != "null" },
+            mediaMimeType = media?.optString("mimeType")?.takeIf { it.isNotBlank() && it != "null" },
+            mediaName = media?.optString("name")?.takeIf { it.isNotBlank() && it != "null" },
+            mediaBytes = media?.optLong("bytes", 0L) ?: 0L,
+        )
+    }
+
+    override suspend fun getRemovalReminderState(): RemovalReminderRemoteState = withContext(Dispatchers.IO) {
+        val raw = post("/api/query", "removalReminder:getState", JSONObject())
+            ?: throw IllegalStateException("Could not load reminder settings")
+        removalState(raw)
+    }
+
+    override suspend fun saveRemovalReminderEnabled(expectedRevision: Long, enabled: Boolean, updatedAt: Long): Pair<Boolean, RemovalReminderRemoteState> =
+        removalMutation("removalReminder:saveEnabled", JSONObject().put("expectedRevision", expectedRevision)
+            .put("enabled", enabled).put("updatedAt", updatedAt))
+
+    override suspend fun clearRemovalReminderMedia(expectedRevision: Long, updatedAt: Long): Pair<Boolean, RemovalReminderRemoteState> =
+        removalMutation("removalReminder:clearMedia", JSONObject().put("expectedRevision", expectedRevision)
+            .put("updatedAt", updatedAt))
+
+    override suspend fun touchRemovalReminderMedia(expectedRevision: Long, sha256: String, updatedAt: Long): Pair<Boolean, RemovalReminderRemoteState> =
+        removalMutation("removalReminder:touchMedia", JSONObject().put("expectedRevision", expectedRevision)
+            .put("sha256", sha256).put("updatedAt", updatedAt))
+
+    private suspend fun removalMutation(function: String, args: JSONObject): Pair<Boolean, RemovalReminderRemoteState> {
+        val raw = post("/api/mutation", function, args) ?: throw IllegalStateException("Could not save reminder settings")
+        val state = raw.optJSONObject("state") ?: throw IllegalStateException("Reminder service returned invalid state")
+        return raw.optBoolean("applied", false) to removalState(state)
+    }
+
+    override suspend fun uploadRemovalReminderMedia(file: java.io.File, sha256: String, mimeType: String, name: String,
+        expectedRevision: Long, updatedAt: Long): Pair<Boolean, RemovalReminderRemoteState> = withContext(Dispatchers.IO) {
+        require(file.isFile && file.length() <= 12L * 1024L * 1024L) { "Reminder media must be 12 MB or smaller after optimization" }
+        val token = tokenProvider() ?: throw IllegalStateException("Sign in to sync reminder media")
+        val siteUrl = convexUrl.trimEnd('/').replace(Regex("\\.convex\\.cloud$"), ".convex.site")
+        val body = file.asRequestBody(mimeType.toMediaType())
+        val request = Request.Builder().url("$siteUrl/removal-reminder/media")
+            .header("Authorization", "Bearer $token")
+            .header("X-Media-Sha256", sha256)
+            .header("X-Media-Name", java.net.URLEncoder.encode(name, "UTF-8").replace("+", "%20"))
+            .header("X-Expected-Revision", expectedRevision.toString())
+            .header("X-Updated-At", updatedAt.toString())
+            .post(body).build()
+        client.newCall(request).execute().use { response ->
+            if (response.code == 409) return@withContext false to removalState(getRemovalReminderStateRaw())
+            if (!response.isSuccessful) throw IllegalStateException("Reminder media upload failed (HTTP ${response.code})")
+            val text = response.body?.string() ?: throw IllegalStateException("Empty reminder media response")
+            val root = JSONObject(text)
+            (root.optBoolean("applied", false) to removalState(root.getJSONObject("state")))
+        }
+    }
+
+    override suspend fun downloadRemovalReminderMedia(sha256: String): ByteArray = withContext(Dispatchers.IO) {
+        val token = tokenProvider() ?: throw IllegalStateException("Sign in to sync reminder media")
+        val siteUrl = convexUrl.trimEnd('/').replace(Regex("\\.convex\\.cloud$"), ".convex.site")
+        val request = Request.Builder().url("$siteUrl/removal-reminder/media?sha256=$sha256")
+            .header("Authorization", "Bearer $token").get().build()
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw IllegalStateException("Reminder media download failed (HTTP ${response.code})")
+            val body = response.body ?: throw IllegalStateException("Empty reminder media response")
+            if (body.contentLength() > 12L * 1024L * 1024L) throw IllegalStateException("Reminder media exceeds the transfer limit")
+            val output = java.io.ByteArrayOutputStream(minOf(body.contentLength().coerceAtLeast(0L), 64L * 1024L).toInt())
+            body.byteStream().use { input ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                var total = 0L
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    total += read
+                    if (total > 12L * 1024L * 1024L) throw IllegalStateException("Reminder media exceeds the transfer limit")
+                    output.write(buffer, 0, read)
+                }
+            }
+            output.toByteArray()
+        }
+    }
+
+    private suspend fun getRemovalReminderStateRaw(): JSONObject = post("/api/query", "removalReminder:getState", JSONObject())
+        ?: throw IllegalStateException("Could not reload reminder settings after a conflict")
 
     private suspend fun post(path: String, function: String, args: JSONObject): JSONObject? = withContext(Dispatchers.IO) {
         val token = tokenProvider() ?: return@withContext null

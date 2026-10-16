@@ -1,11 +1,32 @@
 package com.focuslock.app
 
 import com.focuslock.app.service.RemovalAttemptPolicy
+import com.focuslock.app.service.RemovalWindowSelection
+import com.focuslock.app.reminder.RemovalLaunchAcknowledgment
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RemovalAttemptPolicyTest {
+    @Test
+    fun clickedSettingsWindowWinsOverNewActiveModalWindow() {
+        data class Window(val id: Int, val label: String)
+        val exposedWindows = listOf(Window(14, "App info"), Window(27, "Deactivate first dialog"))
+
+        assertTrue(
+            RemovalWindowSelection.clickedWindow(exposedWindows, 14) { it.id }?.label == "App info"
+        )
+        assertTrue(RemovalWindowSelection.clickedWindow(exposedWindows, 99) { it.id } == null)
+        assertTrue(RemovalWindowSelection.clickedWindow(exposedWindows, null) { it.id } == null)
+    }
+
+    @Test
+    fun backgroundLaunchRequiresActivityResumeAcknowledgmentOrCurrentFallback() {
+        assertTrue(RemovalLaunchAcknowledgment.shouldPostFallback(4, 3, 4))
+        assertFalse(RemovalLaunchAcknowledgment.shouldPostFallback(4, 4, 4))
+        assertFalse(RemovalLaunchAcknowledgment.shouldPostFallback(4, 3, 5))
+    }
+
     @Test
     fun clickedSettingsRemovalActionRequiresLiveFocusLockIdentityAndActiveAdmin() {
         val root = listOf("FocusLock", "Open", "Uninstall", "Force stop")
@@ -170,6 +191,49 @@ class RemovalAttemptPolicyTest {
                 windowClass,
                 listOf("FocusLock", "Activate this device admin app"),
                 deviceAdminActive = true,
+            )
+        )
+    }
+
+    @Test
+    fun matchesSamsungActiveAdminDialogWhenDeactivateButtonIsNotExposed() {
+        val observedTexts = listOf(
+            "Device admin app",
+            "FocusLock",
+            "This admin app is active and allows FocusLock to perform the following actions:",
+            "Lock the screen",
+            "Cancel",
+        )
+        assertTrue(
+            RemovalAttemptPolicy.reason(
+                "com.android.settings", "androidx.appcompat.app.AlertDialog",
+                observedTexts, deviceAdminActive = true,
+            ) == RemovalAttemptPolicy.REASON_ADMIN_REQUESTED
+        )
+        assertTrue(
+            RemovalAttemptPolicy.reason(
+                "com.android.settings",
+                "com.samsung.android.settings.applications.specialaccess.SecDeviceAdminAdd",
+                observedTexts, deviceAdminActive = true,
+            ) == RemovalAttemptPolicy.REASON_ADMIN_REQUESTED
+        )
+        assertFalse(
+            RemovalAttemptPolicy.matches(
+                "com.android.settings", "androidx.appcompat.app.AlertDialog",
+                listOf("Device admin app", "Other App", "This admin app is active and allows Other App to perform the following actions:"),
+                deviceAdminActive = true,
+            )
+        )
+        assertFalse(
+            RemovalAttemptPolicy.matches(
+                "com.android.settings", "com.samsung.android.settings.applications.specialaccess.SecDeviceAdminAdd",
+                listOf("FocusLock", "Activate this device admin app"), deviceAdminActive = true,
+            )
+        )
+        assertFalse(
+            RemovalAttemptPolicy.matches(
+                "com.android.settings", "com.android.settings.DeviceAdminSettings",
+                listOf("Device admin apps", "FocusLock", "Other App"), deviceAdminActive = true,
             )
         )
     }
