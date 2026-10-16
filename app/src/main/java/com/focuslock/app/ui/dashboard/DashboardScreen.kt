@@ -348,7 +348,7 @@ fun DashboardScreen(
         )
         val earned = bank.recordWorkCredit(record, ratio, 0)
         permissionTick++
-        Toast.makeText(context, "Focus done! +$earned min leisure earned", Toast.LENGTH_LONG).show()
+        Toast.makeText(context, "Focus done! +$earned min of leisure", Toast.LENGTH_LONG).show()
     }
 
     // The ticking loop also lives at screen level: it keeps counting while the user is on
@@ -580,7 +580,7 @@ fun DashboardScreen(
                     top = 4.dp,
                     bottom = 24.dp
                 ),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                verticalArrangement = Arrangement.spacedBy(UiTokens.ItemGap)
             ) {
                 FocusHome(
                     style = FocusHomeStyle.fromKey(homeStyleKey),
@@ -756,7 +756,7 @@ fun DashboardScreen(
                         )
                         val earned = bank.recordWorkCredit(record, ratio, 0)
                         permissionTick++
-                        Toast.makeText(context, "Focus done! +$earned min leisure earned", Toast.LENGTH_LONG).show()
+                        Toast.makeText(context, "Focus done! +$earned min of leisure", Toast.LENGTH_LONG).show()
                     }
                 }
                 showFocusTimerDialog = false
@@ -873,7 +873,7 @@ fun PixelWorkRecordItem(record: TickTickWorkRecord) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp)
+                .padding(14.dp)
                 .heightIn(min = 64.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {

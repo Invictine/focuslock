@@ -1,6 +1,7 @@
 package com.focuslock.app.ui.dashboard.home
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -45,10 +46,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -66,7 +63,6 @@ import com.focuslock.app.ui.components.IconBadge
 import com.focuslock.app.ui.components.SectionHeader
 import com.focuslock.app.ui.components.StaggeredFadeSlide
 import com.focuslock.app.ui.components.pressScaleModifier
-import com.focuslock.app.ui.components.rememberDecorativePulse
 import com.focuslock.app.ui.dashboard.PixelWorkRecordItem
 
 /** Three function-first Focus homes. Legacy selections migrate to the closest layout. */
@@ -206,7 +202,7 @@ fun FocusHomeHeader(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp),
+            .padding(vertical = 8.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -233,16 +229,17 @@ fun FocusHomeHeader(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // Nuke button (tap to arm, long-press for details). Error tone, same
-            // 40dp squircle geometry as the other header actions.
+            // Nuke button (tap to arm, long-press for details). Deliberately quieter
+            // than before: no pulsing halo, and the same 40dp squircle face as the
+            // other header actions carries a muted error outline instead. Still a
+            // 48dp touch target, and it flips to a filled error face when armed.
             val nukeInteraction = remember { MutableInteractionSource() }
-            val nukeHaloAlphaState = rememberDecorativePulse(
-                initialValue = 0.10f,
-                targetValue = 0.28f,
-                active = state.nukeActive,
-                label = "nuke-halo",
-            )
-            val nukeHaloColor = MaterialTheme.colorScheme.error
+            val nukeBorder = if (state.nukeActive) MaterialTheme.colorScheme.error
+            else MaterialTheme.colorScheme.error.copy(alpha = 0.38f)
+            val nukeFaceContainer = if (state.nukeActive) MaterialTheme.colorScheme.errorContainer
+            else MaterialTheme.colorScheme.surfaceContainerHighest
+            val nukeGlyphColor = if (state.nukeActive) MaterialTheme.colorScheme.onErrorContainer
+            else MaterialTheme.colorScheme.error
             Box(
                 modifier = Modifier
                     .size(48.dp)
@@ -262,31 +259,17 @@ fun FocusHomeHeader(
             ) {
                 Box(
                     modifier = Modifier
-                        .size(48.dp)
-                        .drawBehind {
-                            val inset = 1.dp.toPx()
-                            val radius = 15.dp.toPx()
-                            drawRoundRect(
-                                color = nukeHaloColor,
-                                alpha = (nukeHaloAlphaState.value + 0.05f).coerceIn(0f, 1f),
-                                topLeft = Offset(inset, inset),
-                                size = Size(size.width - inset * 2, size.height - inset * 2),
-                                cornerRadius = CornerRadius(radius, radius),
-                            )
-                        },
-                )
-                Box(
-                    modifier = Modifier
                         .size(40.dp)
                         .clip(RoundedCornerShape(12.dp))
-                        .background(MaterialTheme.colorScheme.surfaceContainerHighest),
+                        .background(nukeFaceContainer)
+                        .border(1.dp, nukeBorder, RoundedCornerShape(12.dp)),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
                         text = "☢️",
-                        fontSize = 20.sp,
-                        lineHeight = 20.sp,
-                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 18.sp,
+                        lineHeight = 18.sp,
+                        color = nukeGlyphColor,
                     )
                 }
             }
@@ -369,17 +352,59 @@ fun SetupBannerCard(
     callbacks: FocusHomeCallbacks,
     modifier: Modifier = Modifier,
 ) {
+    if (!state.permissionsChecked) {
+        // Checks are still resolving (common on first run): a quiet neutral card
+        // instead of a raw zeros screen. Purely presentational — same tap target.
+        Card(
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceContainer,
+            ),
+            shape = RoundedCornerShape(20.dp),
+            modifier = modifier.fillMaxWidth().clickable { callbacks.onNavigatePermissions() },
+        ) {
+            Row(
+                modifier = Modifier.padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                IconBadge(
+                    icon = Icons.Rounded.Warning,
+                    size = 36.dp,
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                    contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "Getting set up",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        "Checking permissions so Focus can protect your apps.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Text(
+                    "Details",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
+        return
+    }
     val nextPermission = state.missingLabels.firstOrNull() ?: "Permission"
     val moreCount = (state.missingLabels.size - 1).coerceAtLeast(0)
     Card(
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.errorContainer,
         ),
-        shape = MaterialTheme.shapes.large,
+        shape = RoundedCornerShape(20.dp),
         modifier = modifier.fillMaxWidth().clickable { callbacks.onNavigatePermissions() },
     ) {
         Row(
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+            modifier = Modifier.padding(14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconBadge(
@@ -388,7 +413,7 @@ fun SetupBannerCard(
                 containerColor = MaterialTheme.colorScheme.error.copy(alpha = 0.18f),
                 contentColor = MaterialTheme.colorScheme.error,
             )
-            Spacer(modifier = Modifier.width(10.dp))
+            Spacer(modifier = Modifier.width(8.dp))
             Column(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(2.dp),
@@ -416,7 +441,7 @@ fun LazyListScope.SetupBannerItem(
     entranceIndex: Int = 1,
     screenKey: String? = null,
 ) {
-    if (state.permissionsChecked && !state.hasAllPermissions) {
+    if (!state.permissionsChecked || (state.permissionsChecked && !state.hasAllPermissions)) {
         item(key = "perms") {
             HomeEntrance(index = entranceIndex, screenKey = screenKey) {
                 SetupBannerCard(state = state, callbacks = callbacks)
@@ -525,7 +550,7 @@ fun HistoryToggleButton(
     ) {
         Icon(Icons.Rounded.History, contentDescription = null, modifier = Modifier.size(20.dp))
         Spacer(modifier = Modifier.width(8.dp))
-        Text(if (expanded) "Show less" else "History — show all")
+        Text(if (expanded) "Show less" else "Show full history")
     }
 }
 
@@ -564,14 +589,14 @@ fun TasksSummaryCard(
                 )
                 when (state.tasksState) {
                     FocusHomeTasksState.Loading -> Text(
-                        text = "…",
+                        text = "—",
                         style = MaterialTheme.typography.headlineSmall.copy(
                             fontWeight = FontWeight.Bold,
                         ),
                         color = purpleText,
                     )
                     FocusHomeTasksState.Error -> Text(
-                        text = "Couldn't load",
+                        text = "Couldn't load tasks",
                         style = MaterialTheme.typography.titleSmall.copy(
                             fontWeight = FontWeight.SemiBold,
                         ),
@@ -737,7 +762,7 @@ fun EmptyHistoryCard(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(24.dp),
+                .padding(14.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
@@ -841,10 +866,10 @@ fun FocusDayChart(
     val max = (buckets.maxOrNull() ?: 0).coerceAtLeast(0)
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-        shape = MaterialTheme.shapes.large,
+        shape = RoundedCornerShape(20.dp),
         modifier = modifier.fillMaxWidth(),
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
+        Column(modifier = Modifier.padding(14.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,

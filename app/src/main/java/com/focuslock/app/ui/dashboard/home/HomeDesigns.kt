@@ -85,7 +85,7 @@ private fun HomePrimaryActions(callbacks: FocusHomeCallbacks) {
       if (maxWidth < 350.dp) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
           Button(onClick = callbacks.onOpenTimer, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp), shape = MaterialTheme.shapes.large) {
-            Icon(Icons.Rounded.Timer, contentDescription = null, Modifier.size(20.dp)); Spacer(Modifier.width(7.dp)); Text("Start focus")
+            Icon(Icons.Rounded.Timer, contentDescription = null, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp)); Text("Start focus")
           }
           FilledTonalButton(onClick = callbacks.onOpenLog, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp), shape = MaterialTheme.shapes.large) { Text("Log work") }
         }
@@ -97,7 +97,7 @@ private fun HomePrimaryActions(callbacks: FocusHomeCallbacks) {
             contentPadding = PaddingValues(horizontal = 12.dp),
         ) {
             Icon(Icons.Rounded.Timer, contentDescription = null, Modifier.size(20.dp))
-            Spacer(Modifier.width(7.dp))
+            Spacer(Modifier.width(8.dp))
             Text("Start focus")
         }
         FilledTonalButton(
@@ -133,20 +133,30 @@ private fun homeMetrics(state: FocusHomeState): HomeMetrics = HomeMetrics(
 private fun HomeBalanceHero(state: FocusHomeState) {
     val metrics = homeMetrics(state)
     val largeText = LocalDensity.current.fontScale > 1.15f
-    Card(colors = CardDefaults.cardColors(MaterialTheme.colorScheme.surfaceContainer), shape = MaterialTheme.shapes.extraLarge) {
-        Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+    Card(colors = CardDefaults.cardColors(MaterialTheme.colorScheme.surfaceContainer), shape = RoundedCornerShape(20.dp)) {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Text("Today's time", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
             BoxWithConstraints(Modifier.fillMaxWidth()) {
                 if (maxWidth < 260.dp || largeText) Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MetricValue("Focus", if (state.focusMinutesLoaded) formatHomeDuration(metrics.focusSeconds) else "Loading…", MaterialTheme.colorScheme.primary, Modifier.fillMaxWidth(), state.focusMetricCaption)
+                    MetricValue("Focus", if (state.focusMinutesLoaded) formatHomeDuration(metrics.focusSeconds) else "—", MaterialTheme.colorScheme.primary, Modifier.fillMaxWidth(), state.focusMetricCaption)
                     MetricValue("Boundary leisure", leisureDisplay(state, metrics), MaterialTheme.colorScheme.tertiary, Modifier.fillMaxWidth(), state.leisureMetricCaption)
                 } else Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    MetricValue("Focus", if (state.focusMinutesLoaded) formatHomeDuration(metrics.focusSeconds) else "Loading…", MaterialTheme.colorScheme.primary, Modifier.weight(1f), state.focusMetricCaption)
+                    MetricValue("Focus", if (state.focusMinutesLoaded) formatHomeDuration(metrics.focusSeconds) else "—", MaterialTheme.colorScheme.primary, Modifier.weight(1f), state.focusMetricCaption)
                     MetricValue("Boundary leisure", leisureDisplay(state, metrics), MaterialTheme.colorScheme.tertiary, Modifier.weight(1f), state.leisureMetricCaption)
                 }
             }
             val measured = state.focusMinutesLoaded && metrics.leisureSeconds != null
-            ProportionBar(if (measured) state.focusMinutes.toFloat() else 0f, if (measured) metrics.leisureSeconds!!.div(60f) else 0f)
+            val hasUsage = measured && (state.focusMinutes > 0 || metrics.leisureSeconds > 0L)
+            if (measured && hasUsage) {
+                ProportionBar(state.focusMinutes.toFloat(), metrics.leisureSeconds.div(60f))
+            } else {
+                // Empty chart reads broken; a quiet caption is the honest empty state.
+                Text(
+                    "No focus logged yet today",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             RatioVerdict(metrics.ratio)
             UsageSyncCaption(state.usageStatusCaption)
         }
@@ -158,7 +168,7 @@ private fun HomeMomentumHero(state: FocusHomeState) {
     val metrics = homeMetrics(state)
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Today's time", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
-        MomentumRow("Focus", if (state.focusMinutesLoaded) formatHomeDuration(metrics.focusSeconds) else "Loading…", state.focusProgress, MaterialTheme.colorScheme.primary, "${state.focusMetricCaption} · goal ${state.focusGoalMinutes}m")
+        MomentumRow("Focus", if (state.focusMinutesLoaded) formatHomeDuration(metrics.focusSeconds) else "—", state.focusProgress, MaterialTheme.colorScheme.primary, "${state.focusMetricCaption} · goal ${state.focusGoalMinutes}m")
         val leisureProgress = if (metrics.leisureSeconds != null) {
             val focus = metrics.focusSeconds.coerceAtLeast(1L)
             (metrics.leisureSeconds / 60f / (focus / 60f + metrics.leisureSeconds / 60f)).coerceIn(0f, 1f)
@@ -180,7 +190,7 @@ private fun HomeTodayHero(state: FocusHomeState) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text("Today's time", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.padding(top = 6.dp))
-        LedgerRow("Focus", state.focusMinutesLoaded.then(metrics.focusSeconds)?.let(::formatHomeDuration) ?: "Loading…", MaterialTheme.colorScheme.primary)
+        LedgerRow("Focus", state.focusMinutesLoaded.then(metrics.focusSeconds)?.let(::formatHomeDuration) ?: "—", MaterialTheme.colorScheme.primary)
         Text(state.focusMetricCaption, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         LedgerRow("Boundary leisure", leisureDisplay(state, metrics), MaterialTheme.colorScheme.tertiary)
         Text(state.leisureMetricCaption, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -199,7 +209,7 @@ private fun leisureDisplay(state: FocusHomeState, metrics: HomeMetrics): String 
         ?: when {
             state.usageAccessGranted == false -> "Usage Access needed"
             state.localUsageDataAvailable == false -> "Unavailable"
-            else -> "Loading…"
+            else -> "—"
         }
 
 @Composable
@@ -242,7 +252,7 @@ private fun LedgerRow(label: String, value: String, color: androidx.compose.ui.g
     Row(Modifier.fillMaxWidth().padding(vertical = 11.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(10.dp).clip(RoundedCornerShape(5.dp)).background(color))
-            Spacer(Modifier.width(10.dp))
+            Spacer(Modifier.width(8.dp))
             Text(label, style = MaterialTheme.typography.titleMedium)
         }
         Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
@@ -257,7 +267,7 @@ private fun RatioVerdict(
     detailColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.onSurfaceVariant,
     showRatioLabel: Boolean = true,
 ) {
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(3.dp)) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(summary.title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold, color = titleColor)
         Text(summary.detail, style = MaterialTheme.typography.bodySmall, color = detailColor)
         if (showRatioLabel) Text(summary.ratioLabel, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = titleColor)
@@ -275,8 +285,8 @@ private fun NextTaskCard(state: FocusHomeState, callbacks: FocusHomeCallbacks) {
     }, colors = CardDefaults.cardColors(MaterialTheme.colorScheme.surfaceContainerLow), shape = MaterialTheme.shapes.large) {
         Row(Modifier.fillMaxWidth().padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Rounded.Checklist, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(24.dp))
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+            Spacer(Modifier.width(8.dp))
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("Next task", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 when (state.tasksState) {
                     FocusHomeTasksState.Loading -> Text("Finding your next task…", style = MaterialTheme.typography.bodyLarge)

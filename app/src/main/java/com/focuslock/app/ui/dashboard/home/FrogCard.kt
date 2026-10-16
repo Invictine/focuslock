@@ -285,7 +285,7 @@ fun FrogCard(modifier: Modifier = Modifier, onOpenSettings: (() -> Unit)? = null
             shape = MaterialTheme.shapes.large,
             modifier = modifier.fillMaxWidth(),
         ) {
-            Column(Modifier.padding(16.dp)) {
+            Column(Modifier.padding(14.dp)) {
                 Text("Eat the frog", style = MaterialTheme.typography.titleSmall)
                 Text("Off · Enable in settings", style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -300,7 +300,7 @@ fun FrogCard(modifier: Modifier = Modifier, onOpenSettings: (() -> Unit)? = null
             shape = MaterialTheme.shapes.large,
             modifier = modifier.fillMaxWidth(),
         ) {
-            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("Eat the frog", style = MaterialTheme.typography.titleSmall)
                 Text(
                     "Released for today · You logged more than 30 minutes of focus.",
@@ -325,7 +325,7 @@ fun FrogCard(modifier: Modifier = Modifier, onOpenSettings: (() -> Unit)? = null
             },
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
+            modifier = Modifier.padding(14.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -335,7 +335,7 @@ fun FrogCard(modifier: Modifier = Modifier, onOpenSettings: (() -> Unit)? = null
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
                     contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                 )
-                Spacer(modifier = Modifier.width(12.dp))
+                Spacer(modifier = Modifier.width(8.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "Eat the frog",
