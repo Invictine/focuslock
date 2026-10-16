@@ -338,9 +338,10 @@ class ConvexSyncClient(
     suspend fun configureStrictAccess(config: JSONObject): JSONObject? =
         post("/api/action", "strictAccess:configure", config)
 
-    suspend fun unlockStrictAccess(sessionId: String, endsAt: Long, pin: String? = null, charging: Boolean = false): JSONObject? {
+    suspend fun unlockStrictAccess(sessionId: String, endsAt: Long, pin: String? = null, charging: Boolean = false, requestedMethod: String? = null): JSONObject? {
         val args = JSONObject().put("strictSessionId", sessionId).put("strictEndsAt", endsAt).put("charging", charging)
         if (pin != null) args.put("pin", pin)
+        if (requestedMethod != null) args.put("method", requestedMethod)
         return post("/api/action", "strictAccess:unlock", args)
     }
 

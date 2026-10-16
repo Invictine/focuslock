@@ -6,8 +6,6 @@ import android.app.TimePickerDialog
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
-import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.text.KeyboardOptions
@@ -40,7 +38,6 @@ import java.util.Calendar
 
 private val accessMethods = listOf(
     "timer" to ("Timer" to "Keep settings locked until your chosen end time."),
-    "schedules" to ("Follow schedules" to "Lock settings during your weekly focus windows."),
     "pin" to ("PIN" to "Enter your saved PIN to end a commitment early."),
     "charger" to ("Charger" to "Connect this device to power before unlocking."),
     "cooldown" to ("Cooldown" to "Start a waiting period before you can unlock."),
@@ -81,7 +78,9 @@ internal fun StrictAccessScreen(onOpenPermissions: () -> Unit = {}, permissionCh
     var minute by rememberSaveable { mutableStateOf(0) }
     var availableAt by remember { mutableStateOf(0L) }
     var now by remember { mutableStateOf(System.currentTimeMillis()) }
-    var protectionsExpanded by rememberSaveable { mutableStateOf(false) }
+    var protectionsExpanded by rememberSaveable { mutableStateOf(true) }
+    var locationExpanded by rememberSaveable { mutableStateOf(false) }
+    var unlockMethod by remember { mutableStateOf("pin") }
     LaunchedEffect(config) { draft = config }
     LaunchedEffect(accountId) { pin = ""; confirmPin = ""; unlockPin = ""; notice = null }
     LaunchedEffect(active, endsAt, availableAt) {
@@ -111,12 +110,11 @@ internal fun StrictAccessScreen(onOpenPermissions: () -> Unit = {}, permissionCh
         }
     }
     suspend fun saveOptions() {
-        check(!active) { "Wait until your current commitment ends before changing access methods." }
         val needsService = draft.preventUninstall || draft.blockDeviceSettings || draft.blockRecents || draft.blockSplitScreen
         check(!needsService || (permissionCheck?.invoke() ?: kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             com.focuslock.app.ui.permissions.PermissionHelper.isAccessibilityServiceEnabled(context)
         })) { "Enable Accessibility in Permissions & protection before using device protections." }
-        if (draft.method == "pin" && (pin.isNotBlank() || !draft.hasPin)) {
+        if ("pin" in draft.selectedMethods && (pin.isNotBlank() || !draft.hasPin)) {
             check(pin.matches(Regex("[0-9]{4,12}")) && pin == confirmPin) { "Enter and confirm the same PIN (4 to 12 digits)." }
         }
         val owner = accountId
@@ -127,12 +125,12 @@ internal fun StrictAccessScreen(onOpenPermissions: () -> Unit = {}, permissionCh
             check(owner != null && owner == auth.getAccountId()) { "Account changed. Try again." }
             access.save(StrictAccessConfig.fromJson(response), pin.takeIf { it.isNotBlank() }, owner)
         } else {
-            check(draft.method != "approval") { "Sign in to set up an approval contact." }
+            check("approval" !in draft.selectedMethods) { "Sign in to set up an approval contact." }
             access.save(draft, pin.takeIf { it.isNotBlank() })
         }
         pin = ""; confirmPin = ""
     }
-    suspend fun requestUnlock() {
+    suspend fun requestUnlock(method: String) {
         val expectedAccount = auth.getAccountId()
         val expectedEnd = settings.lockdownEndsAtFlow.firstValue()
         if (signedIn) {
@@ -143,7 +141,7 @@ internal fun StrictAccessScreen(onOpenPermissions: () -> Unit = {}, permissionCh
             val state = connection.getStrictApprovalState() ?: error("Could not load your active commitment.")
             val session = state.optString("strictSessionId")
             check(session.isNotBlank() && state.optLong("strictEndsAt") == expectedEnd) { "Sync this commitment and try again." }
-            val response = connection.unlockStrictAccess(session, expectedEnd, unlockPin.takeIf { it.isNotBlank() }, access.isCharging())
+            val response = connection.unlockStrictAccess(session, expectedEnd, unlockPin.takeIf { it.isNotBlank() }, access.isCharging(), method)
                 ?: error("Could not check your access method. Connect and try again.")
             check(expectedAccount == auth.getAccountId()) { "Account changed. Try again." }
             availableAt = response.optLong("availableAt", 0)
@@ -153,7 +151,7 @@ internal fun StrictAccessScreen(onOpenPermissions: () -> Unit = {}, permissionCh
                 notice = "Strict Mode ended. Your boundaries and permanent blocks stay in place."
             } else notice = response.optString("reason", "Your commitment is still active.")
         } else {
-            availableAt = access.requestOfflineUnlock(expectedEnd, unlockPin)
+            availableAt = access.requestOfflineUnlock(expectedEnd, unlockPin, method)
             if (availableAt <= System.currentTimeMillis()) {
                 check(settings.applyRemoteApprovedUnlock(expectedEnd, System.currentTimeMillis())) { "The commitment changed. Try again." }
                 notice = "Strict Mode ended. Your boundaries and permanent blocks stay in place."
@@ -165,82 +163,112 @@ internal fun StrictAccessScreen(onOpenPermissions: () -> Unit = {}, permissionCh
     Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)
         .verticalScroll(rememberScrollState()).padding(horizontal = UiTokens.ScreenPadding).padding(bottom = 32.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp)) {
-        ScreenHeader("Strict Mode", "Make a commitment to the boundaries you already chose.")
-        Surface(color = if (active) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainer,
+        ScreenHeader("Strict Mode", "Your focus. Your rules. A commitment that holds.")
+        Surface(color = if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
             shape = MaterialTheme.shapes.large) {
             Column(Modifier.fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(if (active) "Your boundaries are protected" else "Set it up before you commit", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                Text(if (active) "COMMITMENT ACTIVE" else "BUILD YOUR COMMITMENT", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+                Text(if (active) "Your boundaries are protected" else "Make distraction harder", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 Text(if (timedActive) "Ends in ${formatLockdownRemaining((endsAt - now).coerceAtLeast(0))}"
                     else if (automatedActive) "A schedule or location commitment is active."
-                    else "Choose an access method, review the protections, then start when you're ready.", style = MaterialTheme.typography.bodyMedium)
+                    else "Combine unlock options, add protections, and choose how long to commit.", style = MaterialTheme.typography.bodyMedium)
                 if (timedActive) {
-                    Text("Access: ${accessMethods.firstOrNull { it.first == config.method }?.second?.first ?: "Timer"}", style = MaterialTheme.typography.labelLarge)
-                    if (config.method in listOf("pin", "charger", "cooldown")) {
-                        Button(onClick = { if (config.method == "pin") showUnlock = true else perform { requestUnlock() } }, enabled = !busy,
-                            modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) {
-                            Text(if (availableAt > now) "Wait ${((availableAt - now) / 1000).coerceAtLeast(1)}s"
-                                else if (config.method == "cooldown") "${if (availableAt > 0) "Finish" else "Start"} cooldown" else "Unlock with ${config.method}")
+                    Text("Unlock options: ${methodSummary(config)}", style = MaterialTheme.typography.labelLarge)
+                    config.selectedMethods.filter { it in listOf("pin", "charger", "cooldown") }.forEach { method ->
+                        OutlinedButton(onClick = {
+                            unlockMethod = method
+                            if (method == "pin") showUnlock = true else perform { requestUnlock(method) }
+                        }, enabled = !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) {
+                            Text(if (method == "cooldown" && availableAt > now) "Cooldown | ${((availableAt - now) / 1000).coerceAtLeast(1)}s remaining"
+                                else if (method == "cooldown") "${if (availableAt > 0) "Finish" else "Start"} cooldown"
+                                else "Unlock with ${method.replaceFirstChar { it.uppercase() }}")
                         }
-                    } else if (config.method != "approval") Text("Settings unlock when this commitment ends.", style = MaterialTheme.typography.bodySmall)
+                    }
+                    Text("The timer also ends this commitment automatically.", style = MaterialTheme.typography.bodySmall)
                     TextButton(onClick = { perform { settings.extendLockdown(maxOf(endsAt, System.currentTimeMillis()) + 3_600_000L); app.syncManager.syncNow(auth) } }, enabled = !busy,
                         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("Extend by one hour") }
-                } else if (!active && draft.method != "schedules") {
-                    Text("Access: ${accessMethods.first { it.first == draft.method }.second.first}", style = MaterialTheme.typography.labelLarge)
+                } else if (!active) {
+                    Text("Unlock options: ${methodSummary(draft)}", style = MaterialTheme.typography.labelLarge)
                     Button(onClick = { showReview = true }, enabled = !busy, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) { Text("Review and start") }
                 }
             }
         }
-        Text("Access method", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-        Column(Modifier.fillMaxWidth().selectableGroup()) {
-            accessMethods.forEach { (key, copy) ->
-                Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).selectable(selected = draft.method == key, enabled = !active && !busy,
-                    role = Role.RadioButton, onClick = { draft = draft.copy(method = key) }).padding(vertical = 12.dp, horizontal = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    RadioButton(selected = draft.method == key, onClick = null, enabled = !active && !busy)
-                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text(copy.first, style = MaterialTheme.typography.titleSmall)
-                        Text(copy.second, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("01  |  Unlock options", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text("Mix and match. Any selected option can end a timed commitment. The timer always expires automatically.",
+                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerLow) {
+            Column(Modifier.padding(horizontal = 16.dp)) {
+                accessMethods.forEachIndexed { index, (key, copy) ->
+                    val selected = key in draft.selectedMethods
+                    val enabled = !active && !busy && key != "timer"
+                    Row(Modifier.fillMaxWidth().heightIn(min = 80.dp)
+                        .toggleable(value = selected || key == "timer", enabled = enabled, role = Role.Checkbox, onValueChange = { checked ->
+                            val methods = draft.selectedMethods.filter { it != "schedules" }.toMutableSet().apply {
+                                add("timer")
+                                if (checked) add(key) else remove(key)
+                            }.toList()
+                            draft = draft.copy(method = "timer", methods = methods)
+                        }).padding(vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(copy.first, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                            Text(if (key == "timer") "Always included | ends at your chosen time" else copy.second,
+                                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        Checkbox(checked = selected || key == "timer", onCheckedChange = null, enabled = enabled)
                     }
+                    if (index < accessMethods.lastIndex) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 }
             }
         }
-        if (!active && draft.method == "pin") {
+        if (active) Text("Unlock options stay fixed during a commitment. You can still add protections below.",
+            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (!active && "pin" in draft.selectedMethods) {
             Text(if (draft.hasPin) "Leave these empty to keep your saved PIN." else "Ask someone you trust to choose a PIN if you want extra accountability.", style = MaterialTheme.typography.bodyMedium)
             OutlinedTextField(pin, { pin = it.filter(Char::isDigit).take(12) }, label = { Text("PIN") }, singleLine = true,
                 visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword), modifier = Modifier.fillMaxWidth())
             OutlinedTextField(confirmPin, { confirmPin = it.filter(Char::isDigit).take(12) }, label = { Text("Confirm PIN") }, singleLine = true,
                 visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword), modifier = Modifier.fillMaxWidth())
         }
-        if (draft.method == "cooldown") {
+        if ("cooldown" in draft.selectedMethods) {
             Text("Wait ${draft.cooldownMinutes} minutes before unlocking", style = MaterialTheme.typography.titleSmall)
             Slider(draft.cooldownMinutes.toFloat(), { draft = draft.copy(cooldownMinutes = it.toInt()) }, valueRange = 2f..10f, steps = 7, enabled = !active && !busy)
         }
-        if (draft.method == "approval") ApprovalUnlockCard(settings)
+        if ("approval" in draft.selectedMethods) ApprovalUnlockCard(settings)
         HorizontalDivider()
         TextButton(onClick = { protectionsExpanded = !protectionsExpanded }, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) {
-            Text(if (protectionsExpanded) "Hide protections" else "Choose protections")
+            Text(if (protectionsExpanded) "02  |  Protections" else "Choose protections")
         }
         if (protectionsExpanded) {
+            Text("Turn on extra safeguards at any time. Active protections can only become stricter.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             ProtectionOption("Lock boundary settings", "Always on. You can add stronger blocks; existing rules cannot be weakened.", true, false) {}
-            ProtectionOption("Prevent uninstalling FocusLock", "Stops detected uninstall and device-admin removal prompts while Strict Mode is active.", draft.preventUninstall, !active && !busy) { draft = draft.copy(preventUninstall = it) }
-            ProtectionOption("Block device settings", "Restricts Android Settings. Calls, emergency tools, keyboards and required system prompts remain available.", draft.blockDeviceSettings, !active && !busy) { draft = draft.copy(blockDeviceSettings = it) }
-            ProtectionOption("Block recent apps", "Closes detected overview screens to reduce floating-window bypasses.", draft.blockRecents, !active && !busy) { draft = draft.copy(blockRecents = it) }
-            ProtectionOption("Block split screen", "Returns to full screen when two apps share the display.", draft.blockSplitScreen, !active && !busy) { draft = draft.copy(blockSplitScreen = it) }
+            ProtectionOption("Prevent uninstalling FocusLock", "Stops detected uninstall and device-admin removal prompts while Strict Mode is active.", draft.preventUninstall, !busy && (!active || !config.preventUninstall)) { draft = draft.copy(preventUninstall = it) }
+            ProtectionOption("Block device settings", "Restricts Android Settings. Calls, emergency tools, keyboards and required system prompts remain available.", draft.blockDeviceSettings, !busy && (!active || !config.blockDeviceSettings)) { draft = draft.copy(blockDeviceSettings = it) }
+            ProtectionOption("Block recent apps", "Closes detected overview screens to reduce floating-window bypasses.", draft.blockRecents, !busy && (!active || !config.blockRecents)) { draft = draft.copy(blockRecents = it) }
+            ProtectionOption("Block split screen", "Returns to full screen when two apps share the display.", draft.blockSplitScreen, !busy && (!active || !config.blockSplitScreen)) { draft = draft.copy(blockSplitScreen = it) }
             ProtectionOption("Keep reinstalled apps blocked", "Saved app identities stay blocked after reinstalling. Reinstalling does not reset your boundaries.", true, false) {}
         }
-        if (!active) {
+        run {
             OutlinedButton(onClick = { perform { saveOptions(); notice = "Access method and protections saved." } }, enabled = !busy,
-                modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) { Text(if (busy) "Saving…" else "Save setup") }
-            if (draft.method == "schedules" && config.method == "schedules") StrictScheduleEditor()
-            else if (draft.method == "schedules") Text("Save setup, then choose your weekly focus windows.", style = MaterialTheme.typography.bodyMedium)
+                modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) { Text(if (busy) "Saving…" else if (active) "Save stronger protections" else "Save setup") }
         }
         notice?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary) }
         if (draft.preventUninstall || draft.blockDeviceSettings || draft.blockRecents || draft.blockSplitScreen) {
             TextButton(onClick = onOpenPermissions, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("Review protection permissions") }
         }
-        Text("Location is separate", style = MaterialTheme.typography.titleSmall)
-        Text("Choose home-only blocking and location commitments in Boundaries → Blocking location. A saved place does not grant location permission on another device.",
-            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        HorizontalDivider()
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("03  |  Location", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Text("Automatically protect settings at a saved place. Location commitments run alongside your timer; leaving a place does not cancel a timed commitment.",
+                style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        OutlinedButton(onClick = { locationExpanded = !locationExpanded }, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp)) {
+            Text(if (locationExpanded) "Hide location options" else "Set up location")
+        }
+        if (locationExpanded) StrictLocationAutomationEditor()
+
     }
     if (showReview) AlertDialog(onDismissRequest = { if (!busy) showReview = false }, title = { Text("Review your commitment") }, text = {
         Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
@@ -254,7 +282,7 @@ internal fun StrictAccessScreen(onOpenPermissions: () -> Unit = {}, permissionCh
                     picker.datePicker.maxDate = System.currentTimeMillis() + 30 * 86_400_000L
                     picker.show()
                 })
-            Text("Access: ${accessMethods.first { it.first == draft.method }.second.first}. PIN, charger, cooldown or approval can end this commitment early only if selected before starting.")
+            Text("Unlock options: ${methodSummary(draft)}. Any selected option can end this timed commitment; the timer also ends it automatically.")
             Text("You can add blocks. Existing limits, schedules and blocked targets stay protected. Permanent blocks remain permanent.")
         }
     }, confirmButton = { TextButton(enabled = !busy, onClick = { perform {
@@ -274,7 +302,7 @@ internal fun StrictAccessScreen(onOpenPermissions: () -> Unit = {}, permissionCh
                 visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
             notice?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
         }
-    }, confirmButton = { TextButton(enabled = !busy && unlockPin.length >= 4, onClick = { perform { requestUnlock() } }) { Text("Unlock") } }, dismissButton = { TextButton(onClick = { showUnlock = false; unlockPin = "" }) { Text("Cancel") } })
+    }, confirmButton = { TextButton(enabled = !busy && unlockPin.length >= 4, onClick = { perform { requestUnlock(unlockMethod) } }) { Text("Unlock") } }, dismissButton = { TextButton(onClick = { showUnlock = false; unlockPin = "" }) { Text("Cancel") } })
 }
 
 private suspend fun <T> kotlinx.coroutines.flow.Flow<T>.firstValue(): T = first()
@@ -290,3 +318,8 @@ private fun ProtectionOption(title: String, summary: String, checked: Boolean, e
         Switch(checked, onCheckedChange = null, enabled = enabled)
     }
 }
+
+private fun methodSummary(config: StrictAccessConfig): String =
+    (listOf("timer") + config.selectedMethods).distinct().mapNotNull { key ->
+        accessMethods.firstOrNull { it.first == key }?.second?.first
+    }.joinToString(" + ")

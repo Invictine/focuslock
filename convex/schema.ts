@@ -331,6 +331,7 @@ export default defineSchema({
   strictAccess: defineTable({
     userId: v.string(),
     method: v.union(v.literal("timer"), v.literal("schedules"), v.literal("pin"), v.literal("charger"), v.literal("cooldown"), v.literal("approval")),
+    methods: v.optional(v.array(v.union(v.literal("timer"), v.literal("schedules"), v.literal("pin"), v.literal("charger"), v.literal("cooldown"), v.literal("approval")))),
     cooldownMinutes: v.number(),
     preventUninstall: v.boolean(),
     blockDeviceSettings: v.boolean(),

@@ -1,4 +1,4 @@
-import { action, internalMutation, mutation, query } from "./_generated/server";
+import { action, internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { internal } from "./_generated/api";
 import { v } from "convex/values";
 
@@ -72,6 +72,11 @@ export const getGuardian = query({
   },
 });
 
+export const guardianExists = internalQuery({
+  args: { userId: v.string() },
+  handler: async (ctx, args) => !!(await ctx.db.query("strictGuardians").withIndex("by_user", q => q.eq("userId", args.userId)).first()),
+});
+
 /** Internal transaction: checks the active commitment and enforces request rate limits. */
 export const createRequest = internalMutation({
   args: { userId: v.string(), strictSessionId: v.string(), strictEndsAt: v.number(), tokenHash: v.string(), now: v.number() },
@@ -79,7 +84,7 @@ export const createRequest = internalMutation({
     const guardian = await ctx.db.query("strictGuardians").withIndex("by_user", (q) => q.eq("userId", args.userId)).first();
     if (!guardian) throw new Error("Configure a guardian before requesting approval");
     const access = await ctx.db.query("strictAccess").withIndex("by_user", (q) => q.eq("userId", args.userId)).first();
-    if (access && access.method !== "approval") throw new Error("This commitment does not use approval access");
+    if (access && !(access.methods ?? [access.method]).includes("approval")) throw new Error("This commitment does not use approval access");
     const prefs = await ctx.db.query("userPrefs").withIndex("by_user", (q) => q.eq("userId", args.userId)).first();
     if (!prefs?.strictMode || (prefs.strictEndsAt ?? 0) <= args.now) throw new Error("Strict Mode is not active");
     if (!prefs.strictSessionId || prefs.strictSessionId !== args.strictSessionId || prefs.strictEndsAt !== args.strictEndsAt) {

@@ -135,6 +135,71 @@ describe("Strict access configuration and account actions", () => {
     expect(prefs.prefs).toMatchObject({ strictMode: false, strictApprovedSessionId: "session-1", strictApprovedEndsAt: endsAt });
   });
 
+  it("allows any selected access route, rejects unselected routes, and keeps the legacy method as the default", async () => {
+    const t = convexTest(schema, modules);
+    const alice = t.withIdentity({ subject: "alice" });
+    await alice.action(api.strictAccess.configure, {
+      ...base, method: "pin", methods: ["pin", "charger"], pin: "482913", expectedRevision: 0,
+    });
+    const endsAt = await beginCommitment(t, "alice");
+    expect((await alice.action(api.strictAccess.unlock, {
+      strictSessionId: "session-1", strictEndsAt: endsAt, method: "cooldown",
+    } as never)).reason).toContain("not configured");
+    expect((await alice.action(api.strictAccess.unlock, {
+      strictSessionId: "session-1", strictEndsAt: endsAt, method: "charger", charging: false,
+    })).reason).toContain("charger");
+    expect((await alice.action(api.strictAccess.unlock, {
+      strictSessionId: "session-1", strictEndsAt: endsAt, method: "charger", charging: true,
+    })).released).toBe(true);
+
+    const bob = t.withIdentity({ subject: "bob" });
+    await bob.action(api.strictAccess.configure, { ...base, method: "pin", pin: "482913", expectedRevision: 0 });
+    const bobEndsAt = await beginCommitment(t, "bob", "bob-session");
+    expect((await bob.action(api.strictAccess.unlock, {
+      strictSessionId: "bob-session", strictEndsAt: bobEndsAt, pin: "482913",
+    })).released).toBe(true);
+  });
+
+  it("permits only stronger active protections and preserves an in-progress cooldown", async () => {
+    const t = convexTest(schema, modules);
+    const alice = t.withIdentity({ subject: "alice" });
+    await alice.action(api.strictAccess.configure, { ...base, method: "cooldown", expectedRevision: 0 });
+    const endsAt = await beginCommitment(t, "alice");
+    await alice.action(api.strictAccess.unlock, { strictSessionId: "session-1", strictEndsAt: endsAt });
+    const before = await t.run(ctx => ctx.db.query("strictAccess").withIndex("by_user", q => q.eq("userId", "alice")).first());
+    expect(before?.unlockRequestedAt).toBeDefined();
+    await expect(alice.action(api.strictAccess.configure, {
+      ...base, method: "pin", methods: ["cooldown", "pin"], pin: "482913", expectedRevision: 1,
+    })).rejects.toThrow("cannot be weakened");
+    await alice.action(api.strictAccess.configure, {
+      ...base, blockRecents: true, method: "cooldown", expectedRevision: 1,
+    });
+    const after = await t.run(ctx => ctx.db.query("strictAccess").withIndex("by_user", q => q.eq("userId", "alice")).first());
+    expect(after).toMatchObject({ unlockRequestedAt: before?.unlockRequestedAt, unlockSessionId: "session-1", revision: 2, blockRecents: true });
+  });
+
+  it("lets a legacy timer commitment add protections without changing its default access route", async () => {
+    const t = convexTest(schema, modules);
+    const alice = t.withIdentity({ subject: "alice" });
+    await beginCommitment(t, "alice");
+    expect(await t.run(ctx => ctx.db.query("strictAccess").withIndex("by_user", q => q.eq("userId", "alice")).first())).toBeNull();
+
+    const saved = await alice.action(api.strictAccess.configure, {
+      ...base,
+      method: "timer",
+      methods: ["timer"],
+      cooldownMinutes: 5,
+      preventUninstall: true,
+      blockDeviceSettings: true,
+      expectedRevision: 0,
+    });
+
+    expect(saved).toMatchObject({ method: "timer", methods: ["timer"], cooldownMinutes: 5, revision: 1 });
+    expect(saved).not.toHaveProperty("_id");
+    const row = await t.run(ctx => ctx.db.query("strictAccess").withIndex("by_user", q => q.eq("userId", "alice")).first());
+    expect(row?.revision).toBe(1);
+  });
+
   it("anchors cooldown to the exact commitment session and releases only after its server deadline", async () => {
     const t = convexTest(schema, modules);
     const alice = t.withIdentity({ subject: "alice" });

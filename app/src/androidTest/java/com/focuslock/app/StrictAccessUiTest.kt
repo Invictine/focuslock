@@ -5,6 +5,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onFirst
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.unit.Density
@@ -35,7 +37,7 @@ class StrictAccessUiTest {
         compose.setContent { FocusLockTheme(dynamicColor = false) {
             StrictAccessScreen(onOpenPermissions = { openedPermissions = true }, permissionCheck = { false })
         } }
-        compose.onNodeWithText("Choose protections").performScrollTo().performClick()
+        compose.onNodeWithText("Protections", substring = true).performScrollTo().assertIsDisplayed()
         compose.onNodeWithText("Prevent uninstalling FocusLock").performScrollTo().performClick()
         compose.onNodeWithText("Save setup").performScrollTo().performClick()
         compose.onNodeWithText("Enable Accessibility in Permissions & protection before using device protections.")
@@ -46,18 +48,28 @@ class StrictAccessUiTest {
     }
 
     @Test
-    fun allSixAccessMethodsAreReachableWithoutStartingStrictMode() {
+    fun unlockOptionsCanBeMixedAndMatchedWithoutStartingStrictMode() {
         assumeStrictModeIsOff()
         compose.setContent { FocusLockTheme(dynamicColor = false) { StrictAccessScreen() } }
 
-        listOf("Timer", "Follow schedules", "PIN", "Charger", "Cooldown", "Approval contact").forEach { method ->
-            compose.onNodeWithText(method, useUnmergedTree = true)
-                .performScrollTo()
-                .assertIsDisplayed()
-                .performClick()
+        val desired = listOf("PIN", "Charger", "Cooldown", "Approval contact")
+        desired.forEach { method ->
+            compose.onNodeWithText(method, useUnmergedTree = true).performScrollTo().assertIsDisplayed().performClick()
         }
-        compose.onNodeWithText("Location is separate").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Unlock options: Timer + PIN + Charger + Cooldown + Approval contact")
+            .performScrollTo().assertIsDisplayed()
+
+        // Remove one option to confirm the selection is independent and the timer remains included.
+        compose.onAllNodesWithText("PIN", useUnmergedTree = true).onFirst().performScrollTo().performClick()
+        compose.onNodeWithText("Unlock options: Timer + Charger + Cooldown + Approval contact")
+            .performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Follow schedules", useUnmergedTree = true).assertDoesNotExist()
+        compose.onNodeWithText("Protections", substring = true).performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Save setup").performScrollTo().assertIsDisplayed()
+
         compose.onNodeWithText("Activate at a place").assertDoesNotExist()
+        compose.onNodeWithText("Set up location").performScrollTo().performClick()
+        compose.onNodeWithText("Activate at a place").performScrollTo().assertIsDisplayed()
         assertStillOff()
     }
 
@@ -79,6 +91,14 @@ class StrictAccessUiTest {
         assumeStrictModeIsOff()
         compose.setContent { FocusLockTheme(dynamicColor = false) { StrictAccessScreen() } }
 
+        compose.waitForIdle()
+        val instrumentation = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation()
+        instrumentation.uiAutomation.takeScreenshot()?.let { bitmap ->
+            instrumentation.targetContext.cacheDir.resolve("strict-settings-preview.png").outputStream().use {
+                bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+            }
+            bitmap.recycle()
+        }
         compose.onNodeWithText("Review and start").performScrollTo().performClick()
         compose.onNodeWithText("Review your commitment").assertIsDisplayed()
         compose.onNodeWithText("Start Strict Mode").assertIsDisplayed()

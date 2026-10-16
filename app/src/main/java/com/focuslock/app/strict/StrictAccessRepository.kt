@@ -28,6 +28,8 @@ private val Context.strictAccessStore by preferencesDataStore("focuslock_strict_
 @Serializable
 data class StrictAccessConfig(
     val method: String = "timer",
+    /** Multiple offline release routes. Null/empty retains compatibility with older clients. */
+    val methods: List<String>? = null,
     val cooldownMinutes: Int = 5,
     val preventUninstall: Boolean = false,
     val blockDeviceSettings: Boolean = false,
@@ -40,13 +42,19 @@ data class StrictAccessConfig(
     companion object {
         val methods = listOf("timer", "schedules", "pin", "charger", "cooldown", "approval")
         fun fromJson(raw: JSONObject) = StrictAccessConfig(
-            method = raw.optString("method", "timer"), cooldownMinutes = raw.optInt("cooldownMinutes", 5),
+            method = raw.optString("method", "timer"), methods = raw.optJSONArray("methods")?.let { array ->
+                (0 until array.length()).mapNotNull { array.optString(it).takeIf(String::isNotBlank) }
+            }, cooldownMinutes = raw.optInt("cooldownMinutes", 5),
             preventUninstall = raw.optBoolean("preventUninstall"), blockDeviceSettings = raw.optBoolean("blockDeviceSettings"),
             blockRecents = raw.optBoolean("blockRecents"), blockSplitScreen = raw.optBoolean("blockSplitScreen"),
             blockReinstalledApps = raw.optBoolean("blockReinstalledApps", true), hasPin = raw.optBoolean("hasPin"), revision = raw.optLong("revision"),
         )
     }
-    fun toJson() = JSONObject().put("method", method).put("cooldownMinutes", cooldownMinutes)
+    val selectedMethods: List<String>
+        get() = methods?.filter { it in StrictAccessConfig.methods }?.distinct()?.takeIf { it.isNotEmpty() }
+            ?: listOf(method).filter { it in StrictAccessConfig.methods }
+
+    fun toJson() = JSONObject().put("method", method).put("methods", org.json.JSONArray(selectedMethods)).put("cooldownMinutes", cooldownMinutes)
         .put("preventUninstall", preventUninstall).put("blockDeviceSettings", blockDeviceSettings)
         .put("blockRecents", blockRecents).put("blockSplitScreen", blockSplitScreen).put("blockReinstalledApps", blockReinstalledApps)
         .put("expectedRevision", revision)
@@ -80,17 +88,22 @@ class StrictAccessRepository(
     suspend fun ownerAccountId(): String? = decode(store.data.first()[key]).accountId
 
     suspend fun save(config: StrictAccessConfig, pin: String? = null, accountId: String? = null) {
-        check(!active()) { "Access methods and protections are fixed until Strict Mode ends." }
-        require(config.method in StrictAccessConfig.methods && config.cooldownMinutes in 2..10)
+        require(config.selectedMethods.isNotEmpty() && config.selectedMethods.size == (config.methods?.distinct()?.size ?: 1) && config.cooldownMinutes in 2..10)
         val salt = pin?.let { require(it.matches(Regex("[0-9]{4,12}"))) { "Use a PIN with 4 to 12 digits." }; ByteArray(24).also(SecureRandom()::nextBytes).joinToString("") { b -> "%02x".format(b) } }
         val hash = if (pin != null && salt != null) withContext(Dispatchers.Default) { digest(pin, salt) } else null
         store.edit { prefs ->
-            check(!active()) { "Access methods and protections are fixed until Strict Mode ends." }
             val current = decode(prefs[key])
             val sameOwner = current.accountId == accountId
             val next = SavedAccess(config.copy(hasPin = config.hasPin || hash != null || (sameOwner && current.config.hasPin)), accountId,
-                salt ?: current.pinSalt.takeIf { sameOwner }, hash ?: current.pinHash.takeIf { sameOwner })
-            require(next.config.method != "pin" || next.config.hasPin) { "Set a PIN first." }
+                salt ?: current.pinSalt.takeIf { sameOwner }, hash ?: current.pinHash.takeIf { sameOwner },
+                current.cooldownEndsAt.takeIf { sameOwner } ?: 0, current.commitmentEndsAt.takeIf { sameOwner } ?: 0,
+                current.failures.takeIf { sameOwner } ?: 0, current.blockedUntil.takeIf { sameOwner } ?: 0)
+            if (active()) {
+                check(pin == null && sameOwner && isProtectionStrengthening(current.config, next.config)) {
+                    "While Strict Mode is active, only stronger protections can be added."
+                }
+            }
+            require("pin" !in next.config.selectedMethods || next.config.hasPin) { "Set a PIN first." }
             prefs[key] = json.encodeToString(next)
         }
     }
@@ -98,10 +111,12 @@ class StrictAccessRepository(
     suspend fun applyRemote(config: StrictAccessConfig, accountId: String) {
         val current = decode(store.data.first()[key])
         // Account switching must not replace the method protecting a retained commitment.
-        if (active() && (current.accountId != accountId || config != current.config)) return
+        if (active() && (current.accountId != accountId ||
+                (config != current.config && !isProtectionStrengthening(current.config, config)))) return
         store.edit { prefs ->
             val previous = decode(prefs[key])
-            if (active() && (previous.accountId != accountId || config != previous.config)) return@edit
+            if (active() && (previous.accountId != accountId ||
+                    (config != previous.config && !isProtectionStrengthening(previous.config, config)))) return@edit
             if (previous.accountId == accountId && config.revision < previous.config.revision) return@edit
             prefs[key] = json.encodeToString(SavedAccess(config, accountId,
                 previous.pinSalt.takeIf { previous.accountId == accountId }, previous.pinHash.takeIf { previous.accountId == accountId },
@@ -110,14 +125,16 @@ class StrictAccessRepository(
     }
 
     /** Offline-only installations can use device checks; synced accounts use server release markers. */
-    suspend fun requestOfflineUnlock(endsAt: Long, pin: String = ""): Long {
+    suspend fun requestOfflineUnlock(endsAt: Long, pin: String = "", requestedMethod: String? = null): Long {
         check(ownerAccountId() == null) { "Connect to sync this account's unlock across devices." }
         var availableAt = Long.MAX_VALUE
         val now = System.currentTimeMillis()
         store.edit { prefs ->
             val state = decode(prefs[key])
             val config = state.config
-            when (config.method) {
+            val method = requestedMethod ?: config.method.takeIf { it in config.selectedMethods }
+            check(method != null && method in config.selectedMethods) { "Choose one of your configured unlock methods." }
+            when (method) {
                 "charger" -> { check(isCharging()) { "Connect this device to a charger first." }; availableAt = now }
                 "pin" -> {
                     check(now >= state.blockedUntil) { "Too many PIN attempts. Wait five minutes." }
@@ -137,6 +154,14 @@ class StrictAccessRepository(
         }
         check(availableAt != Long.MAX_VALUE) { "Incorrect PIN." }
         return availableAt
+    }
+
+    private fun isProtectionStrengthening(old: StrictAccessConfig, next: StrictAccessConfig): Boolean {
+        val sameRoutes = old.method == next.method && old.selectedMethods.toSet() == next.selectedMethods.toSet() &&
+            old.cooldownMinutes == next.cooldownMinutes && old.hasPin == next.hasPin
+        val before = listOf(old.preventUninstall, old.blockDeviceSettings, old.blockRecents, old.blockSplitScreen, old.blockReinstalledApps)
+        val after = listOf(next.preventUninstall, next.blockDeviceSettings, next.blockRecents, next.blockSplitScreen, next.blockReinstalledApps)
+        return sameRoutes && before.zip(after).all { (was, now) -> !was || now }
     }
 
     fun isCharging(): Boolean {
