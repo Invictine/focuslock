@@ -5,7 +5,6 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -44,19 +43,21 @@ internal fun ProductOnboardingDialog(
         onDismissRequest = { if (showTopics) showTopics = false else onPause() },
         properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false),
     ) {
+        BoxWithConstraints(Modifier.fillMaxSize().safeDrawingPadding(), contentAlignment = Alignment.Center) {
+        val shortWindow = maxHeight < 600.dp
         Surface(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 16.dp)
-                .widthIn(max = 600.dp).fillMaxWidth().fillMaxHeight(0.94f),
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = if (shortWindow) 4.dp else 16.dp)
+                .widthIn(max = 840.dp).fillMaxWidth().fillMaxHeight(),
             shape = MaterialTheme.shapes.extraLarge,
             color = MaterialTheme.colorScheme.surface,
         ) {
             Column {
-                Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 16.dp)) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = if (shortWindow) 8.dp else 16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text("FocusLock guide", style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.SemiBold)
-                            Text("One feature at a time", style = MaterialTheme.typography.bodySmall,
+                            Text("Learn by doing", style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         TextButton(onClick = { showTopics = !showTopics }) {
@@ -76,8 +77,8 @@ internal fun ProductOnboardingDialog(
                 HorizontalDivider()
                 Column(
                     modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(scrollState)
-                        .animateContentSize().padding(horizontal = 24.dp, vertical = 20.dp),
-                    verticalArrangement = Arrangement.spacedBy(20.dp),
+                        .animateContentSize().padding(horizontal = 20.dp, vertical = if (shortWindow) 12.dp else 20.dp),
+                    verticalArrangement = Arrangement.spacedBy(if (shortWindow) 12.dp else 20.dp),
                 ) {
                     if (showTopics) {
                         Text("Explore every feature", modifier = Modifier.semantics { heading() },
@@ -108,31 +109,16 @@ internal fun ProductOnboardingDialog(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
 
-                        TourExample(page = page)
-
-                        page.points.forEach { point ->
-                            Row(horizontalArrangement = Arrangement.spacedBy(12.dp),
-                                verticalAlignment = Alignment.Top) {
-                                Surface(
-                                    modifier = Modifier.padding(top = 6.dp).size(8.dp),
-                                    shape = CircleShape,
-                                    color = MaterialTheme.colorScheme.primary,
-                                ) {}
-                                Text(point, style = MaterialTheme.typography.bodyMedium,
-                                    modifier = Modifier.weight(1f))
-                            }
-                        }
-
+                        Text("Try it in the app", style = MaterialTheme.typography.titleMedium)
+                        Text(page.liveTasks().first(), style = MaterialTheme.typography.bodyLarge)
                         if (page.destination != null && page.actionLabel != null) {
-                            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                OutlinedButton(
-                                    onClick = { onOpenDestination(page.destination) },
-                                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
-                                ) { Text(page.actionLabel) }
-                                Text("Opens this feature and saves your place. Resume the guide from Settings.",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
+                            Button(
+                                onClick = { onOpenDestination(page.destination) },
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                            ) { Text("Start walkthrough") }
+                            Text("Follow one step at a time beside the real controls. You can review or skip any optional setting.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         if (page.id == "frog" || page.id == "strict") {
                             Text("You stay in control: this guide never switches it on.",
@@ -142,7 +128,7 @@ internal fun ProductOnboardingDialog(
                     }
                 }
                 HorizontalDivider()
-                Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp)) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = if (shortWindow) 4.dp else 12.dp)) {
                     if (!showTopics) {
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             OutlinedButton(
@@ -162,31 +148,5 @@ internal fun ProductOnboardingDialog(
             }
         }
     }
-}
-
-@Composable
-private fun TourExample(page: ProductTourPage) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = MaterialTheme.shapes.large,
-        color = MaterialTheme.colorScheme.secondaryContainer,
-    ) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text(page.exampleTitle, style = MaterialTheme.typography.labelLarge,
-                fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSecondaryContainer)
-            page.exampleSteps.forEachIndexed { index, step ->
-                Row(verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.surface,
-                        contentColor = MaterialTheme.colorScheme.primary) {
-                        Text("${index + 1}", modifier = Modifier.size(28.dp)
-                            .wrapContentSize(Alignment.Center),
-                            style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
-                    }
-                    Text(step, style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer)
-                }
-            }
-        }
     }
 }

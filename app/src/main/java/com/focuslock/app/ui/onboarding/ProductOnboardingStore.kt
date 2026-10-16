@@ -10,6 +10,12 @@ internal class ProductOnboardingStore(context: Context) {
     val shouldAutoShow: Boolean get() = !isComplete && !prefs.getBoolean("paused_v2", false)
     val pageIndex: Int get() = prefs.getInt("page_v2", 0).coerceIn(productTourPages.indices)
 
+    fun taskIndex(page: String): Int = prefs.getInt("task_$page", 0)
+
+    fun saveTask(page: String, index: Int) {
+        prefs.edit().putInt("task_$page", index.coerceAtLeast(0)).apply()
+    }
+
     fun savePage(index: Int) {
         prefs.edit().putInt("page_v2", index.coerceIn(productTourPages.indices)).apply()
     }
@@ -23,6 +29,7 @@ internal class ProductOnboardingStore(context: Context) {
     }
 
     fun replay() {
+        prefs.edit().apply { prefs.all.keys.filter { it.startsWith("task_") }.forEach { remove(it) } }.apply()
         prefs.edit().putBoolean("complete_v2", false).putBoolean("paused_v2", false)
             .putInt("page_v2", 0).apply()
     }

@@ -83,7 +83,7 @@ class ProductOnboardingUiTest {
             assertEquals(index, page.intValue)
             compose.onNodeWithText(tourPage.title).assertIsDisplayed()
                 .assert(SemanticsMatcher.keyIsDefined(SemanticsProperties.Heading))
-            compose.onNodeWithText(tourPage.exampleTitle).assertIsDisplayed()
+            compose.onNodeWithText("Try it in the app").assertIsDisplayed()
             if (index < productTourPages.lastIndex) {
                 compose.onNodeWithText("Next").performClick()
             }
@@ -137,7 +137,7 @@ class ProductOnboardingUiTest {
         }
 
         compose.onNodeWithText(productTourPages[permissionsIndex].title).assertIsDisplayed()
-        compose.onNodeWithText("Review permissions").performScrollTo().performClick()
+        compose.onNodeWithText("Start walkthrough").performScrollTo().performClick()
         assertEquals(ProductTourDestination.PROTECTION, destination)
         assertTrue(!finished)
     }
@@ -159,7 +159,7 @@ class ProductOnboardingUiTest {
             }
         }
 
-        compose.onNodeWithText("Choose boundaries").performScrollTo().performClick()
+        compose.onNodeWithText("Start walkthrough").performScrollTo().performClick()
         assertEquals(ProductTourDestination.BOUNDARIES, destination)
         assertTrue(!finished)
     }

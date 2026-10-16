@@ -489,15 +489,20 @@ fun SettingsScreen(
         return
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    BoxWithConstraints(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+    val compactHeight = maxHeight < 600.dp
+    val wideWindow = maxWidth >= 840.dp
+    val horizontalInset = if (wideWindow) 28.dp else UiTokens.ScreenPadding
+    val verticalGap = if (compactHeight) 8.dp else UiTokens.ItemGap
     Column(
         modifier = Modifier
+            .widthIn(max = 840.dp)
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
             .verticalScroll(scrollState)
-            .padding(horizontal = UiTokens.ScreenPadding)
-            .padding(top = UiTokens.ItemGap, bottom = 32.dp),
-        verticalArrangement = Arrangement.spacedBy(UiTokens.ItemGap)
+            .padding(horizontal = horizontalInset)
+            .padding(top = if (compactHeight) 8.dp else UiTokens.ItemGap, bottom = if (compactHeight) 16.dp else 32.dp),
+        verticalArrangement = Arrangement.spacedBy(verticalGap)
     ) {
         if (selectedSection == SettingsSection.OVERVIEW) {
             SettingsDestinationRow(

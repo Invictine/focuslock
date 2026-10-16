@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -226,7 +227,7 @@ fun PermissionOnboardingDialog(
         onDismissRequest = onClose,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
-        Box(
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxSize()
                 .safeDrawingPadding()
@@ -237,14 +238,17 @@ fun PermissionOnboardingDialog(
                 ),
             contentAlignment = Alignment.Center
         ) {
+            val compactHeight = maxHeight < 600.dp
+            val dialogMaxWidth = maxWidth
             Surface(
                 shape = MaterialTheme.shapes.extraLarge,
                 color = MaterialTheme.colorScheme.surfaceContainerHigh,
                 tonalElevation = 6.dp,
                 modifier = Modifier
-                    .fillMaxWidth(0.92f)
-                    .widthIn(max = 440.dp)
-                    .heightIn(max = 760.dp)
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                    .widthIn(max = if (dialogMaxWidth >= 840.dp) 640.dp else 440.dp)
+                    .fillMaxWidth()
+                    .heightIn(max = (maxHeight - 16.dp).coerceAtLeast(0.dp))
                     // Consume taps on the card so they don't fall through to the dismiss overlay.
                     .clickable(
                         interactionSource = remember { MutableInteractionSource() },
@@ -258,8 +262,8 @@ fun PermissionOnboardingDialog(
                         modifier = Modifier
                             .weight(1f)
                             .verticalScroll(rememberScrollState())
-                            .padding(horizontal = 24.dp)
-                            .padding(top = 24.dp),
+                            .padding(horizontal = if (dialogMaxWidth >= 600.dp) 24.dp else 20.dp)
+                            .padding(top = if (compactHeight) 16.dp else 24.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                       ) {
                     // ---- Centered header: icon badge, title, progress, status pill ----
@@ -288,12 +292,12 @@ fun PermissionOnboardingDialog(
                             )
                         }
                     }
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(if (compactHeight) 8.dp else 12.dp))
                     LinearProgressIndicator(
                         progress = { (safeIndex + 1f) / missing.size },
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(if (compactHeight) 8.dp else 12.dp))
                     StatusPill(granted = granted)
                     if (kind in OPTIONAL_PERMISSION_KINDS) {
                         Spacer(modifier = Modifier.height(6.dp))
@@ -306,7 +310,7 @@ fun PermissionOnboardingDialog(
 
                     // ---- Left-aligned body: explanation, numbered steps, fine print ----
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(if (compactHeight) 8.dp else 12.dp))
                     Text(
                         text = copy.why,
                         style = MaterialTheme.typography.bodyMedium,
@@ -327,14 +331,14 @@ fun PermissionOnboardingDialog(
                         }
                     }
                     RestrictedSettingsHelp(kind = kind, granted = granted)
-                    Spacer(modifier = Modifier.height(20.dp))
+                    Spacer(modifier = Modifier.height(if (compactHeight) 8.dp else 20.dp))
                       }
                       // Actions remain visible while longer instructions scroll.
                       Column(
                           modifier = Modifier
                               .fillMaxWidth()
-                              .padding(horizontal = 24.dp)
-                              .padding(top = 8.dp, bottom = 16.dp)
+                              .padding(horizontal = if (dialogMaxWidth >= 600.dp) 24.dp else 20.dp)
+                              .padding(top = 4.dp, bottom = if (compactHeight) 8.dp else 16.dp)
                       ) {
                     Button(
                         onClick = { if (granted) onNext() else onGrant(kind) },

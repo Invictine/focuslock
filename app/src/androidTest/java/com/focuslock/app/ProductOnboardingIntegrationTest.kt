@@ -1,5 +1,8 @@
 package com.focuslock.app
 
+import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.onRoot
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
@@ -15,6 +18,7 @@ import com.focuslock.app.data.repository.SettingsRepository
 import com.focuslock.app.ui.MainActivity
 import com.focuslock.app.ui.onboarding.ProductOnboardingStore
 import com.focuslock.app.ui.onboarding.productTourPages
+import com.focuslock.app.ui.onboarding.liveTasks
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -27,6 +31,93 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class ProductOnboardingIntegrationTest {
     @get:Rule val compose = createEmptyComposeRule()
+
+    @Test
+    fun boundaryWalkthroughKeepsProgressAcrossRecreationAndCanResumeFromSettings() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val settings: SettingsRepository = FocusLockApplication.instance.settingsRepository
+        val priorOfflineMode = runBlocking { settings.offlineModeFlow.first() }
+        val onboardingPrefs = context.getSharedPreferences(ONBOARDING_PREFS, 0)
+        val priorOnboardingPrefs = onboardingPrefs.all.toMap()
+        val permissionPrefs = context.getSharedPreferences(PERMISSION_PREFS, 0)
+        val priorPermissionPrefs = permissionPrefs.all.toMap()
+        val boundaryPage = productTourPages.first { it.id == "boundaries" }
+        var scenario: ActivityScenario<MainActivity>? = null
+
+        try {
+            runBlocking { settings.setOfflineMode(true) }
+            ProductOnboardingStore(context).replay()
+            ProductOnboardingStore(context).savePage(productTourPages.indexOf(boundaryPage))
+            permissionPrefs.edit().putBoolean("permissions_skipped", true).commit()
+
+            val activeScenario = ActivityScenario.launch(MainActivity::class.java)
+            scenario = activeScenario
+            compose.waitUntil(15_000) {
+                compose.onAllNodesWithText("FocusLock guide").fetchSemanticsNodes().isNotEmpty()
+            }
+            assertCurrentPage(productTourPages.indexOf(boundaryPage))
+            compose.onNodeWithText("Start walkthrough").performScrollTo().performClick()
+
+            compose.onNodeWithText(boundaryPage.liveTasks().first()).assertIsDisplayed()
+            compose.onNodeWithText("Applications").performScrollTo().assertIsDisplayed()
+            compose.onNodeWithText("Websites").assertIsDisplayed()
+            compose.onRoot().captureToImage().asAndroidBitmap().let { bitmap ->
+                context.filesDir.resolve("live-tutorial.png").outputStream().use {
+                    bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, it)
+                }
+            }
+            compose.onNodeWithText("Continue").performClick()
+            compose.onNodeWithText(boundaryPage.liveTasks()[1]).assertIsDisplayed()
+            assertEquals(1, ProductOnboardingStore(context).taskIndex(boundaryPage.id))
+
+            activeScenario.recreate()
+            compose.onNodeWithText(boundaryPage.liveTasks()[1]).assertIsDisplayed()
+            compose.onNodeWithText("Applications").performScrollTo().assertIsDisplayed()
+            assertEquals(1, ProductOnboardingStore(context).taskIndex(boundaryPage.id))
+
+            compose.onNodeWithText("Pause").performClick()
+            compose.onNodeWithText(boundaryPage.liveTasks()[1]).assertDoesNotExist()
+            assertFalse(ProductOnboardingStore(context).shouldAutoShow)
+
+            compose.onNodeWithContentDescription("Focus", useUnmergedTree = true).performClick()
+            compose.onNodeWithContentDescription("Settings").performClick()
+            compose.onNodeWithText("Preferences").performClick()
+            compose.onNodeWithText("Resume guide").performScrollTo().performClick()
+            assertCurrentPage(productTourPages.indexOf(boundaryPage))
+            assertTrue(ProductOnboardingStore(context).shouldAutoShow)
+
+            compose.onNodeWithText("Start walkthrough").performScrollTo().performClick()
+            compose.onNodeWithText(boundaryPage.liveTasks()[1]).assertIsDisplayed()
+            assertEquals(1, ProductOnboardingStore(context).taskIndex(boundaryPage.id))
+        } finally {
+            scenario?.close()
+            runBlocking { settings.setOfflineMode(priorOfflineMode) }
+            onboardingPrefs.edit().clear().apply {
+                priorOnboardingPrefs.forEach { (key, value) ->
+                    when (value) {
+                        is Boolean -> putBoolean(key, value)
+                        is Int -> putInt(key, value)
+                        is Long -> putLong(key, value)
+                        is Float -> putFloat(key, value)
+                        is String -> putString(key, value)
+                        is Set<*> -> putStringSet(key, value.filterIsInstance<String>().toSet())
+                    }
+                }
+            }.commit()
+            permissionPrefs.edit().clear().apply {
+                priorPermissionPrefs.forEach { (key, value) ->
+                    when (value) {
+                        is Boolean -> putBoolean(key, value)
+                        is Int -> putInt(key, value)
+                        is Long -> putLong(key, value)
+                        is Float -> putFloat(key, value)
+                        is String -> putString(key, value)
+                        is Set<*> -> putStringSet(key, value.filterIsInstance<String>().toSet())
+                    }
+                }
+            }.commit()
+        }
+    }
 
     @Test
     fun offlineFirstRunPersistsPauseResumeCompletionAndReplay() {

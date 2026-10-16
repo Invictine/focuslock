@@ -73,6 +73,7 @@ import com.focuslock.app.ui.components.SectionHeader
 import com.focuslock.app.ui.components.formatUsageSeconds
 import com.focuslock.app.ui.dashboard.DashboardScreen
 import com.focuslock.app.ui.onboarding.ProductOnboardingDialog
+import com.focuslock.app.ui.onboarding.ProductLiveTutorial
 import com.focuslock.app.ui.onboarding.ProductOnboardingStore
 import com.focuslock.app.ui.onboarding.ProductTourDestination
 import com.focuslock.app.ui.debug.DebugDataScreen
@@ -288,18 +289,47 @@ class MainActivity : ComponentActivity() {
                     var showProductOnboarding by rememberSaveable {
                         mutableStateOf(onboardingStore.shouldAutoShow)
                     }
+                    var liveTutorial by rememberSaveable { mutableStateOf(false) }
                     LaunchedEffect(authState, offlineMode) {
-                        if (onboardingStore.shouldAutoShow &&
+                        if (!liveTutorial && onboardingStore.shouldAutoShow &&
                             (authState == FocusAuthState.SignedIn || offlineMode)
                         ) showProductOnboarding = true
                     }
                     val finishProductOnboarding = {
+                        liveTutorial = false
                         onboardingStore.finish()
                         showProductOnboarding = false
                     }
                     val pauseProductOnboarding = {
+                        liveTutorial = false
                         onboardingStore.pause()
                         showProductOnboarding = false
+                    }
+                    val navigateTutorial: (ProductTourDestination) -> Unit = { destination ->
+                                currentTab = when (destination) {
+                                    ProductTourDestination.FOCUS -> NavigationItem.DASHBOARD
+                                    ProductTourDestination.BOUNDARIES -> NavigationItem.APPS
+                                    ProductTourDestination.STRICT -> NavigationItem.STRICT
+                                    ProductTourDestination.SETTINGS,
+                                    ProductTourDestination.ROUTINE,
+                                    ProductTourDestination.CONNECTIONS,
+                                    ProductTourDestination.PROTECTION,
+                                    ProductTourDestination.PREFERENCES -> {
+                                        settingsReturnTab = NavigationItem.DASHBOARD
+                                        settingsSection = when (destination) {
+                                            ProductTourDestination.ROUTINE -> SettingsSection.ROUTINE
+                                            ProductTourDestination.CONNECTIONS -> SettingsSection.CONNECTIONS
+                                            ProductTourDestination.PROTECTION -> SettingsSection.PROTECTION
+                                            ProductTourDestination.PREFERENCES -> SettingsSection.PREFERENCES
+                                            else -> SettingsSection.OVERVIEW
+                                        }
+                                        NavigationItem.SETTINGS
+                                    }
+                                    ProductTourDestination.ACCOUNT -> {
+                                        accountReturnTab = NavigationItem.DASHBOARD
+                                        NavigationItem.ACCOUNT
+                                    }
+                                }
                     }
                     val tabStateHolder = rememberSaveableStateHolder()
                     // Cross-device "New bucket…": a usage row asks to open the merge editor
@@ -377,6 +407,26 @@ class MainActivity : ComponentActivity() {
                         }
                     },
                     bottomBar = {
+                        Column {
+                        if (liveTutorial && !showAccountSignIn) {
+                            ProductLiveTutorial(
+                                pageIndex = onboardingPage,
+                                onNavigate = navigateTutorial,
+                                includeNavigationInset = currentTab == NavigationItem.SETTINGS,
+                                onReview = { liveTutorial = false; showProductOnboarding = true },
+                                onPause = pauseProductOnboarding,
+                                onNext = {
+                                    liveTutorial = false
+                                    if (onboardingPage == com.focuslock.app.ui.onboarding.productTourPages.lastIndex) {
+                                        finishProductOnboarding()
+                                    } else {
+                                        onboardingStore.savePage(onboardingPage + 1)
+                                        onboardingPage = onboardingStore.pageIndex
+                                        showProductOnboarding = true
+                                    }
+                                },
+                            )
+                        }
                         if (!showAccountSignIn && currentTab != NavigationItem.SETTINGS) {
                         NavigationBar(
                             containerColor = MaterialTheme.colorScheme.surfaceContainer,
@@ -416,6 +466,7 @@ class MainActivity : ComponentActivity() {
                                     )
                                 )
                             }
+                        }
                         }
                         }
                     }
@@ -529,31 +580,9 @@ class MainActivity : ComponentActivity() {
                             onPause = pauseProductOnboarding,
                             onFinish = finishProductOnboarding,
                             onOpenDestination = { destination ->
-                                pauseProductOnboarding()
-                                currentTab = when (destination) {
-                                    ProductTourDestination.FOCUS -> NavigationItem.DASHBOARD
-                                    ProductTourDestination.BOUNDARIES -> NavigationItem.APPS
-                                    ProductTourDestination.STRICT -> NavigationItem.STRICT
-                                    ProductTourDestination.SETTINGS,
-                                    ProductTourDestination.ROUTINE,
-                                    ProductTourDestination.CONNECTIONS,
-                                    ProductTourDestination.PROTECTION,
-                                    ProductTourDestination.PREFERENCES -> {
-                                        settingsReturnTab = NavigationItem.DASHBOARD
-                                        settingsSection = when (destination) {
-                                            ProductTourDestination.ROUTINE -> SettingsSection.ROUTINE
-                                            ProductTourDestination.CONNECTIONS -> SettingsSection.CONNECTIONS
-                                            ProductTourDestination.PROTECTION -> SettingsSection.PROTECTION
-                                            ProductTourDestination.PREFERENCES -> SettingsSection.PREFERENCES
-                                            else -> SettingsSection.OVERVIEW
-                                        }
-                                        NavigationItem.SETTINGS
-                                    }
-                                    ProductTourDestination.ACCOUNT -> {
-                                        accountReturnTab = NavigationItem.DASHBOARD
-                                        NavigationItem.ACCOUNT
-                                    }
-                                }
+                                showProductOnboarding = false
+                                liveTutorial = true
+                                navigateTutorial(destination)
                             }
                         )
                     }
