@@ -7,7 +7,7 @@ function store(initial: Record<string, string> = {}) {
   vi.stubGlobal("window", { localStorage: { getItem: (key: string) => entries.get(key) ?? null, setItem: (key: string, value: string) => entries.set(key, value) }, dispatchEvent: vi.fn() });
   return entries;
 }
-afterEach(() => { setNativeStrictSettingsLocked(false); setNativeFrogReady(false); vi.unstubAllGlobals(); });
+afterEach(() => { setNativeStrictSettingsLocked(false); setNativeFrogReady(false); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
 describe("desktop Frog recovery and device consent", () => {
   it("ignores a legacy enabled/armed flag without setup even during Strict Mode", () => {
@@ -19,6 +19,8 @@ describe("desktop Frog recovery and device consent", () => {
   });
   it("emergency exit overrides Strict and stays disabled across next-day rollover without completing a task", () => {
     const now = new Date(2026, 9, 12, 8).getTime();
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
     const entries = store({ [FROG_KEYS.setupComplete]: "1", [FROG_KEYS.enabled]: "1", [FROG_KEYS.armed]: "1", [FROG_KEYS.cycleDate]: frogCycleDate(now, 5), [FROG_KEYS.selected]: JSON.stringify({ title: "Study", neededAppIds: [], neededDomains: [] }), [FROG_KEYS.trackedSeconds]: "120" });
     setNativeStrictSettingsLocked(true);
     expect(() => setEnabled(false)).toThrow(/Strict/);
