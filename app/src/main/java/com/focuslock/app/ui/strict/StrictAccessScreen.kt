@@ -30,6 +30,7 @@ import com.focuslock.app.strict.StrictAccessConfig
 import com.focuslock.app.sync.ConvexSyncClient
 import com.focuslock.app.ui.components.ScreenHeader
 import com.focuslock.app.ui.components.UiTokens
+import com.focuslock.app.ui.components.AdaptiveContentFrame
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -160,7 +161,8 @@ internal fun StrictAccessScreen(onOpenPermissions: () -> Unit = {}, permissionCh
         unlockPin = ""; showUnlock = false
     }
 
-    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)
+    AdaptiveContentFrame(modifier = Modifier.fillMaxSize(), maxContentWidth = 840.dp) {
+      Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)
         .verticalScroll(rememberScrollState()).padding(horizontal = UiTokens.ScreenPadding).padding(bottom = 32.dp),
         verticalArrangement = Arrangement.spacedBy(20.dp)) {
         ScreenHeader("Strict Mode", "Your focus. Your rules. A commitment that holds.")
@@ -269,6 +271,7 @@ internal fun StrictAccessScreen(onOpenPermissions: () -> Unit = {}, permissionCh
         }
         if (locationExpanded) StrictLocationAutomationEditor()
 
+      }
     }
     if (showReview) AlertDialog(onDismissRequest = { if (!busy) showReview = false }, title = { Text("Review your commitment") }, text = {
         Column(Modifier.heightIn(max = 360.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {

@@ -77,6 +77,7 @@ import com.focuslock.app.ui.components.ScreenHeader
 import com.focuslock.app.ui.components.SectionHeader
 import com.focuslock.app.ui.components.StaggeredFadeSlide
 import com.focuslock.app.ui.components.UiTokens
+import com.focuslock.app.ui.components.AdaptiveContentFrame
 import com.focuslock.app.ui.components.pressScaleModifier
 import com.focuslock.app.ui.strict.formatLockdownRemaining
 import com.focuslock.app.ui.permalock.PermalockScreen
@@ -384,7 +385,8 @@ private fun BoundariesOverview(
     // runs on first composition only and never replays on scroll or state flips.
     var entered by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { entered = true }
-    LazyColumn(
+    AdaptiveContentFrame(modifier = Modifier.fillMaxSize(), maxContentWidth = 960.dp) {
+      LazyColumn(
         modifier = Modifier.fillMaxSize(),
         state = listState,
         contentPadding = PaddingValues(
@@ -392,7 +394,7 @@ private fun BoundariesOverview(
             end = UiTokens.ScreenPadding,
             bottom = UiTokens.SectionGap
         )
-    ) {
+      ) {
         item(key = "boundaries-header", contentType = "screenHeader") {
             StaggeredFadeSlide(visible = entered, index = 0, screenKey = "boundaries_overview") {
                 ScreenHeader(
@@ -644,6 +646,7 @@ private fun BoundariesOverview(
         item(key = "boundaries-bottom-spacer", contentType = "spacer") {
             Spacer(Modifier.height(UiTokens.SectionGap))
         }
+      }
     }
 }
 

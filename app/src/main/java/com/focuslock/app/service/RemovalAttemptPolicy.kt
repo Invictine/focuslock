@@ -39,6 +39,11 @@ object RemovalAttemptPolicy {
         """^(?:(?:do you want to|are you sure you want to) )?(?:deactivate|disable|turn off)(?: this)? (?:device )?admin(?: app)?(?: for| of)?(?: [\"']?focuslock[\"']?)?[?.]?$""",
         RegexOption.IGNORE_CASE,
     )
+    /** OEM App info flows may stop at a confirmation saying the active admin must be disabled first. */
+    private val deactivateFirst = Regex(
+        """^(?:deactivate|disable|turn off)(?: this)?(?:(?: device)? admin| app)? first[?.!]*$""",
+        RegexOption.IGNORE_CASE,
+    )
     private val adminDeactivationAction = Regex(
         """^(?:deactivate|disable|turn off)(?: this)? (?:device )?admin(?: app)?[?.]?$""",
         RegexOption.IGNORE_CASE,
@@ -70,6 +75,39 @@ object RemovalAttemptPolicy {
         texts: List<String>,
         deviceAdminActive: Boolean = false,
     ): Boolean = reason(packageName, windowClassName, texts, deviceAdminActive) != null
+
+    /** Cheap prefilter for a Settings click; ordinary app-info interactions do not scan the root. */
+    fun isPossibleRemovalActionClick(clickedTexts: List<String>): Boolean {
+        val normalized = clickedTexts.map(String::trim).filter(String::isNotEmpty)
+        return normalized.any { text ->
+            text.equals("uninstall", ignoreCase = true) ||
+                adminDeactivationAction.matches(text) ||
+                bareDeactivationAction.matches(text) ||
+                deactivateAndUninstallAction.matches(text) ||
+                deactivateFirst.matches(text)
+        }
+    }
+
+    /**
+     * Recognizes the first App info/Admin click before OEMs replace the page with a
+     * confirmation that omits the app name. Require live exact identity in that root
+     * and an active admin; never use a previously observed app identity.
+     */
+    fun clickedActionReason(
+        packageName: String,
+        rootTexts: List<String>,
+        clickedTexts: List<String>,
+        deviceAdminActive: Boolean,
+    ): String? {
+        if (packageName != "com.android.settings" || !deviceAdminActive) return null
+        val normalizedRoot = rootTexts.map(String::trim).filter(String::isNotEmpty)
+        val exactTargetIdentity = normalizedRoot.any { text ->
+            text.equals(TARGET_TITLE, ignoreCase = true) || text == TARGET_PACKAGE ||
+                targetAdminLabel.matches(text)
+        }
+        if (!exactTargetIdentity || !isPossibleRemovalActionClick(clickedTexts)) return null
+        return REASON_ADMIN_REQUESTED
+    }
 
     /** Returns the reminder reason only when a FocusLock-specific system action is visible. */
     fun reason(
@@ -103,6 +141,7 @@ object RemovalAttemptPolicy {
                     bareDeactivationAction.matches(text) || deactivateAndUninstallAction.matches(text)
                 }
             val explicitAdminQuestionVisible = normalizedTexts.any(explicitAdminQuestion::matches)
+            val deactivateFirstVisible = normalizedTexts.any(deactivateFirst::matches)
             val namesAdmin = normalizedTexts.any { text ->
                 text.contains("device admin", ignoreCase = true) ||
                     text.contains("admin app", ignoreCase = true) ||
@@ -118,6 +157,16 @@ object RemovalAttemptPolicy {
             val confirmationDialog = windowClass.contains("dialog", ignoreCase = true) ||
                 windowClass.contains("alert", ignoreCase = true)
             if (confirmationDialog && namesAdmin && explicitAdminQuestionVisible) {
+                return REASON_ADMIN_REQUESTED
+            }
+            // On some OEM tablets, App info → Uninstall opens a modal that only says
+            // “Deactivate first”. It has no uninstall wording and does not enter
+            // DeviceAdminAdd until the user accepts, so the normal admin button and
+            // DeviceAdminReceiver callbacks never see this attempt. Require the exact
+            // FocusLock identity and an active admin avoid treating unrelated Settings
+            // copy as a removal attempt. Do not require a dialog class: some OEMs expose
+            // the modal under the App info activity's root class.
+            if (deviceAdminActive && deactivateFirstVisible) {
                 return REASON_ADMIN_REQUESTED
             }
         }

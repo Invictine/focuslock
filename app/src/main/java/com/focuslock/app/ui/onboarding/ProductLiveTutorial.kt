@@ -7,6 +7,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 
@@ -22,8 +23,11 @@ internal fun ProductLiveTutorial(
 ) {
     val page = productTourPages[pageIndex.coerceIn(productTourPages.indices)]
     val tasks = page.liveTasks()
+    val compactWindow = LocalConfiguration.current.screenHeightDp < 600
     val store = rememberOnboardingStore()
-    var step by rememberSaveable(page.id) { mutableIntStateOf(store.taskIndex(page.id).coerceIn(tasks.indices)) }
+    var step by rememberSaveable(page.id, tasks.size) {
+        mutableIntStateOf(store.taskIndex(page.id).coerceIn(tasks.indices))
+    }
     LaunchedEffect(page.id, step) { onNavigate(page.liveDestination(step)) }
     var expanded by rememberSaveable { mutableStateOf(true) }
     Surface(tonalElevation = 3.dp) {
@@ -37,12 +41,9 @@ internal fun ProductLiveTutorial(
                 TextButton(onClick = { expanded = !expanded }) { Text(if (expanded) "Hide steps" else "Show steps") }
             }
             if (expanded) {
-                Column(Modifier.fillMaxWidth().heightIn(max = 112.dp)
+                Column(Modifier.fillMaxWidth().heightIn(max = if (compactWindow) 64.dp else 112.dp)
                     .verticalScroll(rememberScrollState()).padding(horizontal = 16.dp)) {
                     Text(tasks[step], style = MaterialTheme.typography.bodyMedium)
-                    Text("Make the choice that suits you, then continue. Optional locks can stay off.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp),
                     horizontalArrangement = Arrangement.SpaceBetween) {

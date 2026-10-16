@@ -45,6 +45,7 @@ import com.clerk.api.Clerk
 import com.focuslock.app.BuildConfig
 import com.focuslock.app.FocusLockApplication
 import com.focuslock.app.ui.components.UiTokens
+import com.focuslock.app.ui.components.AdaptiveContentFrame
 import com.focuslock.app.auth.AuthViewModel
 import com.focuslock.app.data.model.TickTickWorkRecord
 import com.focuslock.app.data.model.BlockedApp
@@ -103,6 +104,7 @@ fun DashboardScreen(
     onOpenSettings: (() -> Unit)? = null,
     onOpenAccount: (() -> Unit)? = null,
     permissionSetupRequest: Int = 0,
+    suspendPermissionSetup: Boolean = false,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -569,22 +571,23 @@ fun DashboardScreen(
         },
         modifier = Modifier.fillMaxSize()
     ) {
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize(),
-            contentPadding = PaddingValues(
-                start = UiTokens.ScreenPadding,
-                end = UiTokens.ScreenPadding,
-                top = 4.dp,
-                bottom = 24.dp
-            ),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            FocusHome(
-                style = FocusHomeStyle.fromKey(homeStyleKey),
-                state = homeState,
-                callbacks = homeCallbacks,
-            )
+        AdaptiveContentFrame(modifier = Modifier.fillMaxSize(), maxContentWidth = 840.dp) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(
+                    start = UiTokens.ScreenPadding,
+                    end = UiTokens.ScreenPadding,
+                    top = 4.dp,
+                    bottom = 24.dp
+                ),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                FocusHome(
+                    style = FocusHomeStyle.fromKey(homeStyleKey),
+                    state = homeState,
+                    callbacks = homeCallbacks,
+                )
+            }
         }
     }
 
@@ -763,7 +766,7 @@ fun DashboardScreen(
     }
 
     // The Settings action and first-run prompt both drive this persisted wizard state.
-    if (setupState.visible && setupState.steps.isNotEmpty() && setupState.currentStep != null) {
+    if (!suspendPermissionSetup && setupState.visible && setupState.steps.isNotEmpty() && setupState.currentStep != null) {
         PermissionOnboardingDialog(
             missing = setupState.steps,
             currentIndex = setupState.currentIndex,

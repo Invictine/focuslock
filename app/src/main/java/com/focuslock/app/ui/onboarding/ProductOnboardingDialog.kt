@@ -45,14 +45,20 @@ internal fun ProductOnboardingDialog(
     ) {
         BoxWithConstraints(Modifier.fillMaxSize().safeDrawingPadding(), contentAlignment = Alignment.Center) {
         val shortWindow = maxHeight < 600.dp
+        val wideWindow = maxWidth >= 600.dp
+        val tabletLayout = maxWidth >= 840.dp && !shortWindow
+        val contentPadding = if (wideWindow) 28.dp else 20.dp
         Surface(
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = if (shortWindow) 4.dp else 16.dp)
-                .widthIn(max = 840.dp).fillMaxWidth().fillMaxHeight(),
+            modifier = Modifier.padding(
+                horizontal = if (wideWindow) 20.dp else 12.dp,
+                vertical = if (shortWindow) 4.dp else 16.dp,
+            ).widthIn(max = if (tabletLayout) 1040.dp else 620.dp).fillMaxWidth()
+                .fillMaxHeight(fraction = if (shortWindow) 0.98f else 0.88f),
             shape = MaterialTheme.shapes.extraLarge,
             color = MaterialTheme.colorScheme.surface,
         ) {
             Column {
-                Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = if (shortWindow) 8.dp else 16.dp)) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = contentPadding, vertical = if (shortWindow) 8.dp else 16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             Text("FocusLock guide", style = MaterialTheme.typography.titleMedium,
@@ -77,7 +83,7 @@ internal fun ProductOnboardingDialog(
                 HorizontalDivider()
                 Column(
                     modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(scrollState)
-                        .animateContentSize().padding(horizontal = 20.dp, vertical = if (shortWindow) 12.dp else 20.dp),
+                        .animateContentSize().padding(horizontal = contentPadding, vertical = if (shortWindow) 12.dp else 20.dp),
                     verticalArrangement = Arrangement.spacedBy(if (shortWindow) 12.dp else 20.dp),
                 ) {
                     if (showTopics) {
@@ -87,16 +93,52 @@ internal fun ProductOnboardingDialog(
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            productTourPages.forEachIndexed { index, topic ->
-                                OutlinedButton(
-                                    onClick = { onPageChange(index); showTopics = false },
-                                    modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
-                                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
-                                ) {
-                                    Text("${index + 1}", modifier = Modifier.width(28.dp),
-                                        color = MaterialTheme.colorScheme.primary,
-                                        fontWeight = FontWeight.SemiBold)
-                                    Text(topic.title, modifier = Modifier.weight(1f))
+                            productTourPages.withIndex().toList().chunked(if (tabletLayout) 2 else 1).forEach { row ->
+                                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                    row.forEach { (index, topic) ->
+                                        OutlinedButton(
+                                            onClick = { onPageChange(index); showTopics = false },
+                                            modifier = Modifier.weight(1f).heightIn(min = 52.dp),
+                                            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                                        ) {
+                                            Text("${index + 1}", modifier = Modifier.width(28.dp),
+                                                color = MaterialTheme.colorScheme.primary,
+                                                fontWeight = FontWeight.SemiBold)
+                                            Text(topic.title, modifier = Modifier.weight(1f))
+                                        }
+                                    }
+                                    if (tabletLayout && row.size == 1) Spacer(Modifier.weight(1f))
+                                }
+                            }
+                        }
+                    } else if (tabletLayout) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(32.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Text(page.title, modifier = Modifier.semantics { heading() },
+                                    style = MaterialTheme.typography.headlineMedium,
+                                    fontWeight = FontWeight.Bold)
+                                Text(page.summary, style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            VerticalDivider(modifier = Modifier.height(220.dp))
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                                Text("Try it in the app", style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.SemiBold)
+                                Text(page.liveTasks().first(), style = MaterialTheme.typography.bodyLarge)
+                                if (page.destination != null && page.actionLabel != null) {
+                                    Button(
+                                        onClick = { onOpenDestination(page.destination) },
+                                        modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp),
+                                    ) { Text(page.actionLabel) }
+                                }
+                                if (page.id == "frog" || page.id == "strict") {
+                                    Text("This guide will not turn it on.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.primary)
                                 }
                             }
                         }
@@ -115,20 +157,17 @@ internal fun ProductOnboardingDialog(
                             Button(
                                 onClick = { onOpenDestination(page.destination) },
                                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                            ) { Text("Start walkthrough") }
-                            Text("Follow one step at a time beside the real controls. You can review or skip any optional setting.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            ) { Text(page.actionLabel) }
                         }
                         if (page.id == "frog" || page.id == "strict") {
-                            Text("You stay in control: this guide never switches it on.",
+                            Text("This guide will not turn it on.",
                                 style = MaterialTheme.typography.labelLarge,
                                 color = MaterialTheme.colorScheme.primary)
                         }
                     }
                 }
                 HorizontalDivider()
-                Column(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = if (shortWindow) 4.dp else 12.dp)) {
+                Column(Modifier.fillMaxWidth().padding(horizontal = contentPadding, vertical = if (shortWindow) 4.dp else 12.dp)) {
                     if (!showTopics) {
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             OutlinedButton(

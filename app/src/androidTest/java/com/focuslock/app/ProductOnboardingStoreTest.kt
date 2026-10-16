@@ -77,6 +77,30 @@ class ProductOnboardingStoreTest {
         assertEquals(0, ProductOnboardingStore(context).pageIndex)
     }
 
+    @Test
+    fun activeLiveTutorialCanResumeAfterTheActivityIsRecreated() {
+        val store = ProductOnboardingStore(context)
+        store.savePage(3)
+        store.saveTask("boundaries", 2)
+        store.beginLiveTutorial()
+
+        val restored = ProductOnboardingStore(context)
+        assertTrue(restored.hasActiveLiveTutorial)
+        assertEquals(3, restored.pageIndex)
+        assertEquals(2, restored.taskIndex("boundaries"))
+
+        restored.pause()
+        assertFalse(ProductOnboardingStore(context).hasActiveLiveTutorial)
+        assertTrue(ProductOnboardingStore(context).shouldResumeLiveTutorial)
+        assertFalse(ProductOnboardingStore(context).shouldAutoShow)
+        assertEquals(3, ProductOnboardingStore(context).pageIndex)
+
+        restored.resume()
+        assertTrue(ProductOnboardingStore(context).hasActiveLiveTutorial)
+        assertTrue(ProductOnboardingStore(context).shouldAutoShow)
+        assertEquals(2, ProductOnboardingStore(context).taskIndex("boundaries"))
+    }
+
     private companion object {
         const val PREFS_NAME = "focuslock_product_onboarding"
     }

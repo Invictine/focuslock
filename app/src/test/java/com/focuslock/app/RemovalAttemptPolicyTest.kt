@@ -7,6 +7,45 @@ import org.junit.Test
 
 class RemovalAttemptPolicyTest {
     @Test
+    fun clickedSettingsRemovalActionRequiresLiveFocusLockIdentityAndActiveAdmin() {
+        val root = listOf("FocusLock", "Open", "Uninstall", "Force stop")
+        assertTrue(
+            RemovalAttemptPolicy.clickedActionReason(
+                "com.android.settings", root, listOf("Uninstall"), deviceAdminActive = true,
+            ) == RemovalAttemptPolicy.REASON_ADMIN_REQUESTED
+        )
+        assertTrue(
+            RemovalAttemptPolicy.clickedActionReason(
+                "com.android.settings", root, listOf("Open"), deviceAdminActive = true,
+            ) == null
+        )
+        assertTrue(
+            RemovalAttemptPolicy.clickedActionReason(
+                "com.android.settings", listOf("FocusLock Helper"), listOf("Uninstall"),
+                deviceAdminActive = true,
+            ) == null
+        )
+        assertTrue(
+            RemovalAttemptPolicy.clickedActionReason(
+                "com.android.settings", root, listOf("Uninstall"), deviceAdminActive = false,
+            ) == null
+        )
+        assertTrue(
+            RemovalAttemptPolicy.clickedActionReason(
+                "com.android.chrome", root, listOf("Uninstall"), deviceAdminActive = true,
+            ) == null
+        )
+    }
+
+    @Test
+    fun clickedAdminDeactivationActionsAreRecognizedWithoutBroadAppInfoMatching() {
+        assertTrue(RemovalAttemptPolicy.isPossibleRemovalActionClick(listOf("Deactivate")))
+        assertTrue(RemovalAttemptPolicy.isPossibleRemovalActionClick(listOf("Deactivate & uninstall")))
+        assertFalse(RemovalAttemptPolicy.isPossibleRemovalActionClick(listOf("Open")))
+        assertFalse(RemovalAttemptPolicy.isPossibleRemovalActionClick(listOf("Force stop")))
+    }
+
+    @Test
     fun matchesKnownInstallerUninstallActivityWithLocalizedConfirmation() {
         assertTrue(
             RemovalAttemptPolicy.matches(
@@ -164,6 +203,54 @@ class RemovalAttemptPolicyTest {
                 windowClassName = "android.app.AlertDialog",
                 texts = listOf("Do you want to deactivate device admin for FocusLock?", "Cancel", "OK"),
             ) == RemovalAttemptPolicy.REASON_ADMIN_REQUESTED
+        )
+    }
+
+    @Test
+    fun matchesOemAppInfoUninstallDialogThatRequiresDeactivationFirst() {
+        assertTrue(
+            RemovalAttemptPolicy.reason(
+                packageName = "com.android.settings",
+                windowClassName = "android.app.AlertDialog",
+                texts = listOf("FocusLock", "Deactivate first", "Cancel"),
+                deviceAdminActive = true,
+            ) == RemovalAttemptPolicy.REASON_ADMIN_REQUESTED
+        )
+        assertTrue(
+            RemovalAttemptPolicy.reason(
+                packageName = "com.android.settings",
+                // OEM builds can report the app-info root class even while showing a modal.
+                windowClassName = "com.android.settings.applications.InstalledAppDetailsTop",
+                texts = listOf("FocusLock uninstall protection", "Turn off device admin first", "Cancel"),
+                deviceAdminActive = true,
+            ) == RemovalAttemptPolicy.REASON_ADMIN_REQUESTED
+        )
+    }
+
+    @Test
+    fun ignoresDeactivateFirstUnlessFocusLockAdminConfirmationIsActive() {
+        assertFalse(
+            RemovalAttemptPolicy.matches(
+                packageName = "com.android.settings",
+                windowClassName = "android.app.AlertDialog",
+                texts = listOf("FocusLock", "Deactivate first", "Cancel"),
+            )
+        )
+        assertFalse(
+            RemovalAttemptPolicy.matches(
+                packageName = "com.android.settings",
+                windowClassName = "com.android.settings.applications.InstalledAppDetailsTop",
+                texts = listOf("FocusLock", "Uninstall"),
+                deviceAdminActive = true,
+            )
+        )
+        assertFalse(
+            RemovalAttemptPolicy.matches(
+                packageName = "com.android.settings",
+                windowClassName = "android.app.AlertDialog",
+                texts = listOf("Other App", "Deactivate first", "Cancel"),
+                deviceAdminActive = true,
+            )
         )
     }
 

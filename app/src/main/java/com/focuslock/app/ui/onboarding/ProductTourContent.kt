@@ -181,6 +181,6 @@ internal val productTourPages = listOf(
         ),
         exampleTitle = "Your first steps",
         exampleSteps = listOf("Protect a few distractions", "Try Focus", "Return to this guide any time"),
-        destination = ProductTourDestination.SETTINGS, actionLabel = "Open Settings",
+        destination = ProductTourDestination.SETTINGS, actionLabel = "Start setup",
     ),
 )

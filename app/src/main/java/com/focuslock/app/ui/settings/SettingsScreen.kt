@@ -87,6 +87,12 @@ enum class SettingsSection {
     PREFERENCES
 }
 
+private data class SettingsOverviewDestination(
+    val title: String,
+    val subtitle: String,
+    val onClick: () -> Unit,
+)
+
 @Composable
 fun SettingsScreen(
     initialSection: SettingsSection = SettingsSection.OVERVIEW,
@@ -505,35 +511,32 @@ fun SettingsScreen(
         verticalArrangement = Arrangement.spacedBy(verticalGap)
     ) {
         if (selectedSection == SettingsSection.OVERVIEW) {
-            SettingsDestinationRow(
-                title = "Account & devices",
-                subtitle = "Account details and signed-in devices",
-                onClick = { onOpenAccount() }
-            )
-            SettingsDestinationRow(
-                title = "Connections",
-                subtitle = if (isTickTickConnected) "TickTick · $lastSyncText" else "Connect TickTick and sync focus sessions",
-                onClick = { selectedSection = SettingsSection.CONNECTIONS }
-            )
-            SettingsDestinationRow(
-                title = "Daily priority routine",
-                subtitle = "Set your Frog plan and essential apps",
-                onClick = { selectedSection = SettingsSection.ROUTINE }
-            )
             val permissionStates = listOf(isAccessibilityOn, isUsageOn, isOverlayOn, isNotifOn, isBatteryIgnored, isDeviceAdminOn)
             val permissionSummary = if (permissionStates.all { it != null }) {
                 "${permissionStates.count { it == true }} of ${permissionStates.size} permissions granted"
             } else "Checking permissions"
-            SettingsDestinationRow(
-                title = "Permissions & protection",
-                subtitle = permissionSummary,
-                onClick = { selectedSection = SettingsSection.PROTECTION }
+            val destinations = listOf(
+                SettingsOverviewDestination("Account & devices", "Account details and signed-in devices") { onOpenAccount() },
+                SettingsOverviewDestination("Connections", if (isTickTickConnected) "TickTick · $lastSyncText" else "Connect TickTick and sync focus sessions") { selectedSection = SettingsSection.CONNECTIONS },
+                SettingsOverviewDestination("Daily priority routine", "Set your Frog plan and essential apps") { selectedSection = SettingsSection.ROUTINE },
+                SettingsOverviewDestination("Permissions & protection", permissionSummary) { selectedSection = SettingsSection.PROTECTION },
+                SettingsOverviewDestination("Preferences", "Goals, reminders, appearance, and backups") { selectedSection = SettingsSection.PREFERENCES },
             )
-            SettingsDestinationRow(
-                title = "Preferences",
-                subtitle = "Goals, reminders, appearance, and backups",
-                onClick = { selectedSection = SettingsSection.PREFERENCES }
-            )
+            if (wideWindow && androidx.compose.ui.platform.LocalDensity.current.fontScale < 1.3f) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                    listOf(destinations.take(3), destinations.drop(3)).forEach { columnDestinations ->
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(verticalGap)) {
+                            columnDestinations.forEach { destination ->
+                                SettingsDestinationRow(destination.title, destination.subtitle, destination.onClick)
+                            }
+                        }
+                    }
+                }
+            } else {
+                destinations.forEach { destination ->
+                    SettingsDestinationRow(destination.title, destination.subtitle, destination.onClick)
+                }
+            }
         }
 
         if (selectedSection == SettingsSection.PREFERENCES) {

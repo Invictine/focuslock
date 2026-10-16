@@ -620,6 +620,31 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         // Everything else (focus, text selection, scroll notifications from all apps)
         // is dropped before even reading the package name off the parcel.
         val eventType = event.eventType
+        if (eventType == AccessibilityEvent.TYPE_VIEW_CLICKED &&
+            event.packageName?.toString() == "com.android.settings"
+        ) {
+            val clickedTexts = mutableListOf<String>()
+            event.text?.forEach { clickedTexts += it.toString().take(200) }
+            var clickedWindowId = event.windowId
+            event.source?.let { source ->
+                try {
+                    if (source.windowId >= 0) clickedWindowId = source.windowId
+                    source.text?.toString()?.take(200)?.let(clickedTexts::add)
+                    source.contentDescription?.toString()?.take(200)?.let(clickedTexts::add)
+                } finally {
+                    @Suppress("DEPRECATION")
+                    source.recycle()
+                }
+            }
+            if (RemovalAttemptPolicy.isPossibleRemovalActionClick(clickedTexts) &&
+                inspectRemovalWindow(
+                    packageName = "com.android.settings",
+                    restart = true,
+                    clickedActionTexts = clickedTexts,
+                    expectedWindowId = clickedWindowId,
+                )
+            ) return
+        }
         val isUserInputEvent = eventType == AccessibilityEvent.TYPE_TOUCH_INTERACTION_START ||
             eventType == AccessibilityEvent.TYPE_VIEW_CLICKED ||
             (eventType == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED && event.source?.let { source ->
@@ -950,12 +975,17 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun inspectRemovalWindow(packageName: String, restart: Boolean = false): Boolean {
+    private fun inspectRemovalWindow(
+        packageName: String,
+        restart: Boolean = false,
+        clickedActionTexts: List<String> = emptyList(),
+        expectedWindowId: Int? = null,
+    ): Boolean {
         if (restart) {
             removalScanJob?.cancel()
             lastRemovalScanMs = -1L
         }
-        val requested = checkRemovalReminder(packageName)
+        val requested = checkRemovalReminder(packageName, clickedActionTexts, expectedWindowId)
         if (!RemovalReminderController.isShowing && removalScanJob?.isActive != true) {
             removalScanJob = serviceScope.launch(Dispatchers.Main) {
                 repeat(4) {
@@ -968,7 +998,11 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         return requested
     }
 
-    private fun checkRemovalReminder(packageName: String): Boolean {
+    private fun checkRemovalReminder(
+        packageName: String,
+        clickedActionTexts: List<String> = emptyList(),
+        expectedWindowId: Int? = null,
+    ): Boolean {
         val now = SystemClock.elapsedRealtime()
         if (lastRemovalScanMs >= 0 && now - lastRemovalScanMs < 500L) return false
         lastRemovalScanMs = now
@@ -976,6 +1010,9 @@ class AppMonitorAccessibilityService : AccessibilityService() {
         try {
             // Do not inspect a stale window from another app.
             if (root.packageName?.toString() != packageName) return false
+            if (expectedWindowId != null && expectedWindowId >= 0 && root.windowId >= 0 &&
+                expectedWindowId != root.windowId
+            ) return false
             val texts = mutableListOf<String>()
             var visited = 0
             fun collect(node: AccessibilityNodeInfo, depth: Int) {
@@ -997,9 +1034,11 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             // installer dialog (which may belong to another package/window).
             val windowClass = windowClasses[root.windowId]
                 ?.takeIf { it.first == packageName }?.second ?: root.className?.toString()
-            val reason = RemovalAttemptPolicy.reason(packageName, windowClass, texts,
-                deviceAdminActive = packageName == "com.android.settings" &&
-                    com.focuslock.app.ui.permissions.PermissionHelper.isDeviceAdminActive(this))
+            val deviceAdminActive = packageName == "com.android.settings" &&
+                PermissionHelper.isDeviceAdminActive(this)
+            val reason = RemovalAttemptPolicy.clickedActionReason(
+                packageName, texts, clickedActionTexts, deviceAdminActive,
+            ) ?: RemovalAttemptPolicy.reason(packageName, windowClass, texts, deviceAdminActive)
             if (com.focuslock.app.BuildConfig.DEBUG) {
                 val hasDeactivationAction = texts.any { it.startsWith("Deactivate", true) }
                 Log.d(TAG, "Removal scan class=$windowClass nodes=$visited " +
@@ -1009,7 +1048,7 @@ class AppMonitorAccessibilityService : AccessibilityService() {
             if (reason != null) {
                 // Show on the admin detail/removal screen, before its final action
                 // can disable accessibility or Android freezes app switches.
-                handleTargetedRemovalPrompt(packageName, windowClass, texts, reason)
+                handleTargetedRemovalPrompt(packageName, windowClass, texts + clickedActionTexts, reason)
                 return true
             }
         } catch (e: Exception) {

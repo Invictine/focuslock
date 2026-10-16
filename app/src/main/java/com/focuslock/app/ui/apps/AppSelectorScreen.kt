@@ -64,6 +64,7 @@ import com.focuslock.app.ui.components.AppIconTileForPackage
 import com.focuslock.app.ui.components.IconBadge
 import com.focuslock.app.ui.components.MotionTokens
 import com.focuslock.app.ui.components.PendingMergeTarget
+import com.focuslock.app.ui.components.AdaptiveContentFrame
 import com.focuslock.app.ui.components.StaggeredFadeSlide
 import com.focuslock.app.ui.components.UiTokens
 import com.focuslock.app.ui.components.formatUsageSeconds
@@ -1203,11 +1204,12 @@ internal fun AppPickerScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
     ) {
-        Column(
+        AdaptiveContentFrame(modifier = Modifier.fillMaxSize(), maxContentWidth = 960.dp) {
+          Column(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(horizontal = UiTokens.ScreenPadding)
-        ) {
+          ) {
             Spacer(Modifier.height(4.dp))
 
             // TopAppBar-style header: back arrow + title + search action.
@@ -1720,6 +1722,7 @@ internal fun AppPickerScreen(
                     } // Column (tab body)
                 }
             } // when(selectedTab)
+          }
         }
 
         SnackbarHost(

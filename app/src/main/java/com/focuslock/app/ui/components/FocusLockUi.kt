@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FiniteAnimationSpec
@@ -81,6 +82,27 @@ object UiTokens {
     val ItemGap = 12.dp
     val IconTileSize = 40.dp
     val BadgeSize = 44.dp
+}
+
+/**
+ * Centers screen content in wide windows while letting it use the full width
+ * available on phones and narrow split-screen windows. Callers retain their own
+ * horizontal padding so touch targets and text scaling remain unchanged.
+ */
+@Composable
+fun AdaptiveContentFrame(
+    modifier: Modifier = Modifier,
+    maxContentWidth: Dp = 840.dp,
+    content: @Composable () -> Unit,
+) {
+    Box(modifier = modifier, contentAlignment = Alignment.TopCenter) {
+        Box(
+            modifier = Modifier
+                .widthIn(max = maxContentWidth)
+                .fillMaxWidth(),
+            content = { content() },
+        )
+    }
 }
 
 /**

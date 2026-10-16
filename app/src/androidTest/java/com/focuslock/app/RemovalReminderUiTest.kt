@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.app.admin.DevicePolicyManager
 import android.content.Context
 import android.net.Uri
+import android.os.SystemClock
 import androidx.lifecycle.Lifecycle
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.onFirst
@@ -17,11 +18,14 @@ import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.test.core.app.ActivityScenario
 import androidx.test.platform.app.InstrumentationRegistry
 import com.focuslock.app.reminder.RemovalReminderActivity
+import com.focuslock.app.reminder.RemovalReminderController
 import com.focuslock.app.reminder.RemovalReminderStore
+import com.focuslock.app.service.RemovalAttemptPolicy
 import java.io.DataOutputStream
 import java.io.File
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -33,6 +37,70 @@ import kotlinx.coroutines.runBlocking
 class RemovalReminderUiTest {
     @get:Rule
     val composeRule = createEmptyComposeRule()
+
+    @Test
+    fun deactivateFirstSettingsAlertFlowsThroughPolicyAndController() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val store = RemovalReminderStore(context)
+        val wasEnabled = store.enabled
+        val policyPrefs = context.getSharedPreferences("removal_reminder_launch_policy", Context.MODE_PRIVATE)
+        val policyBackup = policyPrefs.all.toMap()
+        val automation = instrumentation.uiAutomation
+        var launchRequested = false
+        try {
+            store.enabled = true
+            policyPrefs.edit().clear().commit()
+            val reason = RemovalAttemptPolicy.reason(
+                packageName = "com.android.settings",
+                windowClassName = "android.app.Dialog",
+                texts = listOf("FocusLock", "Deactivate first", "Cancel"),
+                deviceAdminActive = true,
+            )
+            assertEquals(RemovalAttemptPolicy.REASON_ADMIN_REQUESTED, reason)
+
+            // Some OEMs expose this same modal as the App info activity's root class.
+            assertEquals(
+                RemovalAttemptPolicy.REASON_ADMIN_REQUESTED,
+                RemovalAttemptPolicy.reason(
+                    packageName = "com.android.settings",
+                    windowClassName = "com.android.settings.applications.InstalledAppDetailsTop",
+                    texts = listOf("FocusLock", "Deactivate first", "Cancel"),
+                    deviceAdminActive = true,
+                ),
+            )
+
+            // Wait out a reminder dismissed by an earlier test in this process.
+            SystemClock.sleep(1_600)
+            assertTrue(
+                "The production launch controller should accept the detected removal reason",
+                RemovalReminderController.show(context, reason!!, fromForeground = true),
+            )
+            launchRequested = true
+            awaitVisibleText(automation, "Do you really want to do this?")
+            awaitVisibleText(automation, "Keep FocusLock")
+        } finally {
+            val currentRoot = automation.rootInActiveWindow
+            val reminderOwnsForeground = try {
+                currentRoot?.packageName?.toString() == context.packageName
+            } finally { currentRoot?.recycle() }
+            if (launchRequested && reminderOwnsForeground) {
+                automation.executeShellCommand("input keyevent KEYCODE_BACK").close()
+            }
+            store.enabled = wasEnabled
+            val restore = policyPrefs.edit().clear()
+            policyBackup.forEach { (key, value) ->
+                when (value) {
+                    is Boolean -> restore.putBoolean(key, value)
+                    is Int -> restore.putInt(key, value)
+                    is Long -> restore.putLong(key, value)
+                    is String -> restore.putString(key, value)
+                    is Set<*> -> restore.putStringSet(key, value.filterIsInstance<String>().toSet())
+                }
+            }
+            restore.commit()
+        }
+    }
 
     @Test
     fun previewShowsDialogAndCloseActionAndSavesScreenshot() {
@@ -139,6 +207,28 @@ class RemovalReminderUiTest {
         val manager = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
         val receiver = android.content.ComponentName(context, com.focuslock.app.service.FocusLockDeviceAdminReceiver::class.java)
         return manager.isAdminActive(receiver)
+    }
+
+    private fun awaitVisibleText(automation: android.app.UiAutomation, expected: String) {
+        val deadline = SystemClock.uptimeMillis() + 8_000L
+        while (SystemClock.uptimeMillis() < deadline) {
+            val root = automation.rootInActiveWindow
+            val found = if (root == null) false else try {
+                fun contains(node: android.view.accessibility.AccessibilityNodeInfo): Boolean {
+                    if (node.text?.toString() == expected || node.contentDescription?.toString() == expected) return true
+                    for (index in 0 until node.childCount) {
+                        val child = node.getChild(index) ?: continue
+                        try { if (contains(child)) return true }
+                        finally { child.recycle() }
+                    }
+                    return false
+                }
+                contains(root)
+            } finally { root.recycle() }
+            if (found) return
+            SystemClock.sleep(100)
+        }
+        throw AssertionError("Timed out waiting for reminder text '$expected'")
     }
 
     private fun writeShortWave(file: File) {

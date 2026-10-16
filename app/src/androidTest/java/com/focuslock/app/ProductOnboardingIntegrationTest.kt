@@ -19,6 +19,9 @@ import com.focuslock.app.ui.MainActivity
 import com.focuslock.app.ui.onboarding.ProductOnboardingStore
 import com.focuslock.app.ui.onboarding.productTourPages
 import com.focuslock.app.ui.onboarding.liveTasks
+import com.focuslock.app.ui.permissions.PermissionKind
+import com.focuslock.app.ui.permissions.PermissionSetupState
+import com.focuslock.app.ui.permissions.PermissionSetupStore
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
@@ -31,6 +34,55 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class ProductOnboardingIntegrationTest {
     @get:Rule val compose = createEmptyComposeRule()
+
+    @Test
+    fun focusWalkthroughStaysVisibleWhenPermissionSetupWasAlreadyPending() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val settings: SettingsRepository = FocusLockApplication.instance.settingsRepository
+        val priorOfflineMode = runBlocking { settings.offlineModeFlow.first() }
+        val onboardingPrefs = context.getSharedPreferences(ONBOARDING_PREFS, 0)
+        val priorOnboardingPrefs = onboardingPrefs.all.toMap()
+        val permissionPrefs = context.getSharedPreferences(PERMISSION_PREFS, 0)
+        val priorPermissionPrefs = permissionPrefs.all.toMap()
+        var scenario: ActivityScenario<MainActivity>? = null
+
+        try {
+            runBlocking { settings.setOfflineMode(true) }
+            ProductOnboardingStore(context).replay()
+            PermissionSetupStore(context).save(
+                PermissionSetupState().begin(listOf(PermissionKind.ACCESSIBILITY))
+            )
+
+            val activeScenario = ActivityScenario.launch(MainActivity::class.java)
+            scenario = activeScenario
+            compose.waitUntil(15_000) {
+                compose.onAllNodesWithText("FocusLock guide").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText("Open Focus").performScrollTo().performClick()
+
+            compose.onNodeWithText(productTourPages.first().liveTasks().first()).assertIsDisplayed()
+            compose.onNodeWithText("Accessibility access").assertDoesNotExist()
+            compose.onNodeWithText("Continue").performClick()
+            compose.onNodeWithText(productTourPages.first().liveTasks()[1]).assertIsDisplayed()
+
+            activeScenario.close()
+            scenario = null
+            val resumedScenario = ActivityScenario.launch(MainActivity::class.java)
+            scenario = resumedScenario
+            compose.waitUntil(15_000) {
+                compose.onAllNodesWithText(productTourPages.first().liveTasks()[1])
+                    .fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText(productTourPages.first().liveTasks()[1]).assertIsDisplayed()
+            compose.onNodeWithText("FocusLock guide").assertDoesNotExist()
+            compose.onNodeWithText("Accessibility access").assertDoesNotExist()
+        } finally {
+            scenario?.close()
+            runBlocking { settings.setOfflineMode(priorOfflineMode) }
+            restorePreferences(onboardingPrefs, priorOnboardingPrefs)
+            restorePreferences(permissionPrefs, priorPermissionPrefs)
+        }
+    }
 
     @Test
     fun boundaryWalkthroughKeepsProgressAcrossRecreationAndCanResumeFromSettings() {
@@ -56,7 +108,7 @@ class ProductOnboardingIntegrationTest {
                 compose.onAllNodesWithText("FocusLock guide").fetchSemanticsNodes().isNotEmpty()
             }
             assertCurrentPage(productTourPages.indexOf(boundaryPage))
-            compose.onNodeWithText("Start walkthrough").performScrollTo().performClick()
+            compose.onNodeWithText(boundaryPage.actionLabel!!).performScrollTo().performClick()
 
             compose.onNodeWithText(boundaryPage.liveTasks().first()).assertIsDisplayed()
             compose.onNodeWithText("Applications").performScrollTo().assertIsDisplayed()
@@ -83,11 +135,9 @@ class ProductOnboardingIntegrationTest {
             compose.onNodeWithContentDescription("Settings").performClick()
             compose.onNodeWithText("Preferences").performClick()
             compose.onNodeWithText("Resume guide").performScrollTo().performClick()
-            assertCurrentPage(productTourPages.indexOf(boundaryPage))
-            assertTrue(ProductOnboardingStore(context).shouldAutoShow)
-
-            compose.onNodeWithText("Start walkthrough").performScrollTo().performClick()
             compose.onNodeWithText(boundaryPage.liveTasks()[1]).assertIsDisplayed()
+            assertTrue(ProductOnboardingStore(context).shouldAutoShow)
+            assertTrue(ProductOnboardingStore(context).hasActiveLiveTutorial)
             assertEquals(1, ProductOnboardingStore(context).taskIndex(boundaryPage.id))
         } finally {
             scenario?.close()
@@ -220,6 +270,24 @@ class ProductOnboardingIntegrationTest {
             InstrumentationRegistry.getInstrumentation().targetContext
         ).pageIndex)
         compose.onNodeWithText(productTourPages[index].title).assertIsDisplayed()
+    }
+
+    private fun restorePreferences(
+        preferences: android.content.SharedPreferences,
+        values: Map<String, Any?>,
+    ) {
+        preferences.edit().clear().apply {
+            values.forEach { (key, value) ->
+                when (value) {
+                    is Boolean -> putBoolean(key, value)
+                    is Int -> putInt(key, value)
+                    is Long -> putLong(key, value)
+                    is Float -> putFloat(key, value)
+                    is String -> putString(key, value)
+                    is Set<*> -> putStringSet(key, value.filterIsInstance<String>().toSet())
+                }
+            }
+        }.commit()
     }
 
     private companion object {

@@ -52,6 +52,19 @@ function New-Commit([string]$Fixture, [string]$Message) {
     return ([string](Invoke-Git $Fixture @('rev-parse', 'HEAD'))).Trim()
 }
 
+function Write-QueuedJob([string]$StateRoot, [string]$SourceRoot, [string]$Commit, [DateTime]$QueuedAt) {
+    $job = [ordered]@{
+        commit = $Commit.ToLowerInvariant()
+        sourceRoot = $SourceRoot
+        queuedAt = $QueuedAt.ToUniversalTime().ToString('o')
+    }
+    [IO.File]::WriteAllText(
+        (Join-Path (Join-Path $StateRoot 'jobs') "$Commit.json"),
+        ($job | ConvertTo-Json),
+        (New-Object Text.UTF8Encoding($false))
+    )
+}
+
 try {
     New-Item -ItemType Directory -Path $fixtureRoot -Force | Out-Null
     $scripts = Join-Path $fixtureRoot 'scripts'
@@ -156,6 +169,89 @@ try {
     Assert-True (($repeat -join "`n") -match 'already (queued or )?resolved') 'Repeated enqueue was not idempotent.'
     Assert-True (@(Get-ChildItem -LiteralPath $results -Filter '*.json' -File).Count -eq 2) 'Repeated enqueue created an extra result.'
 
+    # Queue an ancestor chain without starting a background worker, then verify
+    # coalescing happens only between jobs, never by interrupting an active build.
+    $originalHooksPath = ([string](Invoke-Git $fixtureRoot @('config', '--get', 'core.hooksPath'))).Trim()
+    $emptyHooksPath = Join-Path $fixtureRoot 'artifacts\coalesce-empty-hooks'
+    New-Item -ItemType Directory -Path $emptyHooksPath -Force | Out-Null
+    $coalesceStateRoot = Join-Path $fixtureRoot 'artifacts\coalesce-state'
+    foreach ($directory in @('jobs', 'results', 'logs', 'builds')) {
+        New-Item -ItemType Directory -Path (Join-Path $coalesceStateRoot $directory) -Force | Out-Null
+    }
+    Assert-True (Test-Path -LiteralPath (Join-Path $coalesceStateRoot 'results') -PathType Container) 'Coalescing fixture results directory was not created.'
+    $tracePath = Join-Path $fixtureRoot 'artifacts\runner-trace.txt'
+    $traceBeforeCoalesce = @(Get-Content -LiteralPath $tracePath)
+    Invoke-Git $fixtureRoot @('config', 'core.hooksPath', $emptyHooksPath) | Out-Null
+    try {
+        [IO.File]::WriteAllText((Join-Path $fixtureRoot 'marker.txt'), 'queued-ancestor-one', (New-Object Text.UTF8Encoding($false)))
+        $ancestorOne = New-Commit $fixtureRoot 'queued ancestor one'
+        [IO.File]::WriteAllText((Join-Path $fixtureRoot 'marker.txt'), 'queued-ancestor-two', (New-Object Text.UTF8Encoding($false)))
+        $ancestorTwo = New-Commit $fixtureRoot 'queued ancestor two'
+        [IO.File]::WriteAllText((Join-Path $fixtureRoot 'marker.txt'), 'queued-descendant-three', (New-Object Text.UTF8Encoding($false)))
+        $descendantThree = New-Commit $fixtureRoot 'queued descendant three'
+        $queuedNow = [DateTime]::UtcNow
+        Write-QueuedJob $coalesceStateRoot $fixtureRoot $ancestorOne $queuedNow.AddSeconds(-3)
+        Write-QueuedJob $coalesceStateRoot $fixtureRoot $ancestorTwo $queuedNow.AddSeconds(-2)
+        Write-QueuedJob $coalesceStateRoot $fixtureRoot $descendantThree $queuedNow.AddSeconds(-1)
+
+        Invoke-PowerShell $enqueueScript @('-Worker', '-StateRoot', $coalesceStateRoot) $fixtureRoot | Out-Null
+
+        $ancestorOneResult = Get-Result (Join-Path $coalesceStateRoot 'results') $ancestorOne
+        $ancestorTwoResult = Get-Result (Join-Path $coalesceStateRoot 'results') $ancestorTwo
+        $descendantResult = Get-Result (Join-Path $coalesceStateRoot 'results') $descendantThree
+        Assert-True ($ancestorOneResult.status -eq 'superseded' -and $ancestorOneResult.supersededBy -eq $descendantThree) 'First ancestor did not retain a superseded result pointing at the delivered descendant.'
+        Assert-True ($ancestorTwoResult.status -eq 'superseded' -and $ancestorTwoResult.supersededBy -eq $descendantThree) 'Second ancestor did not retain a superseded result pointing at the delivered descendant.'
+        Assert-True ($descendantResult.status -eq 'completed') 'Newest queued descendant did not complete.'
+        $coalesceTrace = @(Get-Content -LiteralPath $tracePath | Select-Object -Skip $traceBeforeCoalesce.Count)
+        Assert-True ($coalesceTrace.Count -eq 2 -and $coalesceTrace[0] -eq 'START|queued-descendant-three' -and $coalesceTrace[1] -eq 'END|queued-descendant-three') 'Coalescing ran an obsolete ancestor snapshot or skipped the newest snapshot.'
+
+        # Divergent commits share a base but neither contains the other. Both must run.
+        $baseBranch = ([string](Invoke-Git $fixtureRoot @('branch', '--show-current'))).Trim()
+        Invoke-Git $fixtureRoot @('checkout', '-q', '-b', 'coalesce-left') | Out-Null
+        [IO.File]::WriteAllText((Join-Path $fixtureRoot 'marker.txt'), 'divergent-left', (New-Object Text.UTF8Encoding($false)))
+        $divergentLeft = New-Commit $fixtureRoot 'divergent left'
+        Invoke-Git $fixtureRoot @('checkout', '-q', $baseBranch) | Out-Null
+        [IO.File]::WriteAllText((Join-Path $fixtureRoot 'marker.txt'), 'divergent-right', (New-Object Text.UTF8Encoding($false)))
+        $divergentRight = New-Commit $fixtureRoot 'divergent right'
+        $queuedNow = [DateTime]::UtcNow
+        Write-QueuedJob $coalesceStateRoot $fixtureRoot $divergentLeft $queuedNow.AddSeconds(-2)
+        Write-QueuedJob $coalesceStateRoot $fixtureRoot $divergentRight $queuedNow.AddSeconds(-1)
+        Invoke-PowerShell $enqueueScript @('-Worker', '-StateRoot', $coalesceStateRoot) $fixtureRoot | Out-Null
+        Assert-True ((Get-Result (Join-Path $coalesceStateRoot 'results') $divergentLeft).status -eq 'completed') 'A divergent queued commit was incorrectly superseded.'
+        Assert-True ((Get-Result (Join-Path $coalesceStateRoot 'results') $divergentRight).status -eq 'completed') 'The other divergent queued commit was incorrectly superseded.'
+        $leftLog = Get-Content -LiteralPath (Join-Path (Join-Path $coalesceStateRoot 'logs') "$divergentLeft.log") -Raw
+        $rightLog = Get-Content -LiteralPath (Join-Path (Join-Path $coalesceStateRoot 'logs') "$divergentRight.log") -Raw
+        Assert-True ($leftLog -match 'runner startup marker=divergent-left' -and $rightLog -match 'runner startup marker=divergent-right') 'Divergent queued commits did not both run.'
+
+        # Identical commit history in separate repositories is not enough to coalesce:
+        # each checkout can carry distinct local distribution configuration.
+        $cloneRoot = Join-Path $artifactsRoot ('auto-hook-clone-' + [guid]::NewGuid().ToString('N'))
+        if (-not $cloneRoot.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to create a clone fixture outside artifacts: $cloneRoot"
+        }
+        try {
+            Invoke-Git $fixtureRoot @('clone', '--no-hardlinks', $fixtureRoot, $cloneRoot) | Out-Null
+            Invoke-Git $cloneRoot @('config', 'core.hooksPath', $emptyHooksPath) | Out-Null
+            [IO.File]::WriteAllText((Join-Path $cloneRoot 'marker.txt'), 'separate-repository-descendant', (New-Object Text.UTF8Encoding($false)))
+            $separateRepoDescendant = New-Commit $cloneRoot 'separate repository descendant'
+            $queuedNow = [DateTime]::UtcNow
+            Write-QueuedJob $coalesceStateRoot $fixtureRoot $descendantThree $queuedNow.AddSeconds(-2)
+            Write-QueuedJob $coalesceStateRoot $cloneRoot $separateRepoDescendant $queuedNow.AddSeconds(-1)
+            Invoke-PowerShell $enqueueScript @('-Worker', '-StateRoot', $coalesceStateRoot) $fixtureRoot | Out-Null
+            Assert-True ((Get-Result (Join-Path $coalesceStateRoot 'results') $descendantThree).status -eq 'completed') 'A commit was superseded using ancestry from a different repository.'
+            Assert-True ((Get-Result (Join-Path $coalesceStateRoot 'results') $separateRepoDescendant).status -eq 'completed') 'A descendant in a different repository did not run.'
+        } finally {
+            if (Test-Path -LiteralPath $cloneRoot) {
+                $resolvedClone = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $cloneRoot).Path)
+                if ($resolvedClone.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase) -and (Split-Path -Leaf $resolvedClone).StartsWith('auto-hook-clone-')) {
+                    Remove-Item -LiteralPath $resolvedClone -Recurse -Force
+                }
+            }
+        }
+    } finally {
+        Invoke-Git $fixtureRoot @('config', 'core.hooksPath', $originalHooksPath) | Out-Null
+    }
+
     [IO.File]::WriteAllText((Join-Path $fixtureRoot 'firebase-distribution.local.json'), '{"mode":"fail"}', (New-Object Text.UTF8Encoding($false)))
     [IO.File]::WriteAllText((Join-Path $fixtureRoot 'marker.txt'), 'snapshot-failure', (New-Object Text.UTF8Encoding($false)))
     $failure = New-Commit $fixtureRoot 'expected distribution failure'
@@ -169,6 +265,8 @@ try {
     Assert-True ($failureLog -match 'exit code 13') "Failure log is missing the child process exit code. Log contents:`n$failureLog"
     Write-Output 'PASS: ValidateOnly is inert; installer preserves the configured hooks path and chains the previous hook.'
     Write-Output 'PASS: post-commit enqueue returns promptly; committed snapshots are distributed in serialized order.'
+    Write-Output 'PASS: queued ancestors receive superseded results when a later descendant runs; divergent commits both run.'
+    Write-Output 'PASS: matching history in separate repositories is not coalesced.'
     Write-Output 'PASS: repeat enqueue is idempotent; a distribution failure is logged without failing git commit.'
     Write-Output 'Temporary fixture cleaned up.'
 }

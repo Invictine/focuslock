@@ -137,7 +137,7 @@ class ProductOnboardingUiTest {
         }
 
         compose.onNodeWithText(productTourPages[permissionsIndex].title).assertIsDisplayed()
-        compose.onNodeWithText("Start walkthrough").performScrollTo().performClick()
+        compose.onNodeWithText(productTourPages[permissionsIndex].actionLabel!!).performScrollTo().performClick()
         assertEquals(ProductTourDestination.PROTECTION, destination)
         assertTrue(!finished)
     }
@@ -159,7 +159,7 @@ class ProductOnboardingUiTest {
             }
         }
 
-        compose.onNodeWithText("Start walkthrough").performScrollTo().performClick()
+        compose.onNodeWithText(productTourPages[1].actionLabel!!).performScrollTo().performClick()
         assertEquals(ProductTourDestination.BOUNDARIES, destination)
         assertTrue(!finished)
     }

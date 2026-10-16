@@ -76,6 +76,8 @@ import com.focuslock.app.ui.onboarding.ProductOnboardingDialog
 import com.focuslock.app.ui.onboarding.ProductLiveTutorial
 import com.focuslock.app.ui.onboarding.ProductOnboardingStore
 import com.focuslock.app.ui.onboarding.ProductTourDestination
+import com.focuslock.app.ui.onboarding.liveDestination
+import com.focuslock.app.ui.onboarding.productTourPages
 import com.focuslock.app.ui.debug.DebugDataScreen
 import com.focuslock.app.ui.permissions.PermissionHelper
 import com.focuslock.app.ui.permissions.PermissionReturnWatcher
@@ -287,9 +289,9 @@ class MainActivity : ComponentActivity() {
                     val onboardingStore = remember { ProductOnboardingStore(this@MainActivity) }
                     var onboardingPage by rememberSaveable { mutableIntStateOf(onboardingStore.pageIndex) }
                     var showProductOnboarding by rememberSaveable {
-                        mutableStateOf(onboardingStore.shouldAutoShow)
+                        mutableStateOf(onboardingStore.shouldAutoShow && !onboardingStore.hasActiveLiveTutorial)
                     }
-                    var liveTutorial by rememberSaveable { mutableStateOf(false) }
+                    var liveTutorial by rememberSaveable { mutableStateOf(onboardingStore.hasActiveLiveTutorial) }
                     LaunchedEffect(authState, offlineMode) {
                         if (!liveTutorial && onboardingStore.shouldAutoShow &&
                             (authState == FocusAuthState.SignedIn || offlineMode)
@@ -297,6 +299,7 @@ class MainActivity : ComponentActivity() {
                     }
                     val finishProductOnboarding = {
                         liveTutorial = false
+                        onboardingStore.endLiveTutorial()
                         onboardingStore.finish()
                         showProductOnboarding = false
                     }
@@ -413,10 +416,15 @@ class MainActivity : ComponentActivity() {
                                 pageIndex = onboardingPage,
                                 onNavigate = navigateTutorial,
                                 includeNavigationInset = currentTab == NavigationItem.SETTINGS,
-                                onReview = { liveTutorial = false; showProductOnboarding = true },
+                                onReview = {
+                                    liveTutorial = false
+                                    onboardingStore.endLiveTutorial()
+                                    showProductOnboarding = true
+                                },
                                 onPause = pauseProductOnboarding,
                                 onNext = {
                                     liveTutorial = false
+                                    onboardingStore.endLiveTutorial()
                                     if (onboardingPage == com.focuslock.app.ui.onboarding.productTourPages.lastIndex) {
                                         finishProductOnboarding()
                                     } else {
@@ -479,7 +487,7 @@ class MainActivity : ComponentActivity() {
                             .background(MaterialTheme.colorScheme.background),
                         contentAlignment = Alignment.TopCenter
                     ) {
-                        Box(Modifier.widthIn(max = 720.dp).fillMaxSize()) {
+                        Box(Modifier.fillMaxSize()) {
                         // The permission wizard starts after the product tour, avoiding stacked dialogs.
                         if (showAccountSignIn) {
                             NativeSignInScreen(
@@ -513,7 +521,8 @@ class MainActivity : ComponentActivity() {
                                 onNavigatePermissions = { openSettings(SettingsSection.PROTECTION) },
                                 permissionSetupRequest = permissionSetupRequest,
                                 onOpenSettings = { openSettings(SettingsSection.OVERVIEW) },
-                                onOpenAccount = { accountReturnTab = currentTab; currentTab = NavigationItem.ACCOUNT }
+                                onOpenAccount = { accountReturnTab = currentTab; currentTab = NavigationItem.ACCOUNT },
+                                suspendPermissionSetup = liveTutorial,
                             )
                             NavigationItem.APPS -> BoundariesScreen(
                                 pendingMergeTarget = pendingMergeTarget,
@@ -529,14 +538,19 @@ class MainActivity : ComponentActivity() {
                                 // the next missing permission from its own checks.
                                 onOpenDebug = { showDebug = true },
                                 onSetupPermissions = {
+                                    if (liveTutorial) pauseProductOnboarding()
                                     permissionSetupRequest++
                                     currentTab = NavigationItem.DASHBOARD
                                 },
                                 onReplayOnboarding = {
-                                    if (onboardingStore.isComplete) onboardingStore.replay()
-                                    else onboardingStore.resume()
+                                    if (onboardingStore.isComplete) {
+                                        onboardingStore.replay()
+                                    } else {
+                                        onboardingStore.resume()
+                                    }
                                     onboardingPage = onboardingStore.pageIndex
-                                    showProductOnboarding = true
+                                    liveTutorial = onboardingStore.hasActiveLiveTutorial
+                                    showProductOnboarding = !liveTutorial
                                 },
                                 onboardingComplete = onboardingStore.isComplete
                             )
@@ -579,10 +593,12 @@ class MainActivity : ComponentActivity() {
                             },
                             onPause = pauseProductOnboarding,
                             onFinish = finishProductOnboarding,
-                            onOpenDestination = { destination ->
+                            onOpenDestination = { _ ->
                                 showProductOnboarding = false
+                                onboardingStore.beginLiveTutorial()
                                 liveTutorial = true
-                                navigateTutorial(destination)
+                                val page = productTourPages[onboardingPage.coerceIn(productTourPages.indices)]
+                                navigateTutorial(page.liveDestination(onboardingStore.taskIndex(page.id)))
                             }
                         )
                     }

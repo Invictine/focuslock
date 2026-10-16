@@ -17,10 +17,14 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.focuslock.app.ui.MainActivity
 import com.focuslock.app.ui.onboarding.ProductOnboardingStore
+import com.focuslock.app.ui.onboarding.liveTasks
+import com.focuslock.app.ui.onboarding.productTourPages
 import com.focuslock.app.ui.permissions.PermissionHelper
 import java.io.FileInputStream
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -73,6 +77,67 @@ class PermissionSetupUiTest {
             compose.onNodeWithText("Permissions & protection").performClick()
             compose.onNodeWithText("Set up permissions").performScrollTo().performClick()
             compose.onNodeWithText("Step 2 of $missingCount").assertIsDisplayed()
+        } finally {
+            scenario?.close()
+            setAppOpMode("GET_USAGE_STATS", usageMode)
+            setAppOpMode("SYSTEM_ALERT_WINDOW", overlayMode)
+            restorePreferences(productPrefs, oldProductPrefs)
+            restorePreferences(permissionPrefs, oldPermissionPrefs)
+            runBlocking { settings.setOfflineMode(oldOffline) }
+        }
+    }
+
+    @Test
+    fun explicitSettingsSetupPausesAndResumesTheSameLiveGuideStep() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val app = FocusLockApplication.instance
+        val settings = app.settingsRepository
+        val oldOffline = runBlocking { settings.offlineModeFlow.first() }
+        val permissionPrefs = context.getSharedPreferences(PERMISSION_PREFS, 0)
+        val oldPermissionPrefs = permissionPrefs.all.toMap()
+        val productPrefs = context.getSharedPreferences(PRODUCT_PREFS, 0)
+        val oldProductPrefs = productPrefs.all.toMap()
+        val usageMode = readAppOpMode("GET_USAGE_STATS")
+        val overlayMode = readAppOpMode("SYSTEM_ALERT_WINDOW")
+        var scenario: ActivityScenario<MainActivity>? = null
+
+        try {
+            setAppOpMode("GET_USAGE_STATS", "deny")
+            setAppOpMode("SYSTEM_ALERT_WINDOW", "deny")
+            val missingCount = PermissionHelper.getMissingPermissions(context).size
+            check(missingCount >= 2) { "Test fixture did not create two missing access steps: $missingCount" }
+
+            runBlocking { settings.setOfflineMode(true) }
+            ProductOnboardingStore(context).replay()
+            val permissionPage = productTourPages.first { it.id == "permissions" }
+            ProductOnboardingStore(context).savePage(productTourPages.indexOf(permissionPage))
+            permissionPrefs.edit().clear().putBoolean("permissions_skipped", true).commit()
+
+            scenario = ActivityScenario.launch(MainActivity::class.java)
+            compose.waitUntil(15_000) {
+                compose.onAllNodesWithText("FocusLock guide").fetchSemanticsNodes().isNotEmpty()
+            }
+            compose.onNodeWithText(permissionPage.actionLabel!!).performScrollTo().performClick()
+            compose.onNodeWithText(permissionPage.liveTasks().first()).assertIsDisplayed()
+            compose.onNodeWithText("Continue").performClick()
+            compose.onNodeWithText(permissionPage.liveTasks()[1]).assertIsDisplayed()
+            assertEquals(1, ProductOnboardingStore(context).taskIndex(permissionPage.id))
+
+            compose.onNodeWithText("Set up permissions").performScrollTo().performClick()
+            compose.onNodeWithText("Step 1 of $missingCount").assertIsDisplayed()
+            compose.onNode(isDialog()).performTouchInput { click(Offset(2f, 2f)) }
+            compose.onNodeWithText("Step 1 of $missingCount").assertDoesNotExist()
+
+            compose.onNodeWithContentDescription("Settings").performClick()
+            compose.onNodeWithText("Permissions & protection").performClick()
+            compose.onNodeWithContentDescription("Back to Settings").performClick()
+            compose.onNodeWithText("Preferences").performClick()
+            compose.onNodeWithText("Resume guide").performScrollTo().performClick()
+
+            compose.onNodeWithText(permissionPage.liveTasks()[1]).assertIsDisplayed()
+            compose.onNodeWithText("Step 1 of $missingCount").assertDoesNotExist()
+            assertTrue(ProductOnboardingStore(context).hasActiveLiveTutorial)
+            assertEquals(1, ProductOnboardingStore(context).taskIndex(permissionPage.id))
         } finally {
             scenario?.close()
             setAppOpMode("GET_USAGE_STATS", usageMode)

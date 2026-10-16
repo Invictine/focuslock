@@ -137,6 +137,92 @@ function Invoke-QueuedJob([string]$Root, [string]$JobPath) {
     Write-Output "$outcome $commit (log: $logPath)"
 }
 
+function Get-QueuedJobs([string]$Root) {
+    $jobsDir = Join-Path $Root 'jobs'
+    $entries = foreach ($path in Get-ChildItem -LiteralPath $jobsDir -Filter '*.json' -File -ErrorAction SilentlyContinue) {
+        $job = $null
+        $queuedAt = [DateTime]::MaxValue
+        try {
+            $job = Get-Content -LiteralPath $path.FullName -Raw | ConvertFrom-Json
+            $queuedAt = [DateTimeOffset]::Parse([string]$job.queuedAt).UtcDateTime
+        } catch {
+            # Keep malformed entries in the queue so the existing worker path reports them.
+        }
+        [pscustomobject]@{ path = $path.FullName; job = $job; queuedAt = $queuedAt }
+    }
+    return @($entries | Sort-Object @{ Expression = 'queuedAt' }, @{ Expression = { [string]$_.job.commit } })
+}
+
+function Get-GitCommonDirectory([string]$SourceRoot) {
+    if (-not $SourceRoot -or -not (Test-Path -LiteralPath $SourceRoot -PathType Container)) { return $null }
+    try {
+        $repoRoot = Get-RepoRoot $SourceRoot
+        $lines = @(& git -C $repoRoot rev-parse --git-common-dir 2>$null)
+        if ($LASTEXITCODE -ne 0 -or -not $lines) { return $null }
+        $common = ([string]($lines | Select-Object -First 1)).Trim()
+        if (-not [IO.Path]::IsPathRooted($common)) { $common = Join-Path $repoRoot $common }
+        return [IO.Path]::GetFullPath($common).TrimEnd('\', '/')
+    } catch { return $null }
+}
+
+function Test-CommitAncestor([string]$AncestorSourceRoot, [string]$DescendantSourceRoot, [string]$Ancestor, [string]$Descendant) {
+    if ($Ancestor -notmatch '^[0-9a-f]{40}$' -or $Descendant -notmatch '^[0-9a-f]{40}$') { return $false }
+    $ancestorRepository = Get-GitCommonDirectory $AncestorSourceRoot
+    $descendantRepository = Get-GitCommonDirectory $DescendantSourceRoot
+    if (-not $ancestorRepository -or -not $descendantRepository -or
+        -not [string]::Equals($ancestorRepository, $descendantRepository, [StringComparison]::OrdinalIgnoreCase)) { return $false }
+    & git -C $DescendantSourceRoot merge-base --is-ancestor $Ancestor $Descendant 2>$null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Complete-SupersededJobs([string]$Root) {
+    # Called only by the serialized worker, between jobs. The currently running job
+    # has already written its result and removed its queue file before this scan.
+    $queued = @(Get-QueuedJobs $Root)
+    if ($queued.Count -lt 2) { return }
+
+    foreach ($entry in $queued) {
+        $job = $entry.job
+        if (-not $job) { continue }
+        $commit = ([string]$job.commit).ToLowerInvariant()
+        if ($commit -notmatch '^[0-9a-f]{40}$') { continue }
+
+        $resultPath = Join-Path (Join-Path $Root 'results') "$commit.json"
+        if (Test-Path -LiteralPath $resultPath) { continue }
+
+        $descendant = $null
+        foreach ($candidate in $queued) {
+            if ($candidate.queuedAt -le $entry.queuedAt) { continue }
+            $laterJob = $candidate.job
+            $laterCommit = ([string]$laterJob.commit).ToLowerInvariant()
+            if ($laterCommit -eq $commit) { continue }
+            if (Test-Path -LiteralPath (Join-Path (Join-Path $Root 'results') "$laterCommit.json")) { continue }
+            if (Test-CommitAncestor ([string]$job.sourceRoot) ([string]$laterJob.sourceRoot) $commit $laterCommit) {
+                # Prefer the newest queued descendant so the result points at the
+                # snapshot that will actually be distributed if the queue is linear.
+                $descendant = $candidate
+            }
+        }
+        if (-not $descendant) { continue }
+
+        $supersededBy = ([string]$descendant.job.commit).ToLowerInvariant()
+        $logPath = Join-Path (Join-Path $Root 'logs') "$commit.log"
+        $message = "Distribution skipped because queued descendant $supersededBy contains this commit."
+        [IO.File]::AppendAllText($logPath, "$message`r`n", (New-Object Text.UTF8Encoding($false)))
+        $result = [ordered]@{
+            commit = $commit
+            status = 'superseded'
+            finishedAt = [DateTime]::UtcNow.ToString('o')
+            log = $logPath
+            error = $message
+            supersededBy = $supersededBy
+        }
+        Write-AtomicJson $resultPath $result
+        Remove-Item -LiteralPath $entry.path -Force
+        Write-Output "superseded $commit by $supersededBy"
+    }
+}
+
 if ($Enqueue) { Enqueue-Commit; exit 0 }
 if (-not $Worker) { throw 'Specify -Enqueue (hook mode) or -Worker (background mode).' }
 if (-not $StateRoot) {
@@ -149,7 +235,9 @@ $stateRootFull = [IO.Path]::GetFullPath($StateRoot)
 foreach ($name in @('GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_COMMON_DIR', 'GIT_PREFIX', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_QUARANTINE_PATH')) {
     Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
 }
-New-Item -ItemType Directory -Path $stateRootFull -Force | Out-Null
+foreach ($directory in @('jobs', 'results', 'logs', 'builds')) {
+    New-Item -ItemType Directory -Path (Join-Path $stateRootFull $directory) -Force | Out-Null
+}
 $lockPath = Join-Path $stateRootFull 'worker.lock'
 $lock = $null
 for ($attempt = 0; $attempt -lt 120 -and -not $lock; $attempt++) {
@@ -159,9 +247,17 @@ for ($attempt = 0; $attempt -lt 120 -and -not $lock; $attempt++) {
 if (-not $lock) { throw "Could not acquire distribution queue lock. Jobs remain queued under $stateRootFull" }
 try {
     while ($true) {
-        $jobsDir = Join-Path $stateRootFull 'jobs'
-        $next = Get-ChildItem -LiteralPath $jobsDir -Filter '*.json' -File -ErrorAction SilentlyContinue | Sort-Object { try { ([DateTime](Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json).queuedAt).ToUniversalTime() } catch { [DateTime]::MaxValue } } | Select-Object -First 1
+        Complete-SupersededJobs $stateRootFull
+        $next = Get-QueuedJobs $stateRootFull | Select-Object -First 1
         if (-not $next) { break }
-        Invoke-QueuedJob $stateRootFull $next.FullName
+        $nextCommit = ([string]$next.job.commit).ToLowerInvariant()
+        if ($nextCommit -match '^[0-9a-f]{40}$' -and
+            (Test-Path -LiteralPath (Join-Path (Join-Path $stateRootFull 'results') "$nextCommit.json"))) {
+            # A worker may stop after atomically saving a result but before removing
+            # its queue file. Preserve that resolved state instead of running it again.
+            Remove-Item -LiteralPath $next.path -Force
+            continue
+        }
+        Invoke-QueuedJob $stateRootFull $next.path
     }
 } finally { $lock.Dispose() }
