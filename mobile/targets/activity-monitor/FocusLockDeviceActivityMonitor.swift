@@ -12,6 +12,32 @@ private enum MonitorStorage {
   static let activityPrefix = "focuslock.rule."
   static let storePrefix = "focuslock.rule."
   static let limitMarkerPrefix = "focuslock.screenTime.limitReached."
+  static let creditEnabledKey = "focuslock.screenTime.credit.enabled.v1"
+  static let creditReconfiguringKey = "focuslock.screenTime.credit.reconfiguring.v1"
+  static let creditCurrentEpochKey = "focuslock.screenTime.credit.currentEpoch.v1"
+  static let creditEpochPrefix = "focuslock.screenTime.credit.epoch."
+  static let creditLedgerPrefix = "focuslock.screenTime.credit.ledger."
+  static let creditActivityPrefix = "focuslock.credit."
+  static let creditStore = "focuslock.credit"
+}
+
+private struct MonitorCreditEpoch: Codable {
+  var id: String
+  var ownerId: String
+  var startedAt: Double
+  var endsAt: Double
+  var allowanceMinutes: Int
+  var segmentBaseMinutes: Int
+  var selectionData: Data
+  var selection: FamilyActivitySelection {
+    (try? JSONDecoder().decode(FamilyActivitySelection.self, from: selectionData)) ?? FamilyActivitySelection()
+  }
+}
+
+private struct MonitorCreditLedger: Codable {
+  var consumedMinutes: Int = 0
+  var dailySeconds: [String: Int] = [:]
+  var updatedAt: Double = 0
 }
 
 private struct MonitorRule: Codable {
@@ -42,10 +68,18 @@ private struct MonitorRule: Codable {
 /// Runs in the Device Activity extension process, including when the app is not active.
 /// Time-limit tracking reports device activity, not completed work or FocusLock credit.
 public final class FocusLockDeviceActivityMonitor: DeviceActivityMonitor {
+  private static let creditUsageLock = NSLock()
   private var defaults: UserDefaults? { UserDefaults(suiteName: MonitorStorage.appGroup) }
+  private var creditStore: ManagedSettingsStore {
+    ManagedSettingsStore(named: ManagedSettingsStore.Name(MonitorStorage.creditStore))
+  }
 
   public override func intervalDidStart(for activity: DeviceActivityName) {
     super.intervalDidStart(for: activity)
+    if let epoch = creditEpoch(for: activity) {
+      applyCreditPolicyIfNeeded(epoch)
+      return
+    }
     guard let rule = rule(for: activity), rule.enabled, !isSuspended,
           AuthorizationCenter.shared.authorizationStatus == .approved else { return }
     let selection = rule.selection
@@ -85,6 +119,10 @@ public final class FocusLockDeviceActivityMonitor: DeviceActivityMonitor {
 
   public override func intervalDidEnd(for activity: DeviceActivityName) {
     super.intervalDidEnd(for: activity)
+    if let epoch = creditEpoch(for: activity) {
+      applyCreditPolicyIfNeeded(epoch)
+      return
+    }
     guard let rule = rule(for: activity) else { return }
     // A stale monitor left by a previous rule kind must never clear a currently
     // enabled permanent rule. Emergency suspension is the only global stop path.
@@ -101,6 +139,10 @@ public final class FocusLockDeviceActivityMonitor: DeviceActivityMonitor {
     activity: DeviceActivityName
   ) {
     super.eventDidReachThreshold(event, activity: activity)
+    if let epoch = creditEpoch(for: activity), let threshold = creditThreshold(event) {
+      recordCreditThreshold(threshold, epoch: epoch)
+      return
+    }
     guard event.rawValue == "limit",
           let rule = rule(for: activity), rule.kind == "dailyLimit", rule.enabled else { return }
     let today = Self.localDateKey(Date())
@@ -125,6 +167,85 @@ public final class FocusLockDeviceActivityMonitor: DeviceActivityMonitor {
     guard let data = defaults?.data(forKey: MonitorStorage.rulesKey),
           let rules = try? JSONDecoder().decode([MonitorRule].self, from: data) else { return nil }
     return rules.first { $0.id == id }
+  }
+
+  private func creditEpoch(for activity: DeviceActivityName) -> MonitorCreditEpoch? {
+    let rawName = activity.rawValue
+    guard rawName.hasPrefix(MonitorStorage.creditActivityPrefix) else { return nil }
+    let suffix = String(rawName.dropFirst(MonitorStorage.creditActivityPrefix.count))
+    let components = suffix.split(separator: ".", omittingEmptySubsequences: false)
+    guard let first = components.first, !first.isEmpty else { return nil }
+    let id = String(first)
+    guard let data = defaults?.data(forKey: MonitorStorage.creditEpochPrefix + id),
+          var epoch = try? JSONDecoder().decode(MonitorCreditEpoch.self, from: data), epoch.id == id else { return nil }
+    // New monitor names carry an immutable segment base. Legacy unsuffixed
+    // names use the stored value so an upgrade can finish an existing interval.
+    if components.count == 2, let segmentBase = Int(components[1]), segmentBase >= 0 {
+      epoch.segmentBaseMinutes = segmentBase
+    }
+    return epoch
+  }
+
+  private func creditThreshold(_ event: DeviceActivityEvent.Name) -> Int? {
+    let prefix = "usage_"
+    guard event.rawValue.hasPrefix(prefix), let threshold = Int(event.rawValue.dropFirst(prefix.count)), (1...60).contains(threshold) else {
+      return nil
+    }
+    return threshold
+  }
+
+  private func recordCreditThreshold(_ threshold: Int, epoch: MonitorCreditEpoch) {
+    guard let defaults else { return }
+    Self.creditUsageLock.lock()
+    defer { Self.creditUsageLock.unlock() }
+    let ledgerKey = MonitorStorage.creditLedgerPrefix + epoch.id
+    let prior = defaults.data(forKey: ledgerKey).flatMap { try? JSONDecoder().decode(MonitorCreditLedger.self, from: $0) }
+      ?? MonitorCreditLedger()
+    let absoluteMinutes = min(epoch.allowanceMinutes, epoch.segmentBaseMinutes + threshold)
+    guard absoluteMinutes > prior.consumedMinutes else {
+      applyCreditPolicyIfNeeded(epoch)
+      return
+    }
+    var ledger = prior
+    let delta = absoluteMinutes - prior.consumedMinutes
+    let date = Self.localDateKey(Date())
+    // DeviceActivity exposes threshold callbacks, not exact seconds here. Keep a
+    // conservative whole-minute lower bound and never infer additional usage.
+    ledger.consumedMinutes = absoluteMinutes
+    ledger.dailySeconds[date, default: 0] += delta * 60
+    ledger.updatedAt = Date().timeIntervalSince1970 * 1000
+    if let data = try? JSONEncoder().encode(ledger) { defaults.set(data, forKey: ledgerKey) }
+    applyCreditPolicyIfNeeded(epoch)
+  }
+
+  private func applyCreditPolicyIfNeeded(_ epoch: MonitorCreditEpoch) {
+    guard let defaults,
+          defaults.bool(forKey: MonitorStorage.creditEnabledKey),
+          let currentData = defaults.data(forKey: MonitorStorage.creditCurrentEpochKey),
+          let current = try? JSONDecoder().decode(MonitorCreditEpoch.self, from: currentData),
+          current.id == epoch.id else { return }
+    let expired = Date().timeIntervalSince1970 * 1000 >= epoch.endsAt
+    let ledgerData = defaults.data(forKey: MonitorStorage.creditLedgerPrefix + epoch.id)
+    let ledger = ledgerData.flatMap { try? JSONDecoder().decode(MonitorCreditLedger.self, from: $0) } ?? MonitorCreditLedger()
+    let exhausted = epoch.allowanceMinutes == 0 || ledger.consumedMinutes >= epoch.allowanceMinutes || expired
+    guard !isSuspended, !isHomeSuppressed,
+          AuthorizationCenter.shared.authorizationStatus == .approved else {
+      creditStore.clearAllSettings()
+      return
+    }
+    if defaults.bool(forKey: MonitorStorage.creditReconfiguringKey) {
+      apply(epoch.selection, to: creditStore)
+      return
+    }
+    if exhausted { apply(epoch.selection, to: creditStore) }
+    else { creditStore.clearAllSettings() }
+  }
+
+  private func apply(_ selection: FamilyActivitySelection, to store: ManagedSettingsStore) {
+    store.shield.applications = selection.applicationTokens.isEmpty ? nil : selection.applicationTokens
+    store.shield.webDomains = selection.webDomainTokens.isEmpty ? nil : selection.webDomainTokens
+    store.shield.applicationCategories = selection.categoryTokens.isEmpty ? nil : .specific(selection.categoryTokens)
+    store.shield.webDomainCategories = selection.categoryTokens.isEmpty ? nil : .specific(selection.categoryTokens)
   }
 
   private func apply(_ selection: FamilyActivitySelection, id: String) {

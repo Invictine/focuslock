@@ -15,6 +15,8 @@ import AccountTools from './src/AccountTools';
 import TickTickTools from './src/TickTickTools';
 import HomeLocationControls from './src/HomeLocationControls';
 import ManualWork from './src/ManualWork';
+import CreditTools from './src/CreditTools';
+import { CreditSync, freshCreditState, recordLeisureUsage } from './src/credit';
 import { accountDashboard, accountNuke, dashboardView, deviceHeartbeat, recordWork } from './src/api';
 import { installationId } from './src/device';
 import { errorMessage, tokenBelongsTo } from './src/auth';
@@ -180,6 +182,38 @@ function ConnectedController({ client, ...props }: {
     return () => { active = false; unsubscribe(); };
   }, [auth.isAuthenticated, client, props.ownerId, props.screenTime.status.available, props.screenTime.status.authorization, props.screenTime.status.selectionCount, revision]);
   const canSync = auth.isAuthenticated && connection.isWebSocketConnected;
+  const [creditError, setCreditError] = useState<string | null>(null);
+  const creditActive = useRef(true);
+  const creditOnline = useRef(false);
+  creditOnline.current = Boolean(canSync && props.screenTime.status.available && props.screenTime.status.authorization === 'approved');
+  useEffect(() => {
+    creditActive.current = true;
+    return () => { creditActive.current = false; };
+  }, []);
+  const creditSync = useMemo(() => new CreditSync({
+    ownerId: props.ownerId,
+    isCurrent: () => creditActive.current && creditOnline.current,
+    installationId,
+    native: ScreenTime,
+    acknowledge: (deviceId, buckets) => client.mutation(recordLeisureUsage, { deviceId, buckets }),
+    balance: async () => (await client.query(freshCreditState, {})).state?.creditBalanceSeconds ?? null,
+  }), [client, props.ownerId]);
+  const syncCredit = useCallback(async () => {
+    await creditSync.sync();
+    if (creditActive.current) { setCreditError(null); await props.screenTime.refresh(); }
+  }, [creditSync, props.screenTime.refresh]);
+  useEffect(() => {
+    if (!creditOnline.current) return;
+    let active = true;
+    const refresh = () => {
+      if (AppState.currentState !== 'active') return;
+      void syncCredit().catch((reason) => { if (active) setCreditError(`Leisure usage is saved on this iPhone and will retry: ${errorMessage(reason)}`); });
+    };
+    refresh();
+    const timer = setInterval(refresh, 30_000);
+    const foreground = AppState.addEventListener('change', (state) => { if (state === 'active') refresh(); });
+    return () => { active = false; clearInterval(timer); foreground.remove(); };
+  }, [canSync, props.screenTime.status.available, props.screenTime.status.authorization, revision, syncCredit]);
   useEffect(() => {
     if (!canSync) return;
     let active = true;
@@ -207,9 +241,10 @@ function ConnectedController({ client, ...props }: {
       client={client}
       dashboard={dashboard}
       connection={canSync && dashboard && !syncError ? 'connected' : !connection.isWebSocketConnected || syncError || (!auth.isLoading && !auth.isAuthenticated) ? 'offline' : 'loading'}
-      externalError={syncError ?? presenceError ?? (!auth.isLoading && !auth.isAuthenticated ? 'Account sync could not authenticate. Check your connection and the Clerk convex token template, then retry.' : null)}
+      externalError={syncError ?? presenceError ?? creditError ?? (!auth.isLoading && !auth.isAuthenticated ? 'Account sync could not authenticate. Check your connection and the Clerk convex token template, then retry.' : null)}
       canSync={canSync}
       sendWork={(record) => client.mutation(recordWork, record)}
+      syncCredit={syncCredit}
       onRetry={() => { setSyncError(null); setRevision((value) => value + 1); }}
     />
   );
@@ -229,6 +264,7 @@ type ControllerProps = {
   sendWork?: (record: WorkRecord) => Promise<{ applied: boolean; duplicate: boolean }>;
   onRetry?: () => void;
   client?: ConvexReactClient;
+  syncCredit?: () => Promise<void>;
 };
 
 function Controller(props: ControllerProps) {
@@ -241,7 +277,7 @@ function Controller(props: ControllerProps) {
   const [retry, setRetry] = useState(0);
   const [guideLoaded, setGuideLoaded] = useState(false);
   const [guideStep, setGuideStep] = useState<number | null>(null);
-  const [panel, setPanel] = useState<'device' | 'account' | 'ticktick' | 'home' | 'manual' | null>(null);
+  const [panel, setPanel] = useState<'device' | 'account' | 'ticktick' | 'home' | 'manual' | 'credit' | null>(null);
   const mounted = useRef(true);
   const actionLock = useRef(false);
   const flushing = useRef(false);
@@ -348,6 +384,7 @@ function Controller(props: ControllerProps) {
     openTickTick: () => setPanel('ticktick'),
     openHome: () => setPanel('home'),
     openManualLog: () => setPanel('manual'),
+    openCreditTools: () => setPanel('credit'),
     retrySync: () => { void load(); props.onRetry?.(); setRetry((value) => value + 1); },
     signIn: () => props.onSignIn?.(),
     signOut: () => action(async () => { await props.onSignOut?.(); }),
@@ -370,6 +407,10 @@ function Controller(props: ControllerProps) {
       {panel === 'device' ? <DeviceTools screenTime={screenTime.status} totalFocusMinutesToday={focusMinutesToday} taskFocusMinutesByTitle={progress.byTitle} onError={fail} onChanged={onChanged} /> : null}
       {panel === 'account' && props.client ? <AccountTools client={props.client} dashboard={props.dashboard ?? null} onError={fail} onChanged={onChanged} /> : null}
       {panel === 'home' ? <HomeLocationControls client={props.client ?? null} ownerId={ownerId} onError={fail} onChanged={onChanged} /> : null}
+      {panel === 'credit' ? <CreditTools client={props.client ?? null} ownerId={ownerId} balanceSeconds={props.dashboard?.state?.creditBalanceSeconds ?? null} onError={fail} onChanged={onChanged} onSync={async () => {
+        if (!props.syncCredit) throw new Error('Sign in to sync account credit.');
+        await props.syncCredit();
+      }} /> : null}
       {panel === 'ticktick' && props.client ? <TickTickTools client={props.client} totalFocusMinutesToday={focusMinutesToday} onError={fail} onStartTask={(title) => { actions.startSession(title, 25); setPanel(null); }} onPriorityTask={(title) => action(async () => {
         const id = 'ticktick-frog';
         const existing = (await ScreenTime.getRules()).find((rule) => rule.id === id);
@@ -384,7 +425,7 @@ function Controller(props: ControllerProps) {
         await store.update((current) => appendWorkRecord(current, record));
         setPanel(null);
       })} /> : null}
-      {panel !== 'device' && panel !== 'manual' && panel !== 'home' && !props.client ? <Text style={styles.copy}>Sign in to use these account tools.</Text> : null}
+      {panel !== 'device' && panel !== 'manual' && panel !== 'home' && panel !== 'credit' && !props.client ? <Text style={styles.copy}>Sign in to use these account tools.</Text> : null}
     </SafeAreaView>;
   }
   return (

@@ -31,15 +31,40 @@ private enum ScreenTimeStorage {
   static let accountNukeOwner = "focuslock.screenTime.accountNukeOwner.v1"
   static let accountNukeActive = "focuslock.screenTime.accountNukeActive.v1"
   static let accountNukeOwners = "focuslock.screenTime.accountNukeOwners.v2"
+  static let creditEnabled = "focuslock.screenTime.credit.enabled.v1"
+  static let creditReconfiguring = "focuslock.screenTime.credit.reconfiguring.v1"
+  static let creditSelection = "focuslock.screenTime.credit.selection.v1"
+  static let creditCurrentEpoch = "focuslock.screenTime.credit.currentEpoch.v1"
+  static let creditOwnerCounters = "focuslock.screenTime.credit.ownerCounters.v1"
+  static let creditEpochPrefix = "focuslock.screenTime.credit.epoch."
+  static let creditLedgerPrefix = "focuslock.screenTime.credit.ledger."
   static let homeOnly = "focuslock.screenTime.homeOnly.v1"
   static let atHome = "focuslock.screenTime.atHome.v1"
   static let migrated = "focuslock.screenTime.sharedMigration.v1"
   static let manualStore = "focuslock.screenTime"
   static let accountNukeStore = "focuslock.account-nuke"
+  static let creditStore = "focuslock.credit"
   static let rulePrefix = "focuslock.rule."
   static let activityPrefix = "focuslock.rule."
+  static let creditActivityPrefix = "focuslock.credit."
   static let maximumRules = 12
   static let maximumMonitors = 20
+}
+
+private struct CreditEpoch: Codable {
+  var id: String
+  var ownerId: String
+  var startedAt: Double
+  var endsAt: Double
+  var allowanceMinutes: Int
+  var segmentBaseMinutes: Int
+  var selectionData: Data
+}
+
+private struct CreditUsageLedger: Codable {
+  var consumedMinutes: Int = 0
+  var dailySeconds: [String: Int] = [:]
+  var updatedAt: Double = 0
 }
 
 private struct StoredRule: Codable, Equatable {
@@ -143,6 +168,10 @@ public final class FocusLockScreenTimeModule: Module {
     ManagedSettingsStore(named: ManagedSettingsStore.Name(ScreenTimeStorage.accountNukeStore))
   }
 
+  private var creditStore: ManagedSettingsStore {
+    ManagedSettingsStore(named: ManagedSettingsStore.Name(ScreenTimeStorage.creditStore))
+  }
+
   public func definition() -> ModuleDefinition {
     Name("FocusLockScreenTime")
 
@@ -206,6 +235,25 @@ public final class FocusLockScreenTimeModule: Module {
       try self.requireBuildCapability()
       return try await self.setAccountNukeAsync(ownerId: ownerId, active: active)
     }
+    AsyncFunction("getCreditGate") { () async -> [String: Any] in
+      await self.creditGateStatusAsync()
+    }
+    AsyncFunction("pickCreditApps") { () async throws -> [String: Any] in
+      try self.requireBuildCapability()
+      return try await self.pickCreditAppsAsync()
+    }
+    AsyncFunction("setCreditGateEnabled") { (enabled: Bool) async throws -> [String: Any] in
+      try self.requireBuildCapability()
+      return try await self.setCreditGateEnabledAsync(enabled)
+    }
+    AsyncFunction("configureCreditAllowance") { (ownerId: String, minutes: Int) async throws -> [String: Any] in
+      try self.requireBuildCapability()
+      return try await self.configureCreditAllowanceAsync(ownerId: ownerId, minutes: minutes)
+    }
+    AsyncFunction("getLeisureUsage") { (ownerId: String) async throws -> [[String: Any]] in
+      try self.requireBuildCapability()
+      return try await self.leisureUsageAsync(ownerId: ownerId)
+    }
     AsyncFunction("updateTaskProgress") { (id: String, trackedMinutes: Int, checkedOff: Bool, focusMinutesToday: Int) async throws -> [[String: Any]] in
       try self.requireBuildCapability()
       return try await self.updateTaskProgressAsync(id, trackedMinutes: trackedMinutes, checkedOff: checkedOff, focusMinutesToday: focusMinutesToday)
@@ -226,7 +274,7 @@ public final class FocusLockScreenTimeModule: Module {
       && authorization == .approved
       && hasAppliedPolicy(manualStore)
     let activeCount = authorization == .approved && !isSuspended
-      ? loadRules().filter { isRuleActive($0) }.count : 0
+      ? loadRules().filter { isRuleActive($0) }.count + (hasAppliedPolicy(creditStore) ? 1 : 0) : 0
     return ScreenTimeStatusValue(
       authorization: authorizationName(authorization),
       selectionCount: count(loadManualSelection()),
@@ -396,11 +444,16 @@ public final class FocusLockScreenTimeModule: Module {
   @MainActor
   private func suspendAllAsync() -> [String: Any] {
     defaults.set(true, forKey: ScreenTimeStorage.suspended)
-    let ownMonitors = center.activities.filter { $0.rawValue.hasPrefix(ScreenTimeStorage.activityPrefix) }
+    let ownMonitors = center.activities.filter {
+      $0.rawValue.hasPrefix(ScreenTimeStorage.activityPrefix)
+        || $0.rawValue.hasPrefix(ScreenTimeStorage.creditActivityPrefix)
+    }
     center.stopMonitoring(ownMonitors)
     manualStore.clearAllSettings()
     for rule in loadRules() { ruleStore(rule.id).clearAllSettings() }
     accountNukeStore.clearAllSettings()
+    creditStore.clearAllSettings()
+    defaults.set(false, forKey: ScreenTimeStorage.creditReconfiguring)
     return statusAsync()
   }
 
@@ -413,7 +466,12 @@ public final class FocusLockScreenTimeModule: Module {
       throw ruleError(42, "Account Nuke is still requested, but no selected apps or websites remain. Choose targets before resuming Screen Time rules.")
     }
     defaults.set(false, forKey: ScreenTimeStorage.suspended)
-    try restorePolicies()
+    do {
+      try restorePolicies()
+    } catch {
+      _ = suspendAllAsync()
+      throw error
+    }
     return statusAsync()
   }
 
@@ -482,6 +540,172 @@ public final class FocusLockScreenTimeModule: Module {
     try reconcile(task)
     restoreAccountNuke()
     return ruleViews()
+  }
+
+  @MainActor
+  private func creditGateStatusAsync() -> [String: Any] {
+    guard ScreenTimeCapabilityGate.isEnabled else {
+      return ["enabled": false, "selectionCount": 0, "allowanceMinutes": 0, "exhausted": false]
+    }
+    restoreOnceIfNeeded()
+    let epoch = currentCreditEpoch()
+    let ledger = epoch.map { creditLedger($0.id) }
+    let exhausted = epoch.map {
+      $0.allowanceMinutes == 0
+        || (ledger?.consumedMinutes ?? 0) >= $0.allowanceMinutes
+        || Date().timeIntervalSince1970 * 1000 >= $0.endsAt
+    } ?? false
+    var result: [String: Any] = [
+      "enabled": defaults.bool(forKey: ScreenTimeStorage.creditEnabled),
+      "selectionCount": count(loadCreditSelection()),
+      "allowanceMinutes": epoch?.allowanceMinutes ?? 0,
+      "exhausted": exhausted,
+    ]
+    if let epoch {
+      result["ownerId"] = epoch.ownerId
+      result["expiresAt"] = epoch.endsAt
+    }
+    return result
+  }
+
+  @MainActor
+  private func pickCreditAppsAsync() async throws -> [String: Any] {
+    try requireEditable()
+    guard !defaults.bool(forKey: ScreenTimeStorage.creditEnabled) else {
+      throw ruleError(44, "Turn off the credit gate before changing its selected apps or websites.")
+    }
+    guard !isStrictActive else { throw ruleError(13, "Credit app selections are locked during Strict Mode.") }
+    if let selection = try await presentPicker(initialSelection: loadCreditSelection()) {
+      defaults.set(try JSONEncoder().encode(selection), forKey: ScreenTimeStorage.creditSelection)
+    }
+    return creditGateStatusAsync()
+  }
+
+  @MainActor
+  private func setCreditGateEnabledAsync(_ enabled: Bool) throws -> [String: Any] {
+    restoreOnceIfNeeded()
+    let wasEnabled = defaults.bool(forKey: ScreenTimeStorage.creditEnabled)
+    if !enabled {
+      guard !isStrictActive else { throw ruleError(45, "Strict Mode prevents disabling the credit gate. Use emergency suspend if needed.") }
+      defaults.set(false, forKey: ScreenTimeStorage.creditEnabled)
+      if let epoch = currentCreditEpoch() { stopCreditMonitor(epoch.id) }
+      creditStore.clearAllSettings()
+      restoreAccountNuke()
+      return creditGateStatusAsync()
+    }
+    guard !isSuspended else { throw ruleError(11, "Resume Screen Time rules before enabling the credit gate.") }
+    guard AuthorizationCenter.shared.authorizationStatus == .approved else {
+      throw authorizationError(AuthorizationCenter.shared.authorizationStatus)
+    }
+    guard count(loadCreditSelection()) > 0 else {
+      throw ruleError(46, "Choose at least one app, category, or website for credit spending first.")
+    }
+    guard let epoch = currentCreditEpoch() else {
+      throw ruleError(47, "Sync a credit allowance before enabling the credit gate.")
+    }
+    guard count(creditSelection(epoch)) > 0,
+          selectionsMatch(creditSelection(epoch), loadCreditSelection()) else {
+      throw ruleError(52, "The saved credit allowance does not match the currently selected apps. Sync the allowance again before enabling it.")
+    }
+    defaults.set(true, forKey: ScreenTimeStorage.creditEnabled)
+    do {
+      try restoreCreditPolicy()
+    } catch {
+      defaults.set(wasEnabled, forKey: ScreenTimeStorage.creditEnabled)
+      if let oldEpoch = currentCreditEpoch() { try? restoreCreditPolicy(for: oldEpoch) }
+      throw error
+    }
+    restoreAccountNuke()
+    return creditGateStatusAsync()
+  }
+
+  @MainActor
+  private func configureCreditAllowanceAsync(ownerId rawOwnerId: String, minutes: Int) throws -> [String: Any] {
+    restoreOnceIfNeeded()
+    let ownerId = rawOwnerId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !ownerId.isEmpty, ownerId.count <= 128 else { throw ruleError(48, "An account ID is required to configure credit spending.") }
+    guard (0...60).contains(minutes) else { throw ruleError(49, "Credit allowance must be between 0 and 60 minutes per sync.") }
+    guard AuthorizationCenter.shared.authorizationStatus == .approved else {
+      throw authorizationError(AuthorizationCenter.shared.authorizationStatus)
+    }
+    guard !isSuspended else { throw ruleError(11, "Resume Screen Time rules before configuring credit spending.") }
+    let selection = loadCreditSelection()
+    guard count(selection) > 0 else { throw ruleError(46, "Choose at least one app, category, or website for credit spending first.") }
+    let oldData = defaults.data(forKey: ScreenTimeStorage.creditCurrentEpoch)
+    let oldEpoch = currentCreditEpoch()
+    if isStrictActive, let oldEpoch,
+       (oldEpoch.ownerId != ownerId || oldEpoch.allowanceMinutes != minutes) {
+      throw ruleError(50, "Strict Mode prevents changing the configured credit allowance.")
+    }
+    if let oldEpoch, oldEpoch.ownerId == ownerId, oldEpoch.allowanceMinutes == minutes,
+       selectionsMatch(creditSelection(oldEpoch), selection),
+       Date().timeIntervalSince1970 * 1000 < oldEpoch.endsAt,
+       creditLedger(oldEpoch.id).consumedMinutes < minutes {
+      return creditGateStatusAsync() // Keep the current threshold schedule and partial minute intact.
+    }
+
+    pruneCreditEpochs()
+    let epochCount = defaults.dictionaryRepresentation().keys.filter { $0.hasPrefix(ScreenTimeStorage.creditEpochPrefix) }.count
+    guard epochCount < 1_000 else { throw ruleError(51, "The local credit usage history reached its safe limit. Sync and try again after older records expire.") }
+    let now = Date().timeIntervalSince1970 * 1000
+    let epoch = CreditEpoch(
+      id: UUID().uuidString.lowercased(), ownerId: ownerId, startedAt: now, endsAt: now + 24 * 60 * 60 * 1000,
+      allowanceMinutes: minutes, segmentBaseMinutes: 0, selectionData: try JSONEncoder().encode(selection)
+    )
+    if defaults.bool(forKey: ScreenTimeStorage.creditEnabled) {
+      defaults.set(true, forKey: ScreenTimeStorage.creditReconfiguring)
+    }
+    if let oldEpoch { stopCreditMonitor(oldEpoch.id) }
+    do {
+      try saveCreditEpoch(epoch)
+      defaults.set(try JSONEncoder().encode(epoch), forKey: ScreenTimeStorage.creditCurrentEpoch)
+      if defaults.bool(forKey: ScreenTimeStorage.creditEnabled) {
+        try restoreCreditPolicy(for: epoch)
+        defaults.set(false, forKey: ScreenTimeStorage.creditReconfiguring)
+      }
+      else { creditStore.clearAllSettings() }
+    } catch {
+      stopCreditMonitor(epoch.id)
+      defaults.removeObject(forKey: creditEpochKey(epoch.id))
+      if let oldData { defaults.set(oldData, forKey: ScreenTimeStorage.creditCurrentEpoch) }
+      else { defaults.removeObject(forKey: ScreenTimeStorage.creditCurrentEpoch) }
+      defaults.set(false, forKey: ScreenTimeStorage.creditReconfiguring)
+      if let oldEpoch, defaults.bool(forKey: ScreenTimeStorage.creditEnabled) { try? restoreCreditPolicy(for: oldEpoch) }
+      throw error
+    }
+    return creditGateStatusAsync()
+  }
+
+  @MainActor
+  private func leisureUsageAsync(ownerId rawOwnerId: String) throws -> [[String: Any]] {
+    restoreOnceIfNeeded()
+    let ownerId = rawOwnerId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !ownerId.isEmpty, ownerId.count <= 128 else { throw ruleError(48, "An account ID is required to read credit usage.") }
+    let counterId = creditCounterId(ownerId)
+    var totals: [String: (seconds: Int, updatedAt: Double)] = [:]
+    for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(ScreenTimeStorage.creditEpochPrefix) {
+      guard let data = defaults.data(forKey: key), let epoch = try? JSONDecoder().decode(CreditEpoch.self, from: data),
+            epoch.ownerId == ownerId else { continue }
+      let ledger = creditLedger(epoch.id)
+      for (date, seconds) in ledger.dailySeconds {
+        let prior = totals[date] ?? (0, 0)
+        totals[date] = (prior.seconds + max(0, seconds), max(prior.updatedAt, ledger.updatedAt))
+      }
+    }
+    return totals.keys.sorted().map { date in
+      let value = totals[date] ?? (0, 0)
+      return ["counterId": counterId, "date": date, "measuredSeconds": value.seconds, "updatedAt": value.updatedAt]
+    }
+  }
+
+  @MainActor
+  private func creditCounterId(_ ownerId: String) -> String {
+    var counters = defaults.dictionary(forKey: ScreenTimeStorage.creditOwnerCounters) as? [String: String] ?? [:]
+    if let existing = counters[ownerId], UUID(uuidString: existing) != nil { return existing }
+    let created = UUID().uuidString.lowercased()
+    counters[ownerId] = created
+    defaults.set(counters, forKey: ScreenTimeStorage.creditOwnerCounters)
+    return created
   }
 
   @MainActor
@@ -638,7 +862,178 @@ public final class FocusLockScreenTimeModule: Module {
     let rules = loadRules()
     guard rules.count <= ScreenTimeStorage.maximumRules else { throw ruleError(15, "Stored rule count exceeds the supported limit.") }
     for rule in rules { try reconcile(rule) }
+    try restoreCreditPolicy()
     restoreAccountNuke()
+  }
+
+  @MainActor
+  private func restoreCreditPolicy() throws {
+    guard let epoch = currentCreditEpoch() else {
+      creditStore.clearAllSettings()
+      return
+    }
+    try restoreCreditPolicy(for: epoch)
+  }
+
+  @MainActor
+  private func restoreCreditPolicy(for epoch: CreditEpoch) throws {
+    guard defaults.bool(forKey: ScreenTimeStorage.creditEnabled) else {
+      defaults.set(false, forKey: ScreenTimeStorage.creditReconfiguring)
+      stopCreditMonitor(epoch.id)
+      creditStore.clearAllSettings()
+      return
+    }
+    guard !isSuspended else {
+      defaults.set(false, forKey: ScreenTimeStorage.creditReconfiguring)
+      creditStore.clearAllSettings()
+      return
+    }
+    guard AuthorizationCenter.shared.authorizationStatus == .approved else {
+      defaults.set(false, forKey: ScreenTimeStorage.creditReconfiguring)
+      creditStore.clearAllSettings()
+      return
+    }
+    guard count(creditSelection(epoch)) > 0 else {
+      throw ruleError(52, "The saved credit app selection is missing. Choose apps and sync the allowance again.")
+    }
+    if isHomeSuppressed { creditStore.clearAllSettings() }
+    let ledger = creditLedger(epoch.id)
+    let expired = Date().timeIntervalSince1970 * 1000 >= epoch.endsAt
+    let exhausted = epoch.allowanceMinutes == 0 || ledger.consumedMinutes >= epoch.allowanceMinutes || expired
+    if exhausted {
+      defaults.set(false, forKey: ScreenTimeStorage.creditReconfiguring)
+      stopCreditMonitor(epoch.id)
+      if !isHomeSuppressed { apply(creditSelection(epoch), to: creditStore) }
+      return
+    }
+    if hasCreditMonitor(epoch.id) {
+      defaults.set(false, forKey: ScreenTimeStorage.creditReconfiguring)
+      creditStore.clearAllSettings()
+      return
+    }
+    do {
+      try startCreditMonitor(epoch)
+      defaults.set(false, forKey: ScreenTimeStorage.creditReconfiguring)
+      if !isHomeSuppressed { creditStore.clearAllSettings() }
+    } catch {
+      // If Apple refuses the monitor, keep unmeasured use blocked by this store.
+      // This does not write a usage ledger entry or claim the allowance was spent.
+      if !isHomeSuppressed { apply(creditSelection(epoch), to: creditStore) }
+      throw error
+    }
+  }
+
+  @MainActor
+  private func startCreditMonitor(_ sourceEpoch: CreditEpoch) throws {
+    let consumed = creditLedger(sourceEpoch.id).consumedMinutes
+    let remaining = max(0, sourceEpoch.allowanceMinutes - consumed)
+    guard remaining > 0 else {
+      if !isHomeSuppressed { apply(creditSelection(sourceEpoch), to: creditStore) }
+      return
+    }
+    let name = creditActivityName(sourceEpoch.id, segmentBase: consumed)
+    if center.activities.contains(name) { return }
+    guard center.activities.count < ScreenTimeStorage.maximumMonitors else {
+      throw ruleError(33, "The iOS Screen Time monitor limit has been reached. Remove an unused rule first.")
+    }
+    let now = Date()
+    let end = Date(timeIntervalSince1970: sourceEpoch.endsAt / 1000)
+    let duration = end.timeIntervalSince(now)
+    guard duration >= 15 * 60 else {
+      // There is too little interval left for Apple's minimum monitor window.
+      // Hold only our credit store until the current allowance expires; do not invent usage.
+      if !isHomeSuppressed { apply(creditSelection(sourceEpoch), to: creditStore) }
+      return
+    }
+    // Encode the immutable threshold baseline in this segment's activity name.
+    // A delayed callback from a stopped segment must not inherit a newer base.
+    let epoch = sourceEpoch
+    var startParts = Calendar.current.dateComponents([.calendar, .timeZone, .year, .month, .day, .hour, .minute, .second], from: now)
+    var endParts = Calendar.current.dateComponents([.calendar, .timeZone, .year, .month, .day, .hour, .minute, .second], from: end)
+    startParts.calendar = Calendar.current
+    endParts.calendar = Calendar.current
+    let schedule = DeviceActivitySchedule(intervalStart: startParts, intervalEnd: endParts, repeats: false)
+    let selection = creditSelection(epoch)
+    guard count(selection) > 0 else {
+      throw ruleError(52, "The saved credit app selection is missing. Choose apps and sync the allowance again.")
+    }
+    var events: [DeviceActivityEvent.Name: DeviceActivityEvent] = [:]
+    for minute in 1...min(remaining, 60) {
+      events[DeviceActivityEvent.Name("usage_\(minute)")] = DeviceActivityEvent(
+        applications: selection.applicationTokens,
+        categories: selection.categoryTokens,
+        webDomains: selection.webDomainTokens,
+        threshold: DateComponents(minute: minute),
+        includesPastActivity: false
+      )
+    }
+    try center.startMonitoring(name, during: schedule, events: events)
+    creditStore.clearAllSettings()
+  }
+
+  @MainActor
+  private func stopCreditMonitor(_ id: String) {
+    let names = center.activities.filter {
+      $0.rawValue == ScreenTimeStorage.creditActivityPrefix + id
+        || $0.rawValue.hasPrefix(ScreenTimeStorage.creditActivityPrefix + id + ".")
+    }
+    if !names.isEmpty { center.stopMonitoring(names) }
+  }
+
+  @MainActor
+  private func hasCreditMonitor(_ id: String) -> Bool {
+    center.activities.contains {
+      $0.rawValue == ScreenTimeStorage.creditActivityPrefix + id
+        || $0.rawValue.hasPrefix(ScreenTimeStorage.creditActivityPrefix + id + ".")
+    }
+  }
+
+  @MainActor
+  private func creditActivityName(_ id: String, segmentBase: Int) -> DeviceActivityName {
+    DeviceActivityName(ScreenTimeStorage.creditActivityPrefix + id + "." + String(segmentBase))
+  }
+
+  @MainActor
+  private func creditSelection(_ epoch: CreditEpoch) -> FamilyActivitySelection {
+    guard let selection = try? JSONDecoder().decode(FamilyActivitySelection.self, from: epoch.selectionData) else {
+      return FamilyActivitySelection()
+    }
+    return selection
+  }
+
+  @MainActor
+  private func currentCreditEpoch() -> CreditEpoch? {
+    guard let data = defaults.data(forKey: ScreenTimeStorage.creditCurrentEpoch) else { return nil }
+    return try? JSONDecoder().decode(CreditEpoch.self, from: data)
+  }
+
+  @MainActor
+  private func creditEpochKey(_ id: String) -> String { ScreenTimeStorage.creditEpochPrefix + id }
+
+  @MainActor
+  private func creditLedgerKey(_ id: String) -> String { ScreenTimeStorage.creditLedgerPrefix + id }
+
+  @MainActor
+  private func creditLedger(_ id: String) -> CreditUsageLedger {
+    guard let data = defaults.data(forKey: creditLedgerKey(id)),
+          let ledger = try? JSONDecoder().decode(CreditUsageLedger.self, from: data) else { return CreditUsageLedger() }
+    return ledger
+  }
+
+  @MainActor
+  private func saveCreditEpoch(_ epoch: CreditEpoch) throws {
+    defaults.set(try JSONEncoder().encode(epoch), forKey: creditEpochKey(epoch.id))
+  }
+
+  @MainActor
+  private func pruneCreditEpochs() {
+    let cutoff = Date().timeIntervalSince1970 * 1000 - 90 * 24 * 60 * 60 * 1000
+    for key in defaults.dictionaryRepresentation().keys where key.hasPrefix(ScreenTimeStorage.creditEpochPrefix) {
+      guard let data = defaults.data(forKey: key), let epoch = try? JSONDecoder().decode(CreditEpoch.self, from: data),
+            epoch.endsAt < cutoff else { continue }
+      defaults.removeObject(forKey: key)
+      defaults.removeObject(forKey: creditLedgerKey(epoch.id))
+    }
   }
 
   @MainActor
@@ -663,6 +1058,12 @@ public final class FocusLockScreenTimeModule: Module {
       combined.applicationTokens.formUnion(selection.applicationTokens)
       combined.categoryTokens.formUnion(selection.categoryTokens)
       combined.webDomainTokens.formUnion(selection.webDomainTokens)
+    }
+    if defaults.bool(forKey: ScreenTimeStorage.creditEnabled) {
+      let creditSelection = loadCreditSelection()
+      combined.applicationTokens.formUnion(creditSelection.applicationTokens)
+      combined.categoryTokens.formUnion(creditSelection.categoryTokens)
+      combined.webDomainTokens.formUnion(creditSelection.webDomainTokens)
     }
     return combined
   }
@@ -748,6 +1149,7 @@ public final class FocusLockScreenTimeModule: Module {
       default: store.clearAllSettings()
       }
     }
+    try restoreCreditPolicy()
   }
 
   @MainActor
@@ -892,12 +1294,26 @@ public final class FocusLockScreenTimeModule: Module {
     return FamilyActivitySelection()
   }
 
+  @MainActor private func loadCreditSelection() -> FamilyActivitySelection {
+    guard let data = defaults.data(forKey: ScreenTimeStorage.creditSelection),
+          let selection = try? JSONDecoder().decode(FamilyActivitySelection.self, from: data) else {
+      return FamilyActivitySelection()
+    }
+    return selection
+  }
+
   @MainActor private func saveManualSelection(_ value: FamilyActivitySelection) throws {
     defaults.set(try JSONEncoder().encode(value), forKey: ScreenTimeStorage.selection)
   }
 
   @MainActor private func count(_ value: FamilyActivitySelection) -> Int {
     value.applicationTokens.count + value.categoryTokens.count + value.webDomainTokens.count
+  }
+
+  @MainActor private func selectionsMatch(_ lhs: FamilyActivitySelection, _ rhs: FamilyActivitySelection) -> Bool {
+    lhs.applicationTokens == rhs.applicationTokens
+      && lhs.categoryTokens == rhs.categoryTokens
+      && lhs.webDomainTokens == rhs.webDomainTokens
   }
 
   @MainActor private func apply(_ selection: FamilyActivitySelection, to store: ManagedSettingsStore) {

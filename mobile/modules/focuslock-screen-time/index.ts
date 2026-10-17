@@ -42,6 +42,22 @@ export type NativeRuleInput = Omit<
   'selectionCount' | 'shielding' | 'completedDate' | 'exemptDate'
 >;
 
+export type CreditGateStatus = {
+  enabled: boolean;
+  selectionCount: number;
+  ownerId?: string;
+  allowanceMinutes: number;
+  exhausted: boolean;
+  expiresAt?: number;
+};
+
+export type LeisureUsageDay = {
+  counterId: string;
+  date: string;
+  measuredSeconds: number;
+  updatedAt: number;
+};
+
 export interface FocusLockScreenTimeModule {
   getStatus(): Promise<ScreenTimeStatus>;
   requestAuthorization(): Promise<ScreenTimeStatus>;
@@ -57,6 +73,11 @@ export interface FocusLockScreenTimeModule {
   setHomeOnly(enabled: boolean, atHome: boolean | null): Promise<ScreenTimeStatus>;
   setAccountNuke(ownerId: string, active: boolean): Promise<ScreenTimeStatus>;
   updateTaskProgress(id: string, trackedMinutes: number, checkedOff: boolean, focusMinutesToday: number): Promise<NativeRule[]>;
+  getCreditGate(): Promise<CreditGateStatus>;
+  pickCreditApps(): Promise<CreditGateStatus>;
+  setCreditGateEnabled(enabled: boolean): Promise<CreditGateStatus>;
+  configureCreditAllowance(ownerId: string, minutes: number): Promise<CreditGateStatus>;
+  getLeisureUsage(ownerId: string): Promise<LeisureUsageDay[]>;
 }
 
 const unavailableStatus: ScreenTimeStatus = {
@@ -146,6 +167,33 @@ export function setAccountNuke(ownerId: string, active: boolean): Promise<Screen
   return requireNative().setAccountNuke(ownerId, active);
 }
 
+const unavailableCreditGate: CreditGateStatus = {
+  enabled: false,
+  selectionCount: 0,
+  allowanceMinutes: 0,
+  exhausted: false,
+};
+
+export function getCreditGate(): Promise<CreditGateStatus> {
+  return nativeModule ? nativeModule.getCreditGate() : Promise.resolve(unavailableCreditGate);
+}
+
+export function pickCreditApps(): Promise<CreditGateStatus> {
+  return requireNative().pickCreditApps();
+}
+
+export function setCreditGateEnabled(enabled: boolean): Promise<CreditGateStatus> {
+  return requireNative().setCreditGateEnabled(enabled);
+}
+
+export function configureCreditAllowance(ownerId: string, minutes: number): Promise<CreditGateStatus> {
+  return requireNative().configureCreditAllowance(ownerId, minutes);
+}
+
+export function getLeisureUsage(ownerId: string): Promise<LeisureUsageDay[]> {
+  return requireNative().getLeisureUsage(ownerId);
+}
+
 export function updateTaskProgress(
   id: string,
   trackedMinutes: number,
@@ -169,6 +217,11 @@ export const FocusLockScreenTime = {
   setStrictUntil,
   setHomeOnly,
   setAccountNuke,
+  getCreditGate,
+  pickCreditApps,
+  setCreditGateEnabled,
+  configureCreditAllowance,
+  getLeisureUsage,
   ScreenTimeReport,
   updateTaskProgress,
 };

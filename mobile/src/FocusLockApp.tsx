@@ -367,7 +367,8 @@ function SettingsScreen({ model, actions, onSignOut }: { model: MobileModel; act
         <Text style={styles.sectionTitle}>What this app can control</Text>
         <Text style={styles.body}>FocusLock can apply manual Screen Time shields to apps you select. You can revoke Screen Time authorization in iOS Settings.</Text>
         <Text style={styles.body}>Schedules, daily limits, permanent selections, timed blocks, and daily priority tasks use this iPhone’s Screen Time controls. Apple lets you revoke this access in Settings.</Text>
-        <Text style={styles.body}>Android’s uninstall, Settings, and recents protections have no equivalent here. Account credit is shown separately from iOS usage allowances.</Text>
+        <Text style={styles.body}>Android’s uninstall, Settings, and recents protections have no equivalent here. Choose leisure apps separately to spend account credit through iOS usage allowances.</Text>
+        <ActionButton label="Credit for leisure apps" onPress={actions.openCreditTools} variant="secondary" />
         <ActionButton label="Device controls & reminders" onPress={actions.openDeviceTools} variant="secondary" />
         <ActionButton label="Home location & consent" onPress={actions.openHome} variant="secondary" />
         {model.signedIn ? <>

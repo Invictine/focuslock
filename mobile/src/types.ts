@@ -45,6 +45,7 @@ export type MobileActions = {
   openTickTick: () => void;
   openHome: () => void;
   openManualLog: () => void;
+  openCreditTools: () => void;
   retrySync: () => void;
   signIn: () => void;
   signOut: () => void;
