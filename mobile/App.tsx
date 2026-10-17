@@ -13,7 +13,7 @@ import FocusLockApp from './src/FocusLockApp';
 import DeviceTools from './src/DeviceTools';
 import AccountTools from './src/AccountTools';
 import TickTickTools from './src/TickTickTools';
-import HomeLocationControls from './src/HomeLocationControls';
+import HomeLocationControls, { reconcileHomeBoundary } from './src/HomeLocationControls';
 import ManualWork from './src/ManualWork';
 import CreditTools from './src/CreditTools';
 import { CreditSync, freshCreditState, recordLeisureUsage } from './src/credit';
@@ -49,7 +49,7 @@ function useScreenTime() {
   const [status, setStatus] = useState<ScreenTimeStatus>({ available: false, authorization: 'notDetermined', selectionCount: 0, shielding: false, activeRuleCount: 0, suspended: false, strictUntil: 0, homeOnly: false, atHome: null });
   const [error, setError] = useState<string | null>(null);
   const refresh = useCallback(async () => {
-    try { setStatus(await ScreenTime.getStatus()); }
+    try { setStatus(await reconcileHomeBoundary(await ScreenTime.getStatus())); }
     catch (reason) { setError(errorMessage(reason)); }
   }, []);
   useEffect(() => {

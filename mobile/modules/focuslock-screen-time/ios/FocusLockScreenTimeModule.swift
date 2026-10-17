@@ -320,7 +320,7 @@ public final class FocusLockScreenTimeModule: Module {
   @MainActor
   private func presentManualPickerAsync() async throws -> [String: Any] {
     try requireEditable()
-    guard !isManualShieldingEnabled else { throw ruleError(10, "Stop Screen Time shielding before changing the selected apps or websites.") }
+    guard !defaults.bool(forKey: ScreenTimeStorage.shielding) else { throw ruleError(10, "Stop Screen Time shielding before changing the selected apps or websites.") }
     let saved = loadManualSelection()
     if let selection = try await presentPicker(initialSelection: saved) {
       try saveManualSelection(selection)
@@ -1282,7 +1282,7 @@ public final class FocusLockScreenTimeModule: Module {
   }
 
   private var isSuspended: Bool { defaults.bool(forKey: ScreenTimeStorage.suspended) }
-  private var isAccountNukeActive: Bool { !activeAccountNukeOwners().isEmpty }
+  @MainActor private var isAccountNukeActive: Bool { !activeAccountNukeOwners().isEmpty }
   private var strictUntil: Double { defaults.double(forKey: ScreenTimeStorage.strictUntil) }
   private var isStrictActive: Bool { strictUntil > Date().timeIntervalSince1970 * 1000 }
   private var homeOnly: Bool { defaults.bool(forKey: ScreenTimeStorage.homeOnly) }
@@ -1341,12 +1341,9 @@ public final class FocusLockScreenTimeModule: Module {
   }
 
   private func authorizationName(_ status: AuthorizationStatus) -> String {
-    switch status {
-    case .notDetermined: return "notDetermined"
-    case .denied: return "denied"
-    case .approved: return "approved"
-    @unknown default: return "denied"
-    }
+    if status == .notDetermined { return "notDetermined" }
+    if status == .approved { return "approved" }
+    return "denied"
   }
 
   private func authorizationError(_ status: AuthorizationStatus) -> NSError {

@@ -24,18 +24,45 @@ const ACTIVE_BOUNDARY_KEY = 'focuslock.home-location.boundary-enabled.v1';
 TaskManager.defineTask<{ eventType: Location.GeofencingEventType; region: Location.LocationRegion }>(
   HOME_LOCATION_TASK,
   async ({ data, error }) => {
-    if (error || !data || data.region?.identifier !== HOME_REGION_ID) return;
-    if (await AsyncStorage.getItem(ACTIVE_BOUNDARY_KEY) !== 'true') return;
-    const isEnter = data.eventType === Location.GeofencingEventType.Enter;
-    const isExit = data.eventType === Location.GeofencingEventType.Exit;
-    if (!isEnter && !isExit) return;
-    const status = await ScreenTime.getStatus();
-    if (!status.available || !status.homeOnly) return;
-    // Native policy owns enforcement and keeps permanent rules outside this gate.
-    // A task error never clears or weakens the existing device policy.
-    await ScreenTime.setHomeOnly(true, isEnter);
+    let status: ScreenTimeStatus;
+    try {
+      status = await ScreenTime.getStatus();
+      if (!status.available || !status.homeOnly) return;
+    } catch { return; }
+
+    try {
+      const boundaryActive = await AsyncStorage.getItem(ACTIVE_BOUNDARY_KEY) === 'true';
+      const isEnter = data?.eventType === Location.GeofencingEventType.Enter;
+      const isExit = data?.eventType === Location.GeofencingEventType.Exit;
+      if (error || !data || !boundaryActive || data.region?.identifier !== HOME_REGION_ID || (!isEnter && !isExit)) {
+        // A failed or incomplete callback must never preserve stale outside
+        // state, which would incorrectly open home-gated rules.
+        await ScreenTime.setHomeOnly(true, null);
+        return;
+      }
+      // Native policy owns enforcement and keeps permanent rules outside this gate.
+      await ScreenTime.setHomeOnly(true, isEnter);
+    } catch {
+      // Preserve shielding if storage or callback processing fails.
+      await ScreenTime.setHomeOnly(true, null).catch(() => undefined);
+    }
   },
 );
+
+export async function reconcileHomeBoundary(status: ScreenTimeStatus): Promise<ScreenTimeStatus> {
+  if (!status.available || !status.homeOnly) return status;
+  try {
+    const [permission, registered, boundaryFlag] = await Promise.all([
+      Location.getBackgroundPermissionsAsync(),
+      TaskManager.isTaskRegisteredAsync(HOME_LOCATION_TASK),
+      AsyncStorage.getItem(ACTIVE_BOUNDARY_KEY),
+    ]);
+    if (permission.status === 'granted' && registered && boundaryFlag === 'true') return status;
+  } catch {
+    // Treat failed health checks as unknown presence and retain the shield.
+  }
+  return ScreenTime.setHomeOnly(true, null);
+}
 
 type Props = {
   client?: ConvexReactClient | null;
@@ -77,18 +104,9 @@ export default function HomeLocationControls({ client, ownerId, onChanged, onErr
 
     void (async () => {
       try {
-        const [nativeStatus, boundaryFlag, registered] = await Promise.all([
-          ScreenTime.getStatus(),
-          AsyncStorage.getItem(ACTIVE_BOUNDARY_KEY),
-          TaskManager.isTaskRegisteredAsync(HOME_LOCATION_TASK),
-        ]);
+        const nativeStatus = await ScreenTime.getStatus();
         if (!mounted.current) return;
-        setStatus(nativeStatus);
-        // If app state was interrupted between native activation and region setup,
-        // fail closed at unknown presence instead of leaving stale outside status.
-        if (nativeStatus.available && nativeStatus.homeOnly && (boundaryFlag !== 'true' || !registered)) {
-          setStatus(await ScreenTime.setHomeOnly(true, null));
-        }
+        setStatus(await reconcileHomeBoundary(nativeStatus));
       } catch (error) {
         if (mounted.current) errorRef.current(errorMessage(error));
       }
