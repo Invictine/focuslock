@@ -2,7 +2,7 @@
 
 ## Current status
 
-The iOS client source, backend function references, local Screen Time module, geofence task, and Activity Monitor/Report extension sources are present. Mac CI is in progress; no result is reported here. No physical iPhone/native runtime acceptance has been completed. JavaScript checks and an Expo bundle do not compile the Swift targets or verify behavior on an iPhone. iOS heartbeat wiring is present in source, but backend deployment and a verified device heartbeat are still pending; do not count the phone as an account device until those are verified.
+The React Native/Expo iOS client, backend function references, local Screen Time module, geofence task, and Activity Monitor/Report extensions are implemented. The [Mac CI build](https://github.com/Invictine/focuslock/actions/runs/39049452057) passed for source commit `4877877`, including unsigned Simulator compilation of the app and both extensions. No physical iPhone/native runtime acceptance has been completed. iOS heartbeat wiring is present in source, but backend deployment and a verified device heartbeat are still pending; do not count the phone as an account device until those are verified.
 
 The user has an iPhone but no paid Apple Developer Program membership. Installing the full Screen Time development build requires Apple Developer Program membership and Family Controls capability signing. Apple documents the capability setup [here](https://developer.apple.com/documentation/xcode/configuring-family-controls). Distribution requires Apple's additional approval for the app and each app extension that uses the capability. The local app config also needs the correct `ios.appleTeamId` when a team is available. Basic app work can use a reduced-capability build, but that build disables Screen Time selection, shielding, credit gating, and the report. No iPhone installation has been confirmed.
 
@@ -35,6 +35,13 @@ Account-owned queues and credit counters are separated by owner ID. Signing out 
 - `mobile/.env.example` contains public client configuration placeholders. Put the real `EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY` and `EXPO_PUBLIC_CONVEX_URL` in ignored `mobile/.env`. Never put server credentials or access tokens in the mobile app.
 - Set `EXPO_PUBLIC_SCREEN_TIME_ENABLED=0` for the reduced-capability local development build. The default (`1`) includes Apple Screen Time targets and entitlements and needs the approved full native signing setup.
 - TickTick actions require server-only Convex environment variables and deployment of the new backend functions. OAuth uses the existing loopback redirect flow: copy/paste the complete callback within the signed state's 10-minute validity window.
+
+## Validation evidence
+
+- Mobile TypeScript checks, 52 mobile tests, Expo dependency compatibility, and the iOS Hermes bundle pass.
+- Backend TypeScript checks and 17 relevant tests across the iOS client contracts, device presence, credit counters, TickTick iOS actions, and TickTick connection guards pass. The desktop production build also passes after adding the iOS device platform type.
+- The [Mac native build](https://github.com/Invictine/focuslock/actions/runs/39049452057) passed project generation, Apple dependency installation, and unsigned Simulator compilation of the app and both extensions for source commit `4877877`. This is compilation evidence, not a running Simulator/device acceptance test or a signed iPhone build.
+- Backend deployment, real Clerk/TickTick account flows, signed installation, and physical iPhone enforcement have not been verified.
 
 ## Commands
 
