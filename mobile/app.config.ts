@@ -20,13 +20,14 @@ const config: ExpoConfig = {
     infoPlist: { ITSAppUsesNonExemptEncryption: false, FocusLockScreenTimeEnabled: screenTimeEnabled },
   },
   plugins: [
+    './plugins/with-ios-deployment.cjs',
     // Expo mod callbacks run in reverse registration order. Register this first
     // so restricted entitlements added by SDK plugins are removed last.
     ...(!screenTimeEnabled ? ['./plugins/without-screen-time.cjs'] : []),
     'expo-secure-store',
     '@clerk/expo',
     '@clerk/expo-native-components',
-    ...(screenTimeEnabled ? ['./plugins/with-screen-time.cjs', '@bacons/apple-targets'] : []),
+    ...(screenTimeEnabled ? ['./plugins/with-screen-time.cjs', './plugins/with-apple-targets.cjs'] : []),
     ['expo-notifications', { enableRemoteNotifications: false }],
     'expo-sharing',
     ['expo-location', {

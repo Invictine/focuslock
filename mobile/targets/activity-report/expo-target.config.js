@@ -1,8 +1,7 @@
 /** @type {import('@bacons/apple-targets/app.plugin').Config} */
 module.exports = {
-  // apple-targets does not yet expose a Device Activity Report target type;
-  // the explicit Info.plist below configures Apple's report extension point.
-  type: 'device-activity-monitor',
+  // Registered by plugins/with-apple-targets.cjs until upstream supports it.
+  type: 'device-activity-report',
   bundleIdentifier: '.activity-report',
   name: 'FocusLockActivityReport',
   displayName: 'FocusLock Screen Time Report',

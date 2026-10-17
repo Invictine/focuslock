@@ -11,7 +11,7 @@
     "export:ios": "expo export --platform ios --output-dir dist"
   },
   "dependencies": {
-    "@bacons/apple-targets": "^5.0.0",
+    "@bacons/apple-targets": "5.0.0",
     "@clerk/expo": "^4.13.0",
     "@clerk/expo-native-components": "^0.2.0",
     "@expo/config-plugins": "~58.0.0",
@@ -32,6 +32,7 @@
     "expo-secure-store": "~58.0.2",
     "expo-sharing": "~58.0.19",
     "expo-status-bar": "~58.0.3",
+    "expo-system-ui": "~58.0.6",
     "expo-task-manager": "~58.0.12",
     "expo-web-browser": "~58.0.6",
     "focuslock-screen-time": "file:modules/focuslock-screen-time",

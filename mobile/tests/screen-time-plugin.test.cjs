@@ -74,7 +74,7 @@ test('Device Activity report target declares Apple report extension point and sh
   const config = require(path.join(targetRoot, 'expo-target.config.js'));
   const info = fs.readFileSync(path.join(targetRoot, 'Info.plist'), 'utf8');
   const source = fs.readFileSync(path.join(targetRoot, 'FocusLockDailyReportExtension.swift'), 'utf8');
-  assert.equal(config.type, 'device-activity-monitor');
+  assert.equal(config.type, 'device-activity-report');
   assert.equal(config.bundleIdentifier, '.activity-report');
   assert.equal(config.deploymentTarget, '17.4');
   assert.deepEqual(config.frameworks, ['FamilyControls', 'DeviceActivity', 'SwiftUI']);
