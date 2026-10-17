@@ -1,7 +1,7 @@
 import { api } from "../../convex/_generated/api";
 
 export type TrackingStatus = "active" | "paused" | "permission_required" | "error";
-export type DevicePlatform = "android" | "windows" | "browser";
+export type DevicePlatform = "android" | "windows" | "browser" | "ios";
 
 export type DeviceHeartbeat = {
   deviceId: string;

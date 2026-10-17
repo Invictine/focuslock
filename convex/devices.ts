@@ -9,7 +9,7 @@ async function requireUserId(ctx: any): Promise<string> {
 
 export const heartbeatFields = {
     name: v.string(),
-    platform: v.union(v.literal("android"), v.literal("windows"), v.literal("browser")),
+    platform: v.union(v.literal("android"), v.literal("windows"), v.literal("browser"), v.literal("ios")),
     appVersion: v.string(),
     trackingStatus: v.union(
       v.literal("active"),
@@ -23,7 +23,7 @@ export const heartbeatFields = {
 
 /** Shared transaction helper: uploads can carry presence without a second call. */
 export async function upsertHeartbeat(ctx: any, userId: string, args: {
-  deviceId: string; name: string; platform: "android" | "windows" | "browser";
+  deviceId: string; name: string; platform: "android" | "windows" | "browser" | "ios";
   appVersion: string; trackingStatus: "active" | "paused" | "permission_required" | "error";
   statusDetail?: string; lastSeen: number;
 }) {
@@ -41,6 +41,7 @@ export async function upsertHeartbeat(ctx: any, userId: string, args: {
       name: args.name.trim().slice(0, 120) || (
         args.platform === "windows" ? "Windows PC" :
         args.platform === "browser" ? "Chrome extension" :
+        args.platform === "ios" ? "iPhone" :
         "Android phone"
       ),
       appVersion: args.appVersion.trim().slice(0, 40) || "unknown",
@@ -66,7 +67,7 @@ export async function upsertHeartbeat(ctx: any, userId: string, args: {
 
 /** Legacy device rows remain a fallback until an account's next heartbeat. */
 export async function loadDeviceProfiles(ctx: any, userId: string): Promise<{
-  deviceId: string; name: string; platform: "android" | "windows" | "browser";
+  deviceId: string; name: string; platform: "android" | "windows" | "browser" | "ios";
 }[]> {
   const profiles = await ctx.db.query("deviceProfiles")
     .withIndex("by_user_device", (q: any) => q.eq("userId", userId)).collect();

@@ -1,0 +1,11 @@
+{
+  "name": "focuslock-screen-time",
+  "version": "1.0.0",
+  "private": true,
+  "main": "index.ts",
+  "types": "index.ts",
+  "peerDependencies": {
+    "expo-modules-core": "*"
+  },
+  "files": ["index.ts", "ios", "expo-module.config.json", "FocusLockScreenTime.podspec"]
+}

@@ -1,0 +1,33 @@
+name: iOS port
+on:
+  push:
+    paths: ['mobile/**', 'design/theme.json', '.github/workflows/ios.yml']
+  pull_request:
+    paths: ['mobile/**', 'design/theme.json', '.github/workflows/ios.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  ios:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npx expo install --check
+      - run: npm run export:ios
+      - run: npx expo prebuild --platform ios --no-install
+      - name: Install Apple dependencies
+        run: pod install --project-directory=ios
+      - name: Compile app and Screen Time extension without signing
+        run: xcodebuild -workspace ios/FocusLock.xcworkspace -scheme FocusLock -configuration Debug -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath build/ios CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=YES -quiet

@@ -1,0 +1,14 @@
+node_modules/
+.expo/
+dist/
+/ios/
+/android/
+.env
+.env.*
+!.env.example
+*.p8
+*.p12
+*.mobileprovision
+*.ipa
+*.xcarchive
+*.tsbuildinfo

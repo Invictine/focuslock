@@ -1,0 +1,50 @@
+{
+  "name": "focuslock-ios",
+  "version": "0.7.0",
+  "private": true,
+  "main": "index.ts",
+  "scripts": {
+    "start": "expo start --dev-client",
+    "ios": "expo run:ios",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts tests/*.test.cjs",
+    "export:ios": "expo export --platform ios --output-dir dist"
+  },
+  "dependencies": {
+    "@bacons/apple-targets": "^5.0.0",
+    "@clerk/expo": "^4.13.0",
+    "@clerk/expo-native-components": "^0.2.0",
+    "@expo/config-plugins": "~58.0.0",
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "convex": "^1.45.0",
+    "expo": "~58.0.14",
+    "expo-asset": "~58.0.16",
+    "expo-auth-session": "~58.0.13",
+    "expo-battery": "~58.0.3",
+    "expo-constants": "~58.0.12",
+    "expo-crypto": "~58.0.7",
+    "expo-dev-client": "~58.0.14",
+    "expo-file-system": "~58.0.9",
+    "expo-font": "~58.0.8",
+    "expo-location": "~58.0.17",
+    "expo-modules-core": "~58.0.22",
+    "expo-notifications": "~58.1.5",
+    "expo-secure-store": "~58.0.2",
+    "expo-sharing": "~58.0.19",
+    "expo-status-bar": "~58.0.3",
+    "expo-task-manager": "~58.0.12",
+    "expo-web-browser": "~58.0.6",
+    "focuslock-screen-time": "file:modules/focuslock-screen-time",
+    "jwt-decode": "^4.0.0",
+    "react": "19.3.0",
+    "react-dom": "^19.3.0",
+    "react-native": "0.88.0",
+    "react-native-safe-area-context": "~5.10.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/react": "~19.3.0",
+    "tsx": "^4.21.0",
+    "typescript": "~6.0.3"
+  }
+}

@@ -166,7 +166,7 @@ export default defineSchema({
     userId: v.string(),
     deviceId: v.string(),
     name: v.string(),
-    platform: v.union(v.literal("android"), v.literal("windows"), v.literal("browser")),
+    platform: v.union(v.literal("android"), v.literal("windows"), v.literal("browser"), v.literal("ios")),
     appVersion: v.string(),
     trackingStatus: v.union(
       v.literal("active"),
@@ -185,7 +185,7 @@ export default defineSchema({
   // expensive usage-summary and target-catalog subscriptions.
   deviceProfiles: defineTable({
     userId: v.string(), deviceId: v.string(), name: v.string(),
-    platform: v.union(v.literal("android"), v.literal("windows"), v.literal("browser")),
+    platform: v.union(v.literal("android"), v.literal("windows"), v.literal("browser"), v.literal("ios")),
   }).index("by_user_device", ["userId", "deviceId"]),
 
   // Absolute per-device counters make retries idempotent. Multiple devices

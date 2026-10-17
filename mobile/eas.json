@@ -1,0 +1,22 @@
+{
+  "cli": { "version": ">= 18.0.0", "appVersionSource": "local" },
+  "build": {
+    "basic-development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "env": { "EXPO_PUBLIC_SCREEN_TIME_ENABLED": "0" }
+    },
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "ios": { "simulator": false }
+    },
+    "simulator": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "ios": { "simulator": true }
+    },
+    "preview": { "distribution": "internal" },
+    "production": { "autoIncrement": true }
+  }
+}
