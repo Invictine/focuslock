@@ -274,7 +274,9 @@ public final class FocusLockScreenTimeModule: Module {
       && authorization == .approved
       && hasAppliedPolicy(manualStore)
     let activeCount = authorization == .approved && !isSuspended
-      ? loadRules().filter { isRuleActive($0) }.count + (hasAppliedPolicy(creditStore) ? 1 : 0) : 0
+      ? loadRules().filter { isRuleActive($0) }.count
+        + (hasAppliedPolicy(creditStore) ? 1 : 0)
+        + (hasAppliedPolicy(accountNukeStore) ? 1 : 0) : 0
     return ScreenTimeStatusValue(
       authorization: authorizationName(authorization),
       selectionCount: count(loadManualSelection()),

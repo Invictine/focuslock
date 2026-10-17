@@ -166,6 +166,7 @@ function FocusScreen(props: {
             <ActionButton label="Sign in" onPress={actions.signIn} disabled={disabled} />
           </View>
         )}
+        {model.signedIn ? <ActionButton label="Use credit for leisure apps" onPress={actions.openCreditTools} variant="secondary" /> : null}
         {session ? (
           <View style={styles.section}>
             <Text style={styles.eyebrow}>CURRENT SESSION</Text>
