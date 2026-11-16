@@ -1,5 +1,26 @@
 # Void
 
+A quiet Windows focus launcher for getting into one block of work. Keep a small control on your desktop, start a timer with your chosen app, and return to the desktop when the block is done.
+
+## First use
+
+1. Download and run the latest [Void installer](https://github.com/Invictine/Void/releases/latest) on Windows x64. It installs for your account and does not require administrator access.
+2. Open Void and choose **Settings & apps** to check or change the work apps and launch targets.
+3. Choose an app, set a focus duration, and start a block. The timer begins after the app opens successfully.
+4. Use **Ctrl+Alt+Space** or **Alt+Tab** to return to the session screen. When you're finished, use **Back to desktop**; **Ctrl+Alt+Shift+F12** is the emergency exit.
+
+The installer is self-contained and includes the .NET runtime. Your settings and focus history stay on this PC and are kept when you uninstall. Void does not need a FocusLock account.
+
+## What you can do
+
+- Start timed focus blocks and breaks from a persistent desktop launcher.
+- Save up to five recently used app-and-duration presets.
+- Optionally ask other apps to close normally, with no forced termination.
+- Review and export recent focus history.
+- Choose whether focus uses only the primary monitor, with recovery helpers for taskbars and display layout.
+
+The controls, setup steps, recovery behavior, and current limits are described below.
+
 Void is a minimal Windows focus launcher. It starts as a small persistent control on your desktop; choose when to open the homepage or begin a focus block.
 
 ## Install
