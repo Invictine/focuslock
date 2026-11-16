@@ -1,6 +1,6 @@
 # FocusLock
 
-FocusLock helps you protect time for work and make room for leisure afterward. Set app and website boundaries, track focused work across Android and desktop, and connect completed focus to your daily leisure time.
+I wanted focus tools to account for what happens after the timer, too. FocusLock combines app and website boundaries with work tracking and earned leisure time, then carries the experience across Android, Windows, and Chrome with account sync. It’s still a personal development build; try the Android flow, fork the ideas that fit, and tell me where the boundaries or balance need work.
 
 ## Preview
 
