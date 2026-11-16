@@ -125,3 +125,7 @@ The palette lives in [`design/theme.json`](design/theme.json). Run `npm run them
 19 unit tests cover credit math, parsing, domains, OAuth request headers/encoding, and state validation. A phone is needed to verify browser consent, callback delivery, persisted login, and rendered layouts at normal and enlarged font sizes. No device or emulator was available during this update. The registered TickTick redirect has not been independently verified.
 
 Persistent project context: https://github.com/Invictine/life-tracker/tree/main/software/focuslock
+
+<video src="https://raw.githubusercontent.com/Invictine/focuslock/master/demo/focuslock-android-demo.mp4" controls width="100%" aria-label="FocusLock Android demo"></video>
+
+The clip is a demo recording from this repository. Platform and account setup remain subject to the configuration described below.
