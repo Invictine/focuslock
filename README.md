@@ -1,5 +1,42 @@
 # FocusLock
 
+FocusLock helps you protect time for work and make room for leisure afterward. Set app and website boundaries, track focused work across Android and desktop, and connect completed focus to your daily leisure time.
+
+## Preview
+
+The screens below show the Focus home and Boundaries list. They use example app state and contain no account names or personal task data.
+
+<p align="center">
+  <img src="demo/shots/2_focus.png" alt="Focus home showing setup steps, a timer, and work tracking" width="320">
+  <img src="demo/shots/3_boundaries.png" alt="Boundaries screen with example blocked apps and website categories" width="320">
+</p>
+
+The Focus screen shows a sample first-run setup state. The Boundaries screen shows example blocked apps; you can choose apps and websites for your own setup.
+
+## Install and first use
+
+FocusLock is currently distributed as a personal development build. To build the Android app, use JDK 17 and Android SDK API 36:
+
+```powershell
+.\gradlew.bat testDebugUnitTest assembleDebug lintDebug
+```
+
+Install `app/build/outputs/apk/debug/app-debug.apk` on your Android device. On first launch:
+
+1. Grant the requested accessibility, usage access, notification, and screen-time permissions so focus boundaries and tracking can work.
+2. Open **Boundaries** and choose the apps and websites you want to pause during work.
+3. Start with **Focus timer** or log work manually. Connect TickTick in **Settings** if you want focus time imported from TickTick.
+4. Sign in on Android and desktop with the same Clerk account if you want account sync. See [SYNC_SETUP.md](SYNC_SETUP.md); offline use is available when sign-in is not configured.
+
+The Windows desktop and Chrome extension have separate setup instructions in [desktop/](desktop/README.md) and [extension/](extension/README.md). Cross-device syncing needs the Clerk and Convex configuration described below.
+
+## What it does
+
+- Protects focus by blocking selected apps and websites.
+- Tracks focused work and connects it to breathing room for leisure.
+- Syncs credit balance, boundaries, and work history across signed-in devices.
+- Includes a Windows Frog launcher for choosing the current task and approved tools.
+
 Native Android focus and leisure-time app built with Kotlin, Jetpack Compose, and Material 3.
 
 ## Release versions
