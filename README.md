@@ -1,51 +1,135 @@
 # FocusLock
 
-> **Earned leisure instead of brute-force guilt trips.** Cross-platform boundary enforcement across Android, Windows, and Chrome that turns deep work into unlocked recreation.
+Modern focus tools often fail by being either too permissive or too rigid to sustain. FocusLock establishes structured session boundaries across Android, desktop, and browser environments with strict timer enforcement and intentional unwind buffers. Built with Kotlin for native Android performance and Node.js for cross-platform desktop coordination. Explore the codebase, test the alpha releases, or fork the project to tailor focus rules for your routine.
 
-[![FocusLock Demo](assets/focuslock-focus.png)](demo/focuslock-android-demo.mp4)
+[![FocusLock](media/overview.png)](media/walkthrough.mp4)
+*Click preview above to watch recorded interface demo.*
 
-*Click the preview card above to watch the Android demo video.*
 
----
+## Preview
 
-## Why I Built This
+The screens below show the Focus home and Boundaries list. They use example app state and contain no account names or personal task data.
 
-Most app blockers treat you like a toddler. You set an arbitrary block schedule, get frustrated the first time you legitimately need to look something up, override the timer with a master PIN, and abandon the tool by Wednesday.
+<p align="center">
+  <img src="demo/shots/2_focus.png" alt="Focus home showing setup steps, a timer, and work tracking" width="320">
+  <img src="demo/shots/3_boundaries.png" alt="Boundaries screen with example blocked apps and website categories" width="320">
+</p>
 
-FocusLock replaces punitive blocking with an **earned leisure economy**. You lock in productive focus intervals (deep coding, writing, research), and the system credits you with guilt-free recreational minutes that you can spend however you choose. When your leisure pool hits zero, boundaries snap shut across your devices.
+The Focus screen shows a sample first-run setup state. The Boundaries screen shows example blocked apps; you can choose apps and websites for your own setup.
 
-## Standout Features
+## Install and first use
 
-- **Multi-Device Barrier:** Unified policy enforcement across Android (native accessibility overlay), Windows desktop, and Chrome browser extensions.
-- **Earned Leisure Economy:** Focus minutes convert dynamically into leisure credits based on configurable difficulty ratios.
-- **Tamper-Resistant Guard:** Multi-window protection and protected background services prevent accidental or impulsive uninstalls during active focus sprints.
-- **Zero Cloud Leakage:** All usage telemetry and focus timers operate locally with encrypted state sync across paired local devices.
+FocusLock is currently distributed as a personal development build. To build the Android app, use JDK 17 and Android SDK API 36:
 
-## Visual Walkthrough & Demo
-
-| Interface Overview | Android Native Demo |
-| :--- | :--- |
-| ![Interface](assets/focuslock-focus.png) | ![Boundary Overlay](assets/focuslock-boundaries.png) |
-
-Watch the recorded Android interaction: **[demo/focuslock-android-demo.mp4](demo/focuslock-android-demo.mp4)**.
-
-## Setup & Building
-
-### Android Application
-```bash
-# Build Android debug APK
-./gradlew assembleDebug
-adb install -r app/build/outputs/apk/debug/app-debug.apk
+```powershell
+.\gradlew.bat testDebugUnitTest assembleDebug lintDebug
 ```
 
-### Chrome Extension
-1. Open `chrome://extensions/`
-2. Enable **Developer mode**
-3. Click **Load unpacked** and select the `extension/` directory.
+Install `app/build/outputs/apk/debug/app-debug.apk` on your Android device. On first launch:
 
-### Windows Agent
-```bash
-cd desktop
-dotnet build -c Release
-dotnet run --project FocusLock.Desktop
+1. Grant the requested accessibility, usage access, notification, and screen-time permissions so focus boundaries and tracking can work.
+2. Open **Boundaries** and choose the apps and websites you want to pause during work.
+3. Start with **Focus timer** or log work manually. Connect TickTick in **Settings** if you want focus time imported from TickTick.
+4. Sign in on Android and desktop with the same Clerk account if you want account sync. See [SYNC_SETUP.md](SYNC_SETUP.md); offline use is available when sign-in is not configured.
+
+The Windows desktop and Chrome extension have separate setup instructions in [desktop/](desktop/README.md) and [extension/](extension/README.md). Cross-device syncing needs the Clerk and Convex configuration described below.
+
+## What it does
+
+- Protects focus by blocking selected apps and websites.
+- Tracks focused work and connects it to breathing room for leisure.
+- Syncs credit balance, boundaries, and work history across signed-in devices.
+- Includes a Windows Frog launcher for choosing the current task and approved tools.
+
+Native Android focus and leisure-time app built with Kotlin, Jetpack Compose, and Material 3.
+
+## Release versions
+
+FocusLock currently uses **0.7.0**, following `major.feature.fix`:
+
+- Increase the first number only for an incredibly major release explicitly requested by the user. Do not automatically promote FocusLock to 1.0.
+- Increase the second number for feature additions and reset the third number to zero: `0.7.0` → `0.8.0`.
+- Increase the third number for fixes: `0.7.0` → `0.7.1`.
+- For a release containing features and fixes, use the feature increment. Bump once per coherent release, not per edit or build.
+
+Keep the release version aligned in the root, Chrome, and desktop package manifests and their root lockfile entries; Chrome's manifest; Android's `versionName`; desktop's Tauri configuration, Cargo package/lock entry, and sync heartbeat `appVersion`. Android's `versionCode` is a separate increasing build counter. This policy concerns FocusLock release metadata; standalone Void keeps its own release version.
+
+Chrome development builds use the release number directly in `manifest.json`. If a distributed extension already has a higher update version, preserve an increasing Chrome `version` and use `version_name` for the visible FocusLock release number, as described in [Chrome's version documentation](https://developer.chrome.com/docs/extensions/reference/manifest/version). After rebuilding a development extension, reload it in `chrome://extensions` to show the new version.
+
+## Build
+
+Use JDK 17 and an Android SDK with API 36. Run:
+
+```powershell
+.\gradlew.bat testDebugUnitTest assembleDebug lintDebug
 ```
+
+APK: `app/build/outputs/apk/debug/app-debug.apk`.
+
+## Remote Android updates
+
+Automatic distribution can be enabled for each local Git commit with
+`npm run android:distribute:auto:install`. The post-commit hook queues an isolated
+build of the committed source and uploads it in the background after tests and
+lint pass. Builds run one at a time; commits return without waiting for uploads.
+
+Run `npm run android:distribute` to check, build, and privately send a new APK
+through Firebase App Distribution. On your phone, accept the tester invitation
+and install updates through Firebase App Tester; no ADB connection is needed.
+See [Android distribution setup](docs/ANDROID_DISTRIBUTION.md) for the one-time
+sign-in and project configuration. `npm run android:distribute:check` validates
+local prerequisites without uploading. These builds keep the development signing
+key and receive a separate increasing Android build counter.
+
+## Auth + auto-sync (Clerk + Convex)
+
+Sign in with the same Clerk account on phone + desktop and everything syncs:
+credit balance, block lists, work history. See **[SYNC_SETUP.md](SYNC_SETUP.md)**
+(5–10 min: Clerk keys → `convex` JWT template → `npx convex dev`).
+
+- Android: `clerk.publishableKey` + `convex.url` in gitignored `local.properties`
+  (or `CLERK_PUBLISHABLE_KEY` / `CONVEX_URL` env). Empty = offline mode.
+  Sign in → **Account** tab → Sync now; auto-sync runs every ~30s while signed in.
+- Desktop: [`desktop/`](desktop/README.md) (Tauri + React). `cp .env.example .env`,
+  `npm install`, `npm run dev` (web, no Rust) or `npm run tauri:dev` (native).
+- Chrome: [`extension/`](extension/README.md). Its popup tracks the active
+  website, shows Android/extension connection health, and uploads account-scoped
+  absolute usage buckets to the same Convex deployment.
+- Backend: [`convex/`](convex/schema.ts) — `focusState`, `blockedApps`,
+  `blockedWebsites`, `workRecords`, all scoped by Clerk user. Scripted setup:
+  `powershell -ExecutionPolicy Bypass -File scripts/setup-clerk-convex.ps1`
+  (needs `$env:CLERK_SECRET_KEY`).
+
+## TickTick connection
+
+Set `ticktick.clientId` and `ticktick.clientSecret` in the ignored `local.properties`, alongside `sdk.dir`. In your TickTick developer app (https://developer.ticktick.com/manage), set the OAuth redirect URL to exactly `http://127.0.0.1:8080/` — TickTick only accepts http(s) URLs and rejects custom schemes such as `focuslock://` with "Please enter right url" / "at least one redirect_url must be registered".
+
+In FocusLock, open Settings and choose **Connect with TickTick**. Approve in the browser; it will land on `http://127.0.0.1:8080/?code=…` which can't load on the phone. Copy that full address, return to FocusLock, and paste it into **Pasted redirect address or code** → **Complete connection**. If the system routes the loopback URL back to the app automatically, the callback is handled without pasting.
+
+The authorization-code exchange uses HTTP Basic authentication. Each login has a persistent, one-use state with a ten-minute lifetime; unmatched and expired callbacks are rejected. A complete advanced credential pair takes precedence over build configuration. Token responses and credentials are not logged by the exchange.
+
+TickTick connections now belong to your signed-in FocusLock account. After connecting, keep FocusLock online until Account sync succeeds; subsequent sign-ins on an updated Android installation restore the saved access token, refresh token, expiry and account name automatically. Existing device connections are uploaded on the first account sync. Sign-out preserves the link, account switches restore only that account's link, and **Disconnect TickTick** removes it from the account on the next successful sync. Offline devices cannot restore an older link over a newer refresh or disconnect. Provider revocation or an expired token without a usable refresh token still requires reconnecting.
+
+TickTick credentials use a dedicated authenticated backend endpoint and are omitted from shared dashboard and policy snapshots. Advanced OAuth client overrides remain on the device; another installation needs compatible build credentials to refresh an OAuth token. The TickTick integration currently runs on Android.
+
+This is a personal build: BuildConfig credentials are embedded in the APK and can be extracted. A public distribution needs a server-side token exchange. Do not publish this configured APK or local.properties.
+
+Official reference: https://developer.ticktick.com/docs/openapi.md
+
+Focus time is imported from completed Pomodoro and stopwatch records through TickTick's official `/open/v1/focus` endpoint. FocusLock syncs on app resume, every minute while the app is visible, on pull-to-refresh, and through **Settings → Sync focus now**. Only sessions ending today count toward today's focus time; repeated syncs do not award credit twice. Completed tasks and notification text do not earn focus credit. The importer accepts the documented seconds format and the milliseconds format observed in live stopwatch responses, validates the duration against the session timestamps, and floors it to whole minutes.
+
+## UI
+
+Android is the reference for Focus, Boundaries, Settings, and Account across the Android app, Windows app, Chrome popup, and Chrome dashboard. All four use a fixed charcoal theme with a muted rose accent, native sans-serif typography, and matching control states. The palette stays dark regardless of OS appearance or Android wallpaper. Wide windows use a compact sidebar; compact screens adapt the navigation.
+
+The palette lives in [`design/theme.json`](design/theme.json). Run `npm run theme:generate` after editing it and `npm run theme:check` to verify the generated CSS and Android colors, including text contrast. Desktop and extension builds run the consistency check automatically. See [`design/README.md`](design/README.md) for the visual system.
+
+## Verification (2026-09-05)
+
+19 unit tests cover credit math, parsing, domains, OAuth request headers/encoding, and state validation. A phone is needed to verify browser consent, callback delivery, persisted login, and rendered layouts at normal and enlarged font sizes. No device or emulator was available during this update. The registered TickTick redirect has not been independently verified.
+
+Persistent project context: https://github.com/Invictine/life-tracker/tree/main/software/focuslock
+
+<video src="https://raw.githubusercontent.com/Invictine/focuslock/master/demo/focuslock-android-demo.mp4" controls width="100%" aria-label="FocusLock Android demo"></video>
+
+The clip is a demo recording from this repository. Platform and account setup remain subject to the configuration described below.
