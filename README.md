@@ -1,6 +1,6 @@
 # FocusLock
 
-Modern focus tools often fail by being either too permissive or too rigid to sustain. FocusLock establishes structured session boundaries across Android, desktop, and browser environments with strict timer enforcement and intentional unwind buffers. Built with Kotlin for native Android performance and Node.js for cross-platform desktop coordination. Explore the codebase, test the alpha releases, or fork the project to tailor focus rules for your routine.
+I wanted focus tools to account for what happens after the timer, too. FocusLock combines app and website boundaries with work tracking and earned leisure time, then carries the experience across Android, Windows, and Chrome with account sync. It’s still a personal development build; try the Android flow, fork the ideas that fit, and tell me where the boundaries or balance need work.
 
 [![FocusLock](media/overview.png)](media/walkthrough.mp4)
 *Click preview above to watch recorded interface demo.*
